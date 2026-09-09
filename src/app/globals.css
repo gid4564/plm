@@ -1,0 +1,197 @@
+@import "tailwindcss";
+
+/* --------------------------------------------------------------------------
+   Design tokens. Light is the base; dark overrides only the values.
+   -------------------------------------------------------------------------- */
+:root {
+  --bg: #f6f7f9;
+  --surface: #ffffff;
+  --surface-2: #f0f2f5;
+  --border: #dde1e7;
+  --border-strong: #c3cad3;
+  --text: #14181d;
+  --text-muted: #5c6773;
+  --text-faint: #8b95a1;
+  --accent: #1f6feb;
+  --accent-hover: #1a5fd0;
+  --accent-soft: #e7f0fe;
+  --ok: #1a7f47;
+  --ok-soft: #e3f5ea;
+  --warn: #9a6300;
+  --warn-soft: #fdf2dc;
+  --danger: #b3261e;
+  --danger-soft: #fbe9e8;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0d1117;
+    --surface: #161b22;
+    --surface-2: #1c232c;
+    --border: #2a323d;
+    --border-strong: #3a4450;
+    --text: #e6edf3;
+    --text-muted: #9aa7b4;
+    --text-faint: #6e7c8a;
+    --accent: #4d8bf5;
+    --accent-hover: #6b9ff7;
+    --accent-soft: #16243d;
+    --ok: #4ac07d;
+    --ok-soft: #122c1e;
+    --warn: #d9a441;
+    --warn-soft: #2e2413;
+    --danger: #f0736a;
+    --danger-soft: #2f1817;
+  }
+}
+
+* { box-sizing: border-box; }
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  margin: 0;
+}
+
+/* --------------------------------------------------------------------------
+   Component classes
+   -------------------------------------------------------------------------- */
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+.btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  padding: 7px 14px; border-radius: 7px; font-size: 13px; font-weight: 550;
+  border: 1px solid var(--border-strong); background: var(--surface);
+  color: var(--text); cursor: pointer; transition: background .12s, border-color .12s, opacity .12s;
+  white-space: nowrap; line-height: 1.3;
+}
+.btn:hover:not(:disabled) { background: var(--surface-2); }
+.btn:disabled { opacity: .5; cursor: not-allowed; }
+
+.btn-primary {
+  background: var(--accent); border-color: var(--accent); color: #fff;
+}
+.btn-primary:hover:not(:disabled) { background: var(--accent-hover); border-color: var(--accent-hover); }
+
+.btn-danger { color: var(--danger); border-color: var(--danger); background: transparent; }
+.btn-danger:hover:not(:disabled) { background: var(--danger-soft); }
+
+.btn-sm { padding: 4px 9px; font-size: 12px; border-radius: 6px; }
+
+.input, .select, .textarea {
+  width: 100%; padding: 7px 10px; border-radius: 7px;
+  border: 1px solid var(--border-strong); background: var(--surface);
+  color: var(--text); font-size: 13px; font-family: inherit; line-height: 1.4;
+}
+.input:focus, .select:focus, .textarea:focus {
+  outline: 2px solid var(--accent); outline-offset: -1px; border-color: var(--accent);
+}
+.textarea { resize: vertical; min-height: 68px; }
+
+.label {
+  display: block; font-size: 11px; font-weight: 600; text-transform: uppercase;
+  letter-spacing: .05em; color: var(--text-faint); margin-bottom: 5px;
+}
+
+.badge {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 600;
+  border: 1px solid transparent; white-space: nowrap;
+}
+
+.mono { font-family: var(--mono); font-size: 12px; }
+
+.table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.table th {
+  text-align: left; padding: 9px 12px; font-size: 11px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: .05em; color: var(--text-faint);
+  border-bottom: 1px solid var(--border); background: var(--surface-2);
+  position: sticky; top: 0; z-index: 1;
+}
+.table td { padding: 10px 12px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+.table tbody tr:hover { background: var(--surface-2); }
+.table tbody tr:last-child td { border-bottom: none; }
+
+.link { color: var(--accent); text-decoration: none; }
+.link:hover { text-decoration: underline; }
+
+.spin { animation: spin 0.7s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* --------------------------------------------------------------------------
+   Rendered manual (docs/MANUAL.md)
+   -------------------------------------------------------------------------- */
+.manual { color: var(--text); font-size: 14.5px; line-height: 1.65; }
+
+.manual h1 {
+  font-size: 26px; letter-spacing: -.02em; margin: 0 0 6px;
+  padding-bottom: 12px; border-bottom: 1px solid var(--border);
+}
+.manual h2 {
+  font-size: 19px; letter-spacing: -.01em; margin: 40px 0 12px;
+  padding-bottom: 8px; border-bottom: 1px solid var(--border);
+}
+.manual h3 { font-size: 15.5px; margin: 28px 0 8px; }
+.manual h4 { font-size: 14px; margin: 22px 0 6px; color: var(--text-muted); }
+
+.manual p { margin: 0 0 13px; }
+/* Tailwind's reset strips list markers; the manual needs them back. */
+.manual ul, .manual ol { margin: 0 0 14px; padding-left: 24px; }
+.manual ul { list-style: disc; }
+.manual ol { list-style: decimal; }
+.manual li { margin-bottom: 5px; display: list-item; }
+.manual li::marker { color: var(--text-faint); }
+.manual ol > li::marker { color: var(--accent); font-weight: 600; }
+
+.manual a { color: var(--accent); }
+
+.manual code {
+  font-family: var(--mono); font-size: .87em;
+  background: var(--surface-2); border: 1px solid var(--border);
+  border-radius: 4px; padding: 1px 5px; color: var(--accent);
+}
+.manual pre {
+  background: var(--surface-2); border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: 7px; padding: 12px 14px; overflow-x: auto; margin: 0 0 16px;
+}
+.manual pre code {
+  background: none; border: none; padding: 0; color: var(--text);
+  font-size: 12.5px; line-height: 1.6;
+}
+
+/* Callouts are authored as blockquotes. */
+.manual blockquote {
+  margin: 0 0 16px; padding: 11px 14px;
+  background: var(--warn-soft); border-left: 3px solid var(--warn);
+  border-radius: 0 7px 7px 0; color: var(--text);
+}
+.manual blockquote p:last-child { margin-bottom: 0; }
+.manual blockquote code { background: rgba(0,0,0,.06); border-color: transparent; }
+
+/* Wide tables scroll inside their own box rather than the page. */
+.manual table {
+  width: 100%; border-collapse: collapse; margin: 0 0 18px; font-size: 13.5px;
+  display: block; overflow-x: auto;
+}
+.manual th {
+  text-align: left; padding: 8px 11px; background: var(--surface-2);
+  border-bottom: 1px solid var(--border-strong); font-weight: 650;
+  font-size: 11.5px; text-transform: uppercase; letter-spacing: .04em;
+  color: var(--text-faint); white-space: nowrap;
+}
+.manual td {
+  padding: 8px 11px; border-bottom: 1px solid var(--border); vertical-align: top;
+}
+.manual tr:last-child td { border-bottom: none; }
+
+.manual hr {
+  border: none; border-top: 1px solid var(--border); margin: 34px 0;
+}

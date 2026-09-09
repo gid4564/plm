@@ -1,0 +1,18 @@
+node_modules
+.next
+.env
+.env.local
+*.tsbuildinfo
+next-env.d.ts
+.localdb
+.pm2
+dist
+
+# macOS
+.DS_Store
+
+# Local tooling preferences
+.claude/settings.local.json
+
+# Scratch
+/tmp

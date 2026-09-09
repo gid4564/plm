@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="t d">
+  <title id="t">MOS</title>
+  <desc id="d">Manufacturing Order System — a hex fastener carrying an M</desc>
+
+  <defs>
+    <linearGradient id="badge" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#4d8bf5"/>
+      <stop offset="1" stop-color="#1f6feb"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Hex fastener profile. Stroked with the same paint and a round join so the
+       corners soften without hand-authoring six arcs. -->
+  <polygon
+    points="32,6 54.5,19 54.5,45 32,58 9.5,45 9.5,19"
+    fill="url(#badge)" stroke="url(#badge)" stroke-width="7" stroke-linejoin="round"/>
+
+  <!-- M drawn as a stroke, not a filled glyph: no font dependency, and the weight
+       stays even when scaled down to a 16px favicon. Kept white in both themes —
+       a dark knockout tested muddier against the blue at small sizes. -->
+  <path d="M21 43 V25 L32 36 L43 25 V43"
+        fill="none" stroke="#fff" stroke-width="6"
+        stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

@@ -1,0 +1,45 @@
+{
+  "name": "plm",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev -p 3001",
+    "build": "next build",
+    "start": "next start -p 3001",
+    "lint": "next lint",
+    "typecheck": "tsc --noEmit",
+    "db:start": "./scripts/db.sh start",
+    "db:stop": "./scripts/db.sh stop",
+    "db:status": "./scripts/db.sh status",
+    "db:logs": "./scripts/db.sh logs",
+    "test:release": "npx --yes tsx scripts/test-release-flow.ts",
+    "test": "npm run test:bom && npm run test:enum && npm run test:coords && npm run test:export && npm run test:mass && npm run test:numbering && npm run test:pagination && npm run test:release",
+    "test:bom": "npx --yes tsx scripts/test-bom-parser.ts",
+    "test:enum": "npx --yes tsx scripts/test-enum-labels.ts",
+    "test:coords": "npx --yes tsx scripts/test-sync-coords.ts",
+    "test:export": "npx --yes tsx scripts/test-export-formats.ts",
+    "test:mass": "npx --yes tsx scripts/test-mass-properties.ts",
+    "test:numbering": "npx --yes tsx scripts/test-numbering.ts",
+    "test:pagination": "npx --yes tsx scripts/test-pagination.ts"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "jose": "^5.9.6",
+    "marked": "^18.0.11",
+    "mongoose": "^8.9.5",
+    "next": "^15.1.6",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4.0.0",
+    "@types/bcryptjs": "^2.4.6",
+    "@types/node": "^22.10.7",
+    "@types/react": "^19.0.7",
+    "@types/react-dom": "^19.0.3",
+    "postcss": "^8.5.1",
+    "tailwindcss": "^4.0.0",
+    "typescript": "^5.7.3"
+  }
+}
