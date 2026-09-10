@@ -90,12 +90,26 @@ the build happens on a workstation and the server receives finished JavaScript:
 ./scripts/package-release.sh
 ```
 
-That produces `dist/plm-release.tar.gz` (~10MB, ~52MB extracted) and prints the
-deploy commands. It refuses to ship a bundle that would fail on the server —
-development chunks mixed in by a running dev server, a type error, a native
-binary traced in from macOS, or a missing `server.js`. PLM runs on **port 3005**
-under pm2 as `plm`, both distinct from MOS so the two coexist on one box. Full
-detail in [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md).
+That produces `dist/plm-release.tar.gz` (~10MB, ~52MB extracted). It refuses to
+ship a bundle that would fail on the server — development chunks mixed in by a
+running dev server, a type error, a native binary traced in from macOS, or a
+missing `server.js`.
+
+The bundle carries its own installer, so deploying is two commands:
+
+```bash
+tar -xzf /tmp/plm-release.tar.gz -C /tmp
+/tmp/plm/deploy.sh --apply
+```
+
+`deploy.sh` rsyncs into place keeping `.env.local` and pm2's logs, restarts, and
+confirms the build now answering is the one just deployed. It guards the
+`--delete` it wraps: a relative destination, a missing parent, or a directory
+that does not look like a PLM deployment all stop it.
+
+PLM serves **plm.gidpaull.com** from `/home/gid/apps/plm` on **port 3005**, under
+pm2 as `plm` — all distinct from MOS, so the two coexist on one box. Full detail
+in [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md).
 
 ### Tests
 

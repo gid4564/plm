@@ -53,6 +53,8 @@ cp -R .next/static "$OUT/.next/static"
 cp ecosystem.config.cjs "$OUT/"
 # Admin tooling that must run where the database is reachable.
 cp scripts/find-duplicates.mjs "$OUT/"
+# The installer, so it is to hand as soon as the tarball is extracted.
+cp scripts/deploy.sh "$OUT/"
 
 # The manual is read from disk at request time, so it ships as a file rather
 # than being compiled in — it can be corrected on the server without a rebuild.
@@ -114,21 +116,19 @@ On the server:
 
   scp dist/plm-release.tar.gz user@server:/tmp/
   ssh user@server
-  sudo mkdir -p /apps/plm && sudo chown $USER /apps/plm
   tar -xzf /tmp/plm-release.tar.gz -C /tmp
-  rsync -a --delete --exclude .env.local --exclude .pm2 /tmp/plm/ /apps/plm/
-  cd /apps/plm
+  /tmp/plm/deploy.sh              # shows what would change, changes nothing
+  /tmp/plm/deploy.sh --apply
 
-First deploy only — write the environment, then start:
+deploy.sh rsyncs into /home/gid/apps/plm (override with PLM_DEST), keeps
+.env.local and .pm2, restarts pm2, and then checks that the build answering on
+port 3005 is the one just deployed. It refuses a relative destination and a
+directory that does not look like a PLM deployment — the rsync it wraps carries
+--delete.
 
-  cp env.example .env.local && $EDITOR .env.local
+First deploy only, once it tells you .env.local is missing:
+
+  cd /home/gid/apps/plm
+  cp env.example .env.local && $EDITOR .env.local   # APP_BASE_URL=https://plm.gidpaull.com
   pm2 start ecosystem.config.cjs && pm2 save
-
-Later deploys — the rsync above already replaced the code:
-
-  pm2 restart plm
-
-Check it:
-
-  curl -s localhost:3005/api/version     # build id should match above
 NEXT

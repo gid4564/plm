@@ -49,42 +49,65 @@ excludes `sharp` — nothing in it is compiled for the build host.
 
 ### Deploying it
 
+The bundle carries its own installer, so this is two commands on the server:
+
 ```bash
 scp dist/plm-release.tar.gz user@server:/tmp/
-ssh user@server
-sudo mkdir -p /apps/plm && sudo chown $USER /apps/plm
-tar -xzf /tmp/plm-release.tar.gz -C /tmp
-rsync -a --delete --exclude .env.local --exclude .pm2 /tmp/plm/ /apps/plm/
-cd /apps/plm
 ```
 
-`rsync --delete` rather than extracting over the top, so a file removed in this
-release is removed on the server too — extracting in place leaves orphans that
-can shadow the new build. The two excludes are what must survive a deploy: the
-environment file, and pm2's logs.
+```bash
+ssh user@server
+tar -xzf /tmp/plm-release.tar.gz -C /tmp
+/tmp/plm/deploy.sh              # shows what would change, changes nothing
+/tmp/plm/deploy.sh --apply
+```
 
-**First deploy only:**
+It installs into **`/home/gid/apps/plm`** (override with `PLM_DEST`), restarts
+pm2, and then confirms that the build answering on port 3005 is the one just
+deployed.
+
+**First deploy only** — it will tell you `.env.local` is missing and stop:
 
 ```bash
+cd /home/gid/apps/plm
 cp env.example .env.local && $EDITOR .env.local
 pm2 start ecosystem.config.cjs && pm2 save
 ```
 
-**Later deploys** — the rsync above already replaced the code:
+#### Why a script rather than the rsync by hand
+
+`deploy.sh` wraps this:
 
 ```bash
-pm2 restart plm
+rsync -a --delete --exclude .env.local --exclude .pm2 /tmp/plm/ /home/gid/apps/plm/
 ```
 
-**Then check that what you meant to deploy is what is running:**
+`--delete` rather than extracting over the top, so a file removed in this release
+is removed on the server too — extracting in place leaves orphans that can shadow
+the new build. The two excludes are what must survive a deploy: the environment
+file, and pm2's logs.
 
-```bash
-curl -s localhost:3005/api/version
-```
+But `--delete` is also why typing it by hand is a poor idea. **The destination
+must be absolute.** A relative path resolves against the working directory, and
+since these steps used to `cd` into the target first, `home/gid/apps/plm/` became
+`/home/gid/apps/plm/home/gid/apps/plm` — which is how this has actually gone
+wrong. That attempt failed harmlessly because the path did not exist; the same
+slip onto a path that *does* exist would have emptied it.
 
-The `buildId` it reports is printed by `package-release.sh`. If they differ, the
-rsync did not land or pm2 is still holding the old process — which is worth
-being able to tell apart from a bug in the code.
+So the script refuses to run when:
+
+| Refuses when | Because |
+|---|---|
+| `PLM_DEST` is not absolute | The failure above, caught before rsync sees it |
+| The destination's parent does not exist | A typo would otherwise create a plausible tree and deploy into it |
+| The source has no `server.js` | Rsyncing a non-bundle would leave a broken deployment |
+| The destination is non-empty and has no `server.js` | It belongs to something other than PLM, and `--delete` would empty it |
+| `pm2` is not on PATH | Reported as recoverable — the code is already in place |
+| The running build ≠ the deployed build | The deploy did not take effect: pm2 is still holding the old process. Worth telling apart from a bug in the code |
+
+The last one is the useful one day to day. `/api/version` reports the `buildId`
+that `package-release.sh` printed, so "is my fix actually deployed?" is answerable
+in one command rather than inferred from behaviour.
 
 ### What is in the bundle
 
@@ -95,6 +118,7 @@ being able to tell apart from a bug in the code.
 | `env.example` | Template. The real `.env.local` is never packaged; it holds secrets and stays on the server |
 | `docs/` | MANUAL.md, DEPLOYMENT.md, ONSHAPE-INTEGRATION-SPEC.md |
 | `build-info.json` | The build stamp `/api/version` reports |
+| `deploy.sh` | The installer above — rsyncs into place, restarts pm2, verifies the build |
 | `find-duplicates.mjs` | Admin tool, below |
 
 The manual is read from disk at request time rather than compiled in, so it can
@@ -109,7 +133,7 @@ opposite: it belongs in `.env.local`, because it is the public HTTPS URL Onshape
 must reach, not the local port.
 
 For this deployment: `plm.gidpaull.com` terminates TLS at the reverse proxy and
-forwards to `127.0.0.1:3005`, with the app served from `/apps/plm`.
+forwards to `127.0.0.1:3005`, with the app served from `/home/gid/apps/plm`.
 
 The app name and port are both distinct from MOS, so the two can run on the same
 box.
@@ -122,7 +146,7 @@ historically be filed twice, under `"default"` and under the literal
 `"{$configuration}"`. `ignoreConfigurations` (on by default) prevents new ones.
 
 ```bash
-cd /apps/plm
+cd /home/gid/apps/plm
 node find-duplicates.mjs            # dry run — reports, changes nothing
 node find-duplicates.mjs --merge    # apply
 ```
