@@ -2,6 +2,7 @@ import { connectDb } from "@/lib/db";
 import { Enterprise, NumberIssuedLog } from "@/lib/models";
 import { nextNumber, type NumberingType } from "@/lib/numbering";
 import { authenticateBearer } from "@/lib/oauth-server";
+import { readExtensionRequest } from "@/lib/onshape/extension-request";
 import { handler, ok, fail } from "@/lib/api";
 
 /**
@@ -44,21 +45,46 @@ export const POST = handler(async (req: Request) => {
     );
   }
 
-  const body = (await req.json().catch(() => ({}))) as Record<string, any>;
-  const {
-    id, partNumberId, documentId, elementId, workspaceId, elementType, partId, companyId,
-  } = body;
+  /*
+   * Body or query, and either encoding — see lib/onshape/extension-request.ts.
+   * Reading only the body meant a caller that put the context in the URL was
+   * seen as sending nothing at all.
+   */
+  const ext = await readExtensionRequest(req);
+  const id = ext.read("id");
+  const partNumberId = ext.read("partNumberId");
+  const documentId = ext.read("documentId");
+  const elementId = ext.read("elementId");
+  const workspaceId = ext.read("workspaceId");
+  const elementType = ext.read("elementType");
+  const partId = ext.read("partId");
+  const companyId = ext.read("companyId");
 
+  // The request's shape is logged alongside the fields, because "elementType=-"
+  // on its own cannot distinguish an empty body from one whose keys are named
+  // differently — and those need different fixes.
   console.log(
-    `[PLM] numbering extension in: elementType=${elementType ?? "-"} ` +
-    `doc=${documentId ?? "-"} el=${elementId ?? "-"} part=${partId ?? "-"} ` +
-    `company=${companyId ?? "-"} user=${identity.userId}`
+    `[PLM] numbering extension in: elementType=${elementType || "-"} ` +
+    `doc=${documentId || "-"} el=${elementId || "-"} part=${partId || "-"} ` +
+    `company=${companyId || "-"} user=${identity.userId} | ${ext.describe()}`
   );
 
-  const type = ELEMENT_TYPE_TO_NUMBERING_TYPE[String(elementType ?? "").toUpperCase()];
+  const type = ELEMENT_TYPE_TO_NUMBERING_TYPE[elementType.toUpperCase()];
   if (!type) {
+    /*
+     * Say what arrived, not just what was missing. Onshape shows this message
+     * to the user, and "unrecognised elementType" with no elementType at all
+     * reads as a PLM fault when it usually means the extension was registered
+     * without the field.
+     */
+    const seen = Object.keys(ext.raw);
     return fail(
-      `Unrecognised elementType "${elementType}" — expected a Part Studio, Assembly, or Drawing.`,
+      elementType
+        ? `Unrecognised elementType "${elementType}" — expected a Part Studio, Assembly, or Drawing.`
+        : `No elementType arrived, so PLM cannot tell which numbering scheme to use. ` +
+          `The request carried ${seen.length ? `these fields: ${seen.join(", ")}` : "no fields at all"}. ` +
+          `Onshape normally posts a JSON body containing elementType — check the extension is ` +
+          `registered as the Part number generator, and that a POST registration has an Action Body.`,
       422
     );
   }

@@ -4,6 +4,7 @@ import { authenticateBearer } from "@/lib/oauth-server";
 import { clientForUser } from "@/lib/onshape/factory";
 import { kindForElementType, normalizeConfiguration, syncPartFromOnshape } from "@/lib/sync";
 import { baseUrl } from "@/lib/onshape/oauth";
+import { readExtensionRequest } from "@/lib/onshape/extension-request";
 import { handler, ok, fail } from "@/lib/api";
 
 /**
@@ -31,37 +32,15 @@ async function sendToPlm(req: Request): Promise<Response> {
   }
 
   /*
-   * Accept the context from the body or the query string.
-   *
-   * Onshape's action-URL contract differs by location: the part number
-   * generator posts a JSON body, while a context-menu extension substitutes
-   * placeholders into the URL itself. Reading both means one endpoint serves
-   * every location, rather than three near-identical routes.
+   * Body or query, either encoding — see lib/onshape/extension-request.ts.
+   * Shared with the numbering extension so the two read their input
+   * identically; they were separate implementations, and only one of them
+   * handled a context arriving in the URL.
    */
-  const url = new URL(req.url);
-  const body = (await req.json().catch(() => ({}))) as Record<string, any>;
+  const ext = await readExtensionRequest(req);
+  const read = (key: string) => ext.read(key);
 
-  /*
-   * Read a value from the body or the query, taking the first *usable* one.
-   *
-   * Two things are going on. Onshape leaves a {$token} verbatim when it has
-   * nothing to substitute — an element with no configurations sends the literal
-   * "{$configuration}" — and passing that on makes the follow-up metadata call
-   * fail with a 400, so an unsubstituted placeholder counts as absent.
-   *
-   * And the order matters more than it looks. A POST extension carries its
-   * context in an Action Body while the URL may also carry it, so both sources
-   * can be present at once. Falling back with `body[key] ?? query` would take a
-   * placeholder sitting in the body — non-null, so the fallback never fires —
-   * and discard a perfectly good value in the query. Hence "first usable"
-   * rather than "first present".
-   */
-  const usable = (v: unknown): string => {
-    const raw = String(v ?? "").trim();
-    return !raw || /^\{\$.*\}$/.test(raw) ? "" : raw;
-  };
-  const read = (key: string): string =>
-    usable(body[key]) || usable(url.searchParams.get(key));
+  console.log(`[PLM] send-to-plm in: user=${identity.userId} | ${ext.describe()}`);
 
   const documentId = read("documentId");
   const elementId = read("elementId");
