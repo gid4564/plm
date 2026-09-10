@@ -84,7 +84,7 @@ export async function describeAssembly(
  * Decide which coordinates to enrol a BOM row under.
  *
  * A row can name its source by version or microversion, both immutable. Where a
- * writable workspace can be found the MOS uses it, which is the same
+ * writable workspace can be found PLM uses it, which is the same
  * substitution the webhook receiver makes for revision events, so every
  * enrolment path lands on identical coordinates.
  *
@@ -96,7 +96,7 @@ export async function describeAssembly(
  * That distinction matters: being unable to stamp a number onto somebody else's
  * library part is not a reason to refuse to *manufacture* it. The item is
  * created either way and the failed push is recorded against it, which is
- * exactly how the rest of the MOS treats a write it could not complete.
+ * exactly how the rest of PLM treats a write it could not complete.
  */
 async function resolveImportCoords(
   client: OnshapeClient,
@@ -152,7 +152,7 @@ async function resolveImportCoords(
 }
 
 /**
- * Everything the MOS mirrors, taken from the BOM row instead of the part.
+ * Everything PLM mirrors, taken from the BOM row instead of the part.
  *
  * Used only when the part's own document is unreadable. The bill of materials
  * is a first-class Onshape source — it is how the assembly reports what it is
@@ -203,7 +203,7 @@ function metadataFromBomRow(
  * Whether the BOM's part-number column looks unmapped rather than genuinely empty.
  *
  * Parts need a part number before they can be ordered, so rows without one are
- * held back. But that check leans on the MOS having found the part-number
+ * held back. But that check leans on PLM having found the part-number
  * column in the first place, and column names differ between tenants. If not a
  * single row carries a number, an unmapped column is far likelier than an
  * assembly of entirely unnumbered parts — and blocking the whole import on a
@@ -326,7 +326,7 @@ export async function importBomLines(
   /*
    * Guard against two BOM rows collapsing onto one manufacturing item.
    *
-   * The MOS keys an item by part *without* its configuration when
+   * PLM keys an item by part *without* its configuration when
    * ignoreConfigurations is on, which is the default and is what stops the same
    * part arriving twice through different entry points. Standard content breaks
    * that assumption: an M6x20 and an M6x40 screw are the same document, tab and

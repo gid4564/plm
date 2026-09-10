@@ -124,7 +124,7 @@ function toQuantity(v: unknown): number {
  * Resolve a row's item source into part coordinates.
  *
  * Returns a reason string instead of coordinates when the row describes
- * something the MOS cannot track — most often a subassembly, which has no part
+ * something PLM cannot track — most often a subassembly, which has no part
  * to attach a manufacturing order to.
  */
 function resolveSource(row: Record<string, any>): {

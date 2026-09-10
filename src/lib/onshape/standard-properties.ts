@@ -1,7 +1,7 @@
 import type { PropertyDef } from "./types";
 
 /**
- * Mapping from Onshape's property names to the fields the MOS mirrors.
+ * Mapping from Onshape's property names to the fields PLM mirrors.
  *
  * Matching is by name because Onshape's built-in property ids are not published
  * as stable constants. Names are normalised (case, spacing, punctuation) and
@@ -129,7 +129,7 @@ export function resolveEnumLabel(value: unknown, options?: EnumOption[]): string
 }
 
 /**
- * Fold Onshape's flat property list into the MOS's named fields.
+ * Fold Onshape's flat property list into PLM's named fields.
  *
  * Returns the mapped fields plus the full annotated list, so an unmapped or
  * oddly-named property stays visible rather than silently vanishing.
@@ -151,7 +151,7 @@ export function mapStandardProperties(props: RawProperty[]) {
        *
        * This used to index a hardcoded list of Onshape's stock states, which
        * assumed both that the tenant runs the stock workflow and that the codes
-       * are 0-based. Get either wrong and the MOS names a neighbouring state
+       * are 0-based. Get either wrong and PLM names a neighbouring state
        * with complete confidence — which is the released-shown-as-obsolete bug.
        *
        * There is nothing here to resolve the code against, so it is reported as
@@ -176,7 +176,7 @@ export function mapStandardProperties(props: RawProperty[]) {
      * This used to overwrite silently. Onshape can return more than one
      * property whose name normalises to the same key — a part-level "State" and
      * a workflow "Status", say — and whichever happened to come last in the
-     * response decided what the MOS displayed. That is a coin toss dressed up
+     * response decided what PLM displayed. That is a coin toss dressed up
      * as a mapping, and precisely the kind of thing that shows a released part
      * as something else.
      */

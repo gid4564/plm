@@ -55,7 +55,7 @@ export function BomClient({
   initial, mock = false, simulator = [],
 }: {
   initial: Initial;
-  /** True when this MOS is running against the built-in simulator. */
+  /** True when this PLM is running against the built-in simulator. */
   mock?: boolean;
   /** Documents the simulator holds, offered because real links cannot resolve. */
   simulator?: SimulatorDoc[];
@@ -83,7 +83,7 @@ export function BomClient({
 
         setBom(data);
         // Preselect what there is actually work to do on: everything importable
-        // that the MOS does not already track.
+        // that PLM does not already track.
         setSelected(
           new Set(
             (data.lines as Line[])
@@ -244,9 +244,9 @@ export function BomClient({
 
       {mock && (
         <Alert kind="warn">
-          <strong>This MOS is running against the built-in simulator.</strong> Nothing is
+          <strong>This PLM is running against the built-in simulator.</strong> Nothing is
           connected to Onshape, so a link to a real Onshape document cannot be read here —
-          it will come back empty. Use one of the simulator documents below, or run the MOS
+          it will come back empty. Use one of the simulator documents below, or run PLM
           against a live Onshape enterprise.
           {simulator.length > 0 && (
             <div style={{ display: "flex", gap: 7, flexWrap: "wrap", marginTop: 9 }}>
@@ -303,7 +303,7 @@ export function BomClient({
 
           {bom.partNumberColumnMissing && bom.lines.length > 0 && (
             <Alert kind="warn">
-              No row in this bill of materials has a part number. That usually means the MOS did
+              No row in this bill of materials has a part number. That usually means PLM did
               not recognise the part-number column rather than that every part is unnumbered, so
               nothing has been held back here — each part is checked against Onshape as it is
               imported instead, and any without a number are reported then.
@@ -314,7 +314,7 @@ export function BomClient({
             <Alert kind="warn">
               {bom.shape === "unrecognised" ? (
                 <>
-                  Onshape answered, but not in a shape the MOS recognises, so no rows could be
+                  Onshape answered, but not in a shape PLM recognises, so no rows could be
                   read. This is worth reporting — the server log records the field names Onshape
                   actually sent.
                 </>
@@ -325,7 +325,16 @@ export function BomClient({
           )}
 
           {bom.lines.length > 0 && (
-            <div className="card" style={{ overflow: "hidden" }}>
+            <div
+              className="card"
+              style={{
+                // Stated rather than assumed: the table fills the card and
+                // overflow clips its corners to the border radius, so the
+                // default card padding would inset it and undo that.
+                padding: 0,
+                overflow: "hidden",
+              }}
+            >
               <div style={{ overflowX: "auto" }}>
                 <table className="table">
                   <thead>
@@ -336,7 +345,7 @@ export function BomClient({
                       <th>Name</th>
                       <th>Material</th>
                       <th style={{ width: 58 }}>Rev</th>
-                      <th>In the MOS</th>
+                      <th>In PLM</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -410,7 +419,7 @@ export function BomClient({
                 <span>
                   Update quantities on parts already tracked
                   <span style={{ color: "var(--text-faint)" }}>
-                    {" "}— off by default, because a quantity in the MOS may have been set
+                    {" "}— off by default, because a quantity in PLM may have been set
                     deliberately and would be overwritten.
                   </span>
                 </span>

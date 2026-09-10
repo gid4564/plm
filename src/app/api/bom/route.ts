@@ -55,12 +55,12 @@ export const GET = handler(async (req: Request) => {
   if (elementType && elementType !== "ASSEMBLY") {
     return fail(
       `"${assembly.elementName || coords.elementId}" is ${elementType === "PARTSTUDIO" ? "a Part Studio" : `a ${elementType}`}, ` +
-      `not an assembly. Open the assembly tab and copy its link. Individual parts are synced from the MOS panel instead.`,
+      `not an assembly. Open the assembly tab and copy its link. Individual parts are synced from the PLM panel instead.`,
       409
     );
   }
 
-  // A BOM read that fails is never a fault in the MOS: either the coordinates
+  // A BOM read that fails is never a fault in PLM: either the coordinates
   // are wrong, the account cannot see the document, or Onshape refused. Relay
   // the reason with a status that says so, rather than a 500 that buries a
   // useful message in a server error.

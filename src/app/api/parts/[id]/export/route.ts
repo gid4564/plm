@@ -51,7 +51,7 @@ export const POST = handler(async (req: Request, ctx: Ctx) => {
   const part: any = await Part.findOne({ _id: id, enterpriseId: s.enterpriseId }).lean();
   if (!part) return fail("Part not found", 404);
 
-  // Same source the rest of the MOS reads from: the workspace where there is
+  // Same source the rest of PLM reads from: the workspace where there is
   // one, the pinned version only for a part that has no other home.
   const coords: PartCoords = readCoords(
     preferKnownWorkspace(

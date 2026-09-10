@@ -22,7 +22,7 @@ export type PropertyDef = {
   builtIn?: boolean;
 };
 
-/** Part metadata as the MOS cares about it. */
+/** Part metadata as PLM cares about it. */
 export type PartMetadata = {
   coords: PartCoords;
   documentName: string;
@@ -79,7 +79,7 @@ export type WebhookSummary = {
 };
 
 /**
- * Everything the MOS needs from Onshape. The mock and live implementations are
+ * Everything PLM needs from Onshape. The mock and live implementations are
  * interchangeable; nothing above this interface knows which one is in play.
  */
 export type Thumbnail = {

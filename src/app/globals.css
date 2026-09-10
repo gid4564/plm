@@ -63,6 +63,15 @@ body {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 10px;
+  /*
+   * A default, which this deliberately did not have.
+   *
+   * Every card used to pass its own padding inline, so a card that forgot to
+   * sat flush against its own border — which is what the part detail page did
+   * across every panel. Cards that want none still say `padding: 0`, and the
+   * table cards do exactly that.
+   */
+  padding: 16px;
 }
 
 .btn {

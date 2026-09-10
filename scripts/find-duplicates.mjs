@@ -190,10 +190,27 @@ try {
            * rather than forced.
            */
           for (const field of ["parentId", "childId"]) {
+            const other = field === "parentId" ? "childId" : "parentId";
             for (const link of await links.find({ [field]: d.id }).toArray()) {
+              /*
+               * Repointing can collapse both ends onto the kept row — if the
+               * other end already IS the kept row, the edge becomes a part
+               * containing itself. That renders as nonsense ("contains ×7
+               * itself") and would make any tree walk non-terminating, so the
+               * edge is dropped rather than moved. lib/bom-import.ts refuses
+               * the same shape on the way in; this is the path that could
+               * create one after the fact.
+               */
+              if (String(link[other]) === String(keep.id)) {
+                await links.deleteOne({ _id: link._id });
+                console.log(`       dropped a structure edge that would have self-referenced`);
+                continue;
+              }
               try {
                 await links.updateOne({ _id: link._id }, { $set: { [field]: keep.id } });
               } catch {
+                // The kept row already records this relationship; the duplicate
+                // edge is the one to lose.
                 await links.deleteOne({ _id: link._id });
               }
             }

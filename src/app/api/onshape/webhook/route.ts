@@ -76,7 +76,7 @@ export const POST = handler(async () => {
 
   // Retire the previous subscription first. Registering without doing so leaves
   // the old one live in Onshape, and every orphan keeps delivering events under
-  // a webhookId the MOS no longer recognises.
+  // a webhookId PLM no longer recognises.
   let removedPrevious: string | null = null;
   if (ent.webhookId) {
     try {

@@ -15,7 +15,7 @@ import type { MassProperties } from "./mass-properties";
 import { mapStandardProperties, resolveEnumLabel, toDisplayString, type RawProperty } from "./standard-properties";
 
 /**
- * Stand-in for Onshape, backed by the same MongoDB the MOS uses.
+ * Stand-in for Onshape, backed by the same MongoDB PLM uses.
  *
  * Persisting mock state (rather than holding it in memory) means the simulator
  * UI, the webhook receiver and the panel all observe the same "Onshape" — edits
@@ -172,7 +172,7 @@ export class MockOnshapeClient implements OnshapeClient {
     if (all.length === 0) {
       throw new Error(
         `The Onshape simulator has no document ${c.documentId}. ` +
-        `This MOS is running in simulator mode (ONSHAPE_MODE=mock), so links to real ` +
+        `This PLM is running in simulator mode (ONSHAPE_MODE=mock), so links to real ` +
         `Onshape documents cannot be read. Use a simulator document, or run against a ` +
         `live Onshape enterprise.`
       );
@@ -263,7 +263,7 @@ export class MockOnshapeClient implements OnshapeClient {
         `endsolid ${coords.partId}\n`;
     } else {
       body =
-        `${format.label} export produced by the MOS Onshape simulator.\n` +
+        `${format.label} export produced by the PLM Onshape simulator.\n` +
         `This deployment is running in simulator mode, so there is no geometry to\n` +
         `translate. Against a live Onshape enterprise this file would contain the\n` +
         `real ${format.label} data for the part.\n\n` +

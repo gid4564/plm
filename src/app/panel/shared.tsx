@@ -74,7 +74,7 @@ export function SignedOut({
     <div style={panelWrap}>
       <PanelHeader title={title} />
       <p style={{ color: "var(--text-muted)", margin: 0, lineHeight: 1.55 }}>
-        Connect this Onshape session to your MOS account to see and edit manufacturing data here.
+        Connect this Onshape session to your PLM account to see and edit manufacturing data here.
       </p>
 
       {/*
@@ -91,7 +91,7 @@ export function SignedOut({
         target="_blank"
         rel="noopener noreferrer"
       >
-        Sign in to MOS ↗
+        Sign in to PLM ↗
       </a>
 
       <button className="btn" onClick={grantAndReload} disabled={checking}>
@@ -100,7 +100,7 @@ export function SignedOut({
 
       {denied && (
         <Alert kind="warn">
-          Your browser blocked this panel from using its MOS session. Allow cookies for
+          Your browser blocked this panel from using its PLM session. Allow cookies for
           this site, or use the full record in a normal tab.
         </Alert>
       )}

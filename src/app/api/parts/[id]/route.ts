@@ -31,8 +31,16 @@ export const GET = handler(async (_req: Request, ctx: Ctx) => {
   const state = String(part.lifecycleState);
 
   const [children, parents, iterations, drawings, logs, ent, release] = await Promise.all([
-    BomLink.find({ parentId: id }).lean(),
-    BomLink.find({ childId: id }).lean(),
+    /*
+     * Self-referencing edges are excluded rather than shown.
+     *
+     * A part cannot contain itself, so such an edge is always data damage — and
+     * it renders as "contains ×7 itself" in both directions at once, which
+     * reads as a product bug rather than a bad row. The import path refuses to
+     * create one; this makes sure one that arrived another way cannot mislead.
+     */
+    BomLink.find({ parentId: id, childId: { $ne: id } }).lean(),
+    BomLink.find({ childId: id, parentId: { $ne: id } }).lean(),
     PartIteration.find({ partId: id }).sort({ iteration: -1 }).limit(25).lean(),
     Drawing.find({ partIds: id }).select("-attributes").lean(),
     ActivityLog.find({ partId: id }).sort({ createdAt: -1 }).limit(25).lean(),

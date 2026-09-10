@@ -247,7 +247,7 @@ export class LiveOnshapeClient implements OnshapeClient {
    * Parts in an element, with their part numbers.
    *
    * Needed because a revision event names the part by number, not id — the id
-   * is the MOS's identity key, so it has to be looked up before anything can be
+   * is PLM's identity key, so it has to be looked up before anything can be
    * created.
    */
   async listElementParts(c: PartCoords): Promise<ElementPart[]> {
@@ -659,7 +659,7 @@ export class LiveOnshapeClient implements OnshapeClient {
    * Every webhook Onshape holds for this company.
    *
    * Needed because re-registering used to leave the previous subscription live.
-   * Those orphans keep delivering events the MOS can no longer attribute, and
+   * Those orphans keep delivering events PLM can no longer attribute, and
    * there is no way to notice them without asking Onshape what exists.
    */
   async listWebhooks(companyId: string): Promise<WebhookSummary[]> {

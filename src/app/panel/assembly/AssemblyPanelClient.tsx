@@ -6,7 +6,7 @@ import { PanelHeader, SignedOut, panelWrap } from "../shared";
 
 type Ctx = { documentId: string; elementId: string; workspaceId: string; versionId: string };
 
-type Tracked = { itemId: string; moNumber: string | null; quantity: number; status: string };
+type Tracked = { partId: string; number: string | null; revision: string; lifecycleState: string };
 
 type Line = {
   key: string; quantity: number; partNumber: string; name: string;
@@ -55,7 +55,7 @@ export function AssemblyPanelClient({
   }, [ctx]);
 
   /**
-   * How much of this assembly the MOS already holds.
+   * How much of this assembly PLM already holds.
    *
    * A local query, so opening the panel is instant and costs Onshape nothing.
    * Reading the BOM itself is a real API call against a shared rate limit and
@@ -67,7 +67,9 @@ export function AssemblyPanelClient({
     try {
       const res = await fetch(`/api/parts?q=${encodeURIComponent(ctx.elementId)}`);
       const data = await res.json();
-      if (res.ok) setAlreadyHere((data.items ?? []).length);
+      // The parts list answers under `parts`; reading `items` here counted
+      // nothing and the panel always claimed the assembly was un-imported.
+      if (res.ok) setAlreadyHere((data.parts ?? []).length);
     } catch {
       // Cosmetic; the panel works without it.
     }
@@ -197,7 +199,7 @@ export function AssemblyPanelClient({
             }}
           >
             <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 3 }}>
-              {alreadyHere ? `${alreadyHere} part${alreadyHere === 1 ? "" : "s"} in the MOS` : "Not imported yet"}
+              {alreadyHere ? `${alreadyHere} part${alreadyHere === 1 ? "" : "s"} in PLM` : "Not imported yet"}
             </div>
             <div style={{ fontSize: 11.5, color: "var(--text-muted)", lineHeight: 1.5 }}>
               Reading the bill of materials lists every part in this assembly so you can raise a
@@ -237,7 +239,7 @@ export function AssemblyPanelClient({
             </div>
             <div style={{ color: "var(--text-muted)", fontSize: 11.5, marginTop: 2, lineHeight: 1.45 }}>
               {bom.lines.length} row{bom.lines.length === 1 ? "" : "s"} ·{" "}
-              {untracked.length} not yet in the MOS · {multiLevel ? "all levels" : "top level"}
+              {untracked.length} not yet in PLM · {multiLevel ? "all levels" : "top level"}
             </div>
           </div>
 
@@ -251,7 +253,7 @@ export function AssemblyPanelClient({
           {bom.lines.length === 0 && (
             <Alert kind="warn">
               {bom.shape === "unrecognised"
-                ? "Onshape answered in a shape the MOS does not recognise. The server log records what it sent."
+                ? "Onshape answered in a shape PLM does not recognise. The server log records what it sent."
                 : "Onshape returned no BOM rows for this assembly."}
             </Alert>
           )}
@@ -324,9 +326,12 @@ export function AssemblyPanelClient({
                             background: "var(--surface-2)", color: "var(--text-muted)",
                             borderColor: "var(--border)", fontSize: 10, flexShrink: 0,
                           }}
-                          title={`Already tracked · ${l.tracked.status}`}
+                          title={
+                            `Already in PLM · ${l.tracked.lifecycleState}` +
+                            (l.tracked.revision ? ` · revision ${l.tracked.revision}` : "")
+                          }
                         >
-                          {l.tracked.moNumber ?? "tracked"}
+                          {l.tracked.number ?? "in PLM"}
                         </span>
                       )}
                     </label>
@@ -348,7 +353,7 @@ export function AssemblyPanelClient({
       )}
 
       <a className="btn btn-sm" href={fullPageHref} target="_blank" rel="noopener noreferrer">
-        Open in the MOS ↗
+        Open in PLM ↗
       </a>
     </div>
   );

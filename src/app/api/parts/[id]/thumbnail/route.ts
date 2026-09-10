@@ -52,7 +52,7 @@ export const GET = handler(async (req: Request, ctx: Ctx) => {
   const part: any = await Part.findOne({ _id: id, enterpriseId: s.enterpriseId }).lean();
   if (!part) return placeholder();
 
-  const cached: any = await PartThumbnail.findOne({ itemId: id });
+  const cached: any = await PartThumbnail.findOne({ partId: id });
 
   // Normalised for the reason given in lib/binary.ts: the shape Mongo returns
   // for a binary field depends on how it was queried, and the wrong one fails
@@ -92,8 +92,8 @@ export const GET = handler(async (req: Request, ctx: Ctx) => {
 
   if (!thumb) {
     await PartThumbnail.updateOne(
-      { itemId: id },
-      { $set: { itemId: id, enterpriseId: s.enterpriseId, contentType: "image/svg+xml",
+      { partId: id },
+      { $set: { partId: id, enterpriseId: s.enterpriseId, contentType: "image/svg+xml",
                 data: Buffer.from(""), size, failedAt: new Date(), failureReason: reason } },
       { upsert: true }
     );
@@ -101,8 +101,8 @@ export const GET = handler(async (req: Request, ctx: Ctx) => {
   }
 
   await PartThumbnail.updateOne(
-    { itemId: id },
-    { $set: { itemId: id, enterpriseId: s.enterpriseId, contentType: thumb.contentType,
+    { partId: id },
+    { $set: { partId: id, enterpriseId: s.enterpriseId, contentType: thumb.contentType,
               data: thumb.data, size, fetchedAt: new Date(), failedAt: null, failureReason: null } },
     { upsert: true }
   );

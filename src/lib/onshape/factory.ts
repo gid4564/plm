@@ -6,7 +6,7 @@ import { isMock, refreshTokens } from "./oauth";
 import type { OnshapeClient } from "./types";
 
 /**
- * Build a client acting as a specific MOS user, refreshing their Onshape token
+ * Build a client acting as a specific PLM user, refreshing their Onshape token
  * first if it is within 60s of expiry.
  */
 export async function clientForUser(userId: string): Promise<OnshapeClient> {
