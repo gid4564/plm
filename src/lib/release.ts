@@ -427,10 +427,20 @@ export async function decideRelease(
 
   const enterpriseId = String(release.enterpriseId);
 
-  // Decided as the approver, not as the integration account: the audit trail
-  // has to name the person, and Onshape's approve transition is restricted to
-  // designated approvers anyway.
-  const client = await clientForUser(decision.userId);
+  /*
+   * Two different actors, deliberately.
+   *
+   * The decision is recorded against the person who made it — that is the
+   * audit trail, and it is the only account of who approved this. The Onshape
+   * transition, though, is performed by the enterprise's service account,
+   * because Onshape restricts an approve transition to designated approvers
+   * and it is the service user that is named as one in the workflow.
+   *
+   * That split is the reason PLM keeps its own local accounts: a PLM approver
+   * needs no Onshape seat at all, which is exactly the case for the reviewer
+   * whose job is governance rather than CAD.
+   */
+  const { client } = await clientForEnterprise(enterpriseId);
 
   release.decidedByUserId = decision.userId;
   release.decidedByEmail = decision.email;
@@ -480,8 +490,9 @@ export async function decideRelease(
         `The Onshape package offers no ${decision.intent} transition from state ` +
         `"${pkg.state}". Available: ` +
         `${pkg.availableActions.map((a) => `${a.label || a.id} (${a.type})`).join(", ") || "none"}. ` +
-        `If this workflow restricts approval to named approvers, the account performing ` +
-        `this action has to be one of them.`
+        `Onshape restricts an approve transition to designated approvers, so the Onshape ` +
+        `service account configured for this enterprise has to be named as one in the ` +
+        `release workflow.`
       );
     }
 
@@ -795,7 +806,22 @@ export async function submitReleaseFromPlm(
   }
 
   const { number } = await nextNumber(enterpriseId, "RELEASE");
-  const client = await clientForUser(submitter.userId);
+
+  /*
+   * Raise the package as the submitter, so Onshape attributes the release
+   * candidate to the person who asked for it — Onshape restricts the *submit*
+   * transition to the release creator, so this has to be them where possible.
+   *
+   * Falls back to the service account for a PLM user with no Onshape seat.
+   * That is a real case here, not a defensive flourish: PLM keeps local
+   * accounts precisely so governance staff need no CAD licence.
+   */
+  let client: OnshapeClient;
+  try {
+    client = await clientForUser(submitter.userId);
+  } catch {
+    client = (await clientForEnterprise(enterpriseId)).client;
+  }
 
   const wfid = ent.onshapeReleaseWorkflowId
     ?? (await client.getReleaseWorkflow(ent.onshapeCompanyId))?.id;

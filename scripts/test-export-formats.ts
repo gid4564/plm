@@ -31,27 +31,31 @@ check("an unknown format is rejected, not guessed", findFormat("DWG") === undefi
 console.log("\nFilenames");
 const step = findFormat("STEP")!;
 {
-  check("part number, revision and MO number all appear",
-    exportFilename({ moNumber: "MO-00042", partNumber: "GB-1001", revision: "C" }, step)
-      === "GB-1001_RevC_MO-00042.step");
+  check("the PLM number and revision both appear",
+    exportFilename({ number: "PN-00042", name: "Gearbox Housing", revision: "C" }, step)
+      === "PN-00042_RevC.step");
 
-  check("falls back to the part name when there is no number",
-    exportFilename({ moNumber: "MO-1", partName: "Gearbox Housing", partNumber: "" }, step)
-      === "Gearbox-Housing_MO-1.step");
+  check("falls back to the name when there is no number",
+    exportFilename({ number: "", name: "Gearbox Housing" }, step)
+      === "Gearbox-Housing.step");
 
   check("no revision, no Rev segment",
-    exportFilename({ moNumber: "MO-1", partNumber: "P1", revision: "" }, step) === "P1_MO-1.step");
+    exportFilename({ number: "PN-1", revision: "" }, step) === "PN-1.step");
 
-  const nasty = exportFilename(
-    { moNumber: "MO-2", partNumber: 'a/b\\\\c:d*e?f"g<h>i|j', revision: "" }, step);
+  // An unreleased part has no revision, and its export must still be nameable.
+  // Parts sync to PLM before release, so this is the common case, not an edge.
+  check("an unreleased part exports under its number alone",
+    exportFilename({ number: "PN-9", revision: null }, step) === "PN-9.step");
+
+  const nasty = exportFilename({ number: 'a/b\\c:d*e?f"g<h>i|j', revision: "" }, step);
   check("path separators and shell characters are stripped",
-    !/[\\/\\\\:*?"<>|]/.test(nasty), nasty);
+    !/[\/\\:*?"<>|]/.test(nasty), nasty);
   check("still ends in the right extension", nasty.endsWith(".step"), nasty);
 
   const bare = exportFilename({}, step);
-  check("an empty item still yields a usable name", bare === "part.step", bare);
+  check("an empty part still yields a usable name", bare === "part.step", bare);
 
-  const long = exportFilename({ partNumber: "X".repeat(200), moNumber: "MO-3" }, step);
+  const long = exportFilename({ number: "X".repeat(200), revision: "A" }, step);
   check("absurd input does not produce an absurd filename", long.length < 100, long.length);
 }
 

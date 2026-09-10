@@ -2,8 +2,8 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "MOS — Manufacturing Order System",
-  description: "Manufacturing order system with two-way Onshape sync",
+  title: "PLM — Product Lifecycle Management",
+  description: "Demo PLM system: attribute governance, product structure, and release management driven from Onshape",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

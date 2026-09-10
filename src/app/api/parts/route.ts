@@ -1,33 +1,32 @@
 import { Types } from "mongoose";
 import { connectDb } from "@/lib/db";
-import { ManufacturingItem } from "@/lib/models";
+import { BomLink, Part } from "@/lib/models";
 import { requireSession } from "@/lib/auth/session";
 import { handler, ok, fail } from "@/lib/api";
 import { decodeCursor, encodeCursor } from "@/lib/pagination";
+import { plainAttributes } from "@/lib/sync";
 
 /**
- * Page size for the dashboard list.
+ * Page size for the parts list.
  *
- * A large assembly import can bring in a hundred items at once, and this is a
- * demo system many people share, so the list is exactly the thing that grows
- * without anyone deciding it should. Loaded a page at a time rather than all
- * at once, capped so a caller cannot ask for the whole enterprise in one go.
+ * A large assembly import can bring in a hundred parts at once, so the list is
+ * exactly the thing that grows without anyone deciding it should. Loaded a page
+ * at a time, capped so a caller cannot ask for the whole enterprise in one go.
  */
 const PAGE_SIZE = 50;
 const MAX_PAGE_SIZE = 200;
 
-/** List manufacturing items for the caller's enterprise, one page at a time. */
+/** List parts and assemblies for the caller's enterprise, one page at a time. */
 export const GET = handler(async (req: Request) => {
   const s = await requireSession();
   await connectDb();
 
   const url = new URL(req.url);
   const q = url.searchParams.get("q")?.trim();
-  const status = url.searchParams.get("status")?.trim();
+  const state = url.searchParams.get("state")?.trim();
+  const kind = url.searchParams.get("kind")?.trim();
   const owner = url.searchParams.get("owner")?.trim();
-  const assembly = url.searchParams.get("assembly")?.trim();
-  const product = url.searchParams.get("product")?.trim();
-  const manufacturedBy = url.searchParams.get("manufacturedBy")?.trim();
+  const releaseId = url.searchParams.get("release")?.trim();
   const limit = Math.min(MAX_PAGE_SIZE, Math.max(1, Number(url.searchParams.get("limit")) || PAGE_SIZE));
   const cursor = decodeCursor(url.searchParams.get("cursor"));
 
@@ -36,37 +35,28 @@ export const GET = handler(async (req: Request) => {
   }
 
   const filter: Record<string, unknown> = { enterpriseId: s.enterpriseId };
-  if (status && status !== "all") filter.status = status;
+  if (state && state !== "all") filter.lifecycleState = state;
+  if (kind && kind !== "all") filter.kind = kind;
+  if (releaseId && releaseId !== "all") filter.releaseId = releaseId;
 
-  // "mine" is who enrolled the part, not who last edited it.
-  if (owner === "mine") {
-    filter.createdByUserId = s.userId;
-  } else if (owner === "auto") {
-    // Enrolled without a person: a release, or an item predating attribution.
-    filter.createdByUserId = null;
-  }
-  // Everything exploded out of one assembly: the work package for that build.
-  if (assembly && assembly !== "all") filter["sourceAssembly.elementId"] = assembly;
-
-  // Mongoose casts this against productId's ObjectId type for a plain find(),
-  // unlike the aggregate below which needs it cast by hand.
-  if (product && product !== "all") filter.productId = product;
-  if (manufacturedBy && manufacturedBy !== "all") filter.manufacturedBy = manufacturedBy;
+  // "mine" is who brought the part in, not who last edited it.
+  if (owner === "mine") filter.createdByUserId = s.userId;
+  else if (owner === "auto") filter.createdByUserId = null;
 
   if (q) {
     const rx = new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
     filter.$or = [
-      { moNumber: rx }, { partName: rx }, { partNumber: rx },
-      { documentName: rx }, { project: rx }, { remarks: rx },
+      { number: rx }, { name: rx }, { revision: rx },
+      { documentName: rx }, { elementName: rx },
     ];
   }
 
   // Total against the filter, not the page — this is what lets the header say
   // "50 of 340" rather than just how many happen to be on screen.
-  const total = await ManufacturingItem.countDocuments(filter);
+  const total = await Part.countDocuments(filter);
 
-  // The cursor names the exact row the previous page ended on, so this row and
-  // everything before it in sort order is excluded — a Mongo $or over the
+  // The cursor names the exact row the previous page ended on, so that row and
+  // everything before it in sort order is excluded. A Mongo $or over the
   // filter's own $or requires wrapping both in $and, or one silently replaces
   // the other.
   const pageFilter = cursor
@@ -83,109 +73,78 @@ export const GET = handler(async (req: Request) => {
       }
     : filter;
 
-  const items = await ManufacturingItem.find(pageFilter)
+  const parts = await Part.find(pageFilter)
     .sort({ updatedAt: -1, _id: -1 })
     .limit(limit)
     .lean();
 
-  const last = items[items.length - 1];
+  const last = parts[parts.length - 1];
   const nextCursor =
-    items.length === limit && last
+    parts.length === limit && last
       ? encodeCursor({ updatedAtMs: new Date(last.updatedAt).getTime(), id: String(last._id) })
       : null;
 
-  // Assemblies people have actually imported, for the filter. Computed over the
-  // whole enterprise rather than the current filter, so choosing one does not
-  // immediately remove every other option from the list.
-  //
-  // aggregate() bypasses Mongoose's casting, so the id has to be a real
-  // ObjectId — a string here matches nothing and the filter silently empties.
-  const assemblies = await ManufacturingItem.aggregate([
-    {
-      $match: {
-        enterpriseId: new Types.ObjectId(s.enterpriseId),
-        "sourceAssembly.elementId": { $nin: [null, ""] },
-      },
-    },
-    {
-      $group: {
-        _id: "$sourceAssembly.elementId",
-        name: { $first: "$sourceAssembly.elementName" },
-        documentName: { $first: "$sourceAssembly.documentName" },
-        count: { $sum: 1 },
-      },
-    },
-    { $sort: { count: -1 } },
-    { $limit: 50 },
+  /*
+   * Structure counts for this page only.
+   *
+   * Two grouped queries over the page's ids, rather than a lookup per row: a
+   * fifty-row page would otherwise cost a hundred queries. Counted rather than
+   * fetched because the list only shows whether a part has children or parents,
+   * not what they are.
+   */
+  const ids = parts.map((p: any) => p._id);
+  const [childCounts, parentCounts] = await Promise.all([
+    BomLink.aggregate([
+      { $match: { parentId: { $in: ids } } },
+      { $group: { _id: "$parentId", n: { $sum: 1 } } },
+    ]),
+    BomLink.aggregate([
+      { $match: { childId: { $in: ids } } },
+      { $group: { _id: "$childId", n: { $sum: 1 } } },
+    ]),
   ]);
+  const childrenBy = new Map(childCounts.map((r: any) => [String(r._id), r.n]));
+  const parentsBy = new Map(parentCounts.map((r: any) => [String(r._id), r.n]));
 
-  // Products people have actually used, for the filter. Same reasoning as the
-  // assembly facet above: computed over the whole enterprise, not the current
-  // filter, so picking one does not remove every other option from the list.
-  const products = await ManufacturingItem.aggregate([
-    {
-      $match: {
-        enterpriseId: new Types.ObjectId(s.enterpriseId),
-        productId: { $ne: null },
-      },
-    },
-    {
-      $group: {
-        _id: "$productId",
-        name: { $first: "$productName" },
-        count: { $sum: 1 },
-      },
-    },
-    { $sort: { name: 1 } },
-    { $limit: 100 },
+  // Lifecycle facet, computed over the whole enterprise rather than the current
+  // filter, so choosing a state does not immediately remove every other option.
+  const states = await Part.aggregate([
+    { $match: { enterpriseId: new Types.ObjectId(s.enterpriseId) } },
+    { $group: { _id: "$lifecycleState", count: { $sum: 1 } } },
+    { $sort: { count: -1 } },
   ]);
 
   return ok({
     total,
     nextCursor,
-    assemblies: assemblies.map((a: any) => ({
-      elementId: String(a._id),
-      name: a.name || "Assembly",
-      documentName: a.documentName || "",
-      count: a.count,
-    })),
-    products: products.map((p: any) => ({
-      id: String(p._id),
-      name: p.name || "Product",
-      count: p.count,
-    })),
-    items: items.map((i: any) => ({
-      id: String(i._id),
-      moNumber: i.moNumber,
-      partName: i.partName,
-      partNumber: i.partNumber,
-      revision: i.revision,
-      status: i.status,
-      remarks: i.remarks,
-      quantity: i.quantity,
-      material: i.material,
-      project: i.project,
-      documentName: i.documentName,
-      elementName: i.elementName,
-      createdByEmail: i.createdByEmail ?? null,
-      productId: i.productId ? String(i.productId) : null,
-      productName: i.productName || "",
-      manufacturedBy: i.manufacturedBy || "",
-      sourceAssembly: i.sourceAssembly
-        ? {
-            elementId: i.sourceAssembly.elementId,
-            name: i.sourceAssembly.elementName || "",
-            documentName: i.sourceAssembly.documentName || "",
-            quantityInAssembly: i.sourceAssembly.quantityInAssembly ?? null,
-          }
-        : null,
-      usedInCount: (i.usedIn ?? []).length,
-      pushPending: i.pushPending,
-      writeBackBlocked: i.writeBackBlocked ?? null,
-      lastPushError: i.lastPushError,
-      lastSyncedFromOnshapeAt: i.lastSyncedFromOnshapeAt,
-      lastPushedToOnshapeAt: i.lastPushedToOnshapeAt,
-      updatedAt: i.updatedAt,
-    })),
+    states: states.map((r: any) => ({ state: String(r._id ?? ""), count: r.count })),
+    parts: parts.map((p: any) => {
+      const attrs = plainAttributes(p.attributes);
+      return {
+        id: String(p._id),
+        number: p.number,
+        name: p.name,
+        kind: p.kind,
+        revision: p.revision || "",
+        iteration: p.iteration ?? 1,
+        lifecycleState: p.lifecycleState,
+        onshapeState: p.onshapeState || "",
+        // The two attributes a list is worth showing without opening a part.
+        material: attrs.material ?? "",
+        classification: attrs.classification ?? "",
+        documentName: p.documentName,
+        elementName: p.elementName,
+        createdByEmail: p.createdByEmail ?? null,
+        releaseId: p.releaseId ? String(p.releaseId) : null,
+        childCount: childrenBy.get(String(p._id)) ?? 0,
+        usedInCount: parentsBy.get(String(p._id)) ?? 0,
+        pushPending: p.pushPending,
+        writeBackBlocked: p.writeBackBlocked ?? null,
+        lastPushError: p.lastPushError,
+        lastSyncedFromOnshapeAt: p.lastSyncedFromOnshapeAt,
+        lastPushedToOnshapeAt: p.lastPushedToOnshapeAt,
+        updatedAt: p.updatedAt,
+      };
+    }),
   });
 });

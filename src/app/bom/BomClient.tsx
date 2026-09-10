@@ -3,9 +3,8 @@
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Alert, Spinner, StatusBadge } from "@/components/ui";
-import { ProductPicker } from "@/components/ProductPicker";
 
-type Tracked = { itemId: string; moNumber: string | null; quantity: number; status: string };
+type Tracked = { partId: string; number: string | null; revision: string; lifecycleState: string };
 
 type Line = {
   key: string;
@@ -39,7 +38,7 @@ type Bom = {
 type ImportLine = {
   key: string; name: string; partNumber: string; quantity: number;
   outcome: "created" | "existing" | "failed" | "skipped";
-  moNumber: string | null; itemId: string | null; message: string;
+  number: string | null; partId: string | null; message: string;
   warning: string | null;
 };
 
@@ -64,7 +63,6 @@ export function BomClient({
   const [url, setUrl] = useState("");
   const [multiLevel, setMultiLevel] = useState(true);
   const [updateQuantities, setUpdateQuantities] = useState(false);
-  const [product, setProduct] = useState("");
 
   const [bom, setBom] = useState<Bom | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -183,7 +181,6 @@ export function BomClient({
           multiLevel: bom.multiLevel,
           keys: [...selected],
           updateQuantities,
-          product: product || undefined,
         }),
       });
       const data = await res.json();
@@ -374,15 +371,13 @@ export function BomClient({
                           <td>
                             {l.tracked ? (
                               <div style={{ display: "flex", gap: 7, alignItems: "center", flexWrap: "wrap" }}>
-                                <Link className="link mono" href={`/items/${l.tracked.itemId}`}>
-                                  {l.tracked.moNumber ?? "tracked"}
+                                <Link className="link mono" href={`/parts/${l.tracked.partId}`}>
+                                  {l.tracked.number ?? "in PLM"}
                                 </Link>
-                                <StatusBadge status={l.tracked.status} />
-                                {l.tracked.quantity !== l.quantity && (
-                                  <span style={{ fontSize: 11, color: "var(--warn)" }}>
-                                    qty {l.tracked.quantity}
-                                  </span>
+                                {l.tracked.revision && (
+                                  <span className="badge">{l.tracked.revision}</span>
                                 )}
+                                <StatusBadge status={l.tracked.lifecycleState} />
                               </div>
                             ) : (
                               <span style={{ color: "var(--text-faint)", fontSize: 12 }}>—</span>
@@ -399,14 +394,11 @@ export function BomClient({
 
           {importable.length > 0 && (
             <div className="card" style={{ padding: 14, display: "grid", gap: 11 }}>
-              <div>
-                <label className="label">Product</label>
-                <ProductPicker value={product} onChange={setProduct} useProjectOption />
-                <p style={{ fontSize: 11.5, color: "var(--text-faint)", margin: "5px 0 0", lineHeight: 1.5 }}>
-                  Applied to every part created by this import. Left on the default, each part
-                  follows its own Onshape Project property instead.
-                </p>
-              </div>
+              <p style={{ fontSize: 12, color: "var(--text-muted)", margin: 0, lineHeight: 1.5 }}>
+                The assembly itself comes into PLM too, as an assembly object, and each row below
+                becomes a component of it with the quantity the model reports. That structure is
+                what makes &ldquo;where is this used&rdquo; answerable from the other end.
+              </p>
 
               <label style={{ display: "flex", gap: 8, alignItems: "flex-start", fontSize: 13, cursor: "pointer" }}>
                 <input
@@ -485,7 +477,7 @@ function ImportSummary({ result }: { result: ImportResult }) {
         <div style={{ display: "grid", gap: 5, borderTop: "1px solid var(--border)", paddingTop: 9 }}>
           <div style={{ fontSize: 12, color: "var(--text-muted)", lineHeight: 1.5 }}>
             These parts are tracked and can be worked on as normal — the only thing missing is
-            the MO number on the part in Onshape. That happens when a part comes from a library,
+            the PLM number on the part in Onshape. That happens when a part comes from a library,
             from standard content, or from another document this account cannot write to. Where
             the part itself could not be read at all, its details were taken from the assembly&apos;s
             bill of materials instead.
@@ -493,7 +485,7 @@ function ImportSummary({ result }: { result: ImportResult }) {
           {warned.map((w) => (
             <div key={w.key} style={{ fontSize: 12, lineHeight: 1.5 }}>
               <span style={{ fontWeight: 600 }}>{w.name || w.partNumber || w.key}</span>
-              {w.moNumber && <span className="mono" style={{ color: "var(--text-faint)" }}> {w.moNumber}</span>}
+              {w.number && <span className="mono" style={{ color: "var(--text-faint)" }}> {w.number}</span>}
               <span style={{ color: "var(--warn)" }}> — {w.warning}</span>
             </div>
           ))}

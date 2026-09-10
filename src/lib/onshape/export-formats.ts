@@ -79,11 +79,13 @@ export function findFormat(id: string): ExportFormat | undefined {
 /**
  * A filename someone can find again on a shared drive.
  *
- * Part number first when there is one — that is what a supplier quotes against
- * — then the MO number, which is what ties it back to this system.
+ * The PLM number leads, because PLM is the number master and that is the
+ * identifier both a supplier quote and this system work from. The revision
+ * follows it: a released export without its revision in the name is the file
+ * that gets built to after it has been superseded.
  */
 export function exportFilename(
-  item: { moNumber?: string | null; partNumber?: string | null; partName?: string | null; revision?: string | null },
+  part: { number?: string | null; name?: string | null; revision?: string | null },
   format: ExportFormat
 ): string {
   const safe = (v: unknown) =>
@@ -92,11 +94,10 @@ export function exportFilename(
       .replace(/^-+|-+$/g, "")
       .slice(0, 60);
 
-  const parts = [
-    safe(item.partNumber) || safe(item.partName) || "part",
-    item.revision ? `Rev${safe(item.revision)}` : "",
-    safe(item.moNumber),
+  const segments = [
+    safe(part.number) || safe(part.name) || "part",
+    part.revision ? `Rev${safe(part.revision)}` : "",
   ].filter(Boolean);
 
-  return `${parts.join("_")}.${format.extension}`;
+  return `${segments.join("_")}.${format.extension}`;
 }

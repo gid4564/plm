@@ -1,9 +1,10 @@
 import { NextResponse } from "next/server";
 import { connectDb } from "@/lib/db";
-import { ManufacturingItem, PartThumbnail } from "@/lib/models";
+import { Part, PartThumbnail } from "@/lib/models";
 import { requireSession } from "@/lib/auth/session";
 import { clientForEnterprise } from "@/lib/onshape/factory";
 import { handler } from "@/lib/api";
+import { toBuffer } from "@/lib/binary";
 import type { PartCoords } from "@/lib/onshape/types";
 
 type Ctx = { params: Promise<{ id: string }> };
@@ -35,7 +36,7 @@ function placeholder(): NextResponse {
 }
 
 /**
- * Serve a rendering of the part behind a manufacturing item.
+ * Serve a rendering of the part behind a manufacturing part.
  *
  * Cached in MongoDB on first request rather than fetched during sync: rendering
  * is slow, and syncing a whole Part Studio should not wait on pictures nobody
@@ -48,14 +49,18 @@ export const GET = handler(async (req: Request, ctx: Ctx) => {
 
   await connectDb();
 
-  const item: any = await ManufacturingItem.findOne({ _id: id, enterpriseId: s.enterpriseId }).lean();
-  if (!item) return placeholder();
+  const part: any = await Part.findOne({ _id: id, enterpriseId: s.enterpriseId }).lean();
+  if (!part) return placeholder();
 
   const cached: any = await PartThumbnail.findOne({ itemId: id });
 
-  const fresh = cached?.data && cached.fetchedAt && Date.now() - cached.fetchedAt.getTime() < MAX_AGE_MS;
+  // Normalised for the reason given in lib/binary.ts: the shape Mongo returns
+  // for a binary field depends on how it was queried, and the wrong one fails
+  // silently rather than loudly.
+  const cachedBytes = toBuffer(cached?.data);
+  const fresh = cachedBytes && cached.fetchedAt && Date.now() - cached.fetchedAt.getTime() < MAX_AGE_MS;
   if (fresh && cached.size >= size) {
-    return new NextResponse(new Uint8Array(cached.data), {
+    return new NextResponse(new Uint8Array(cachedBytes), {
       status: 200,
       headers: {
         "Content-Type": cached.contentType,
@@ -71,8 +76,8 @@ export const GET = handler(async (req: Request, ctx: Ctx) => {
   }
 
   const coords: PartCoords = {
-    documentId: item.documentId, elementId: item.elementId, partId: item.partId,
-    configuration: item.configuration, workspaceId: item.workspaceId, versionId: item.versionId,
+    documentId: part.documentId, elementId: part.elementId, partId: part.partId,
+    configuration: part.configuration, workspaceId: part.workspaceId, versionId: part.versionId,
   };
 
   let thumb = null;

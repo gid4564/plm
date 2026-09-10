@@ -6,9 +6,12 @@ import { NUMBERING_TYPES, formatNumber, getOrCreateSequence, type NumberingType 
 import { handler, ok, fail } from "@/lib/api";
 
 /**
- * A standalone number-generator tool, unrelated to the manufacturing-order
- * system — see lib/numbering.ts. This route reports the current scheme for
- * each element type and lets an admin change it.
+ * The numbering schemes. PLM is the number master — see lib/numbering.ts.
+ *
+ * This route reports the current scheme for each object type and lets an admin
+ * change it. Changing a prefix does not renumber anything already issued: a
+ * number that has been written onto a part, a drawing or a quote is not PLM's
+ * to take back.
  */
 export const GET = handler(async () => {
   const s = await requireSession();

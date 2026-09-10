@@ -425,7 +425,16 @@ const SEED: AttrDef[] = [
   {
     objectType: "PART", key: "responsibleEngineer", label: "Responsible engineer", group: "Governance", order: 90,
     dataType: "STRING", requiredForRelease: true, owner: "plm", syncDirection: "none",
-    editableInStates: ["In Work"],
+    /*
+     * Under Review is included deliberately, and it is not slack.
+     *
+     * A part that reaches PLM through a release Onshape started arrives already
+     * Under Review — PLM finds out about the release only once the package
+     * exists. An attribute that is required to release but editable only In
+     * Work could therefore never be filled in on that path: the reviewer is
+     * told what is missing and given no way to supply it.
+     */
+    editableInStates: ["In Work", "Under Review"],
   },
   {
     objectType: "PART", key: "effectiveFrom", label: "Effective from", group: "Governance", order: 100,
@@ -491,3 +500,36 @@ export async function seedAttributeDefinitions(enterpriseId: string): Promise<nu
 
 /** The lifecycle states, for building editability pickers in the admin UI. */
 export const ALL_STATES = LIFECYCLE_STATES;
+
+/**
+ * Serialise a definition for the API.
+ *
+ * Lives here rather than in the route because Next allows a route module to
+ * export only its HTTP handlers — and because the shape of a definition is a
+ * property of the metamodel, not of one endpoint.
+ */
+export function shapeDefinition(d: any) {
+  return {
+    id: String(d._id),
+    objectType: d.objectType,
+    key: d.key,
+    label: d.label,
+    description: d.description ?? "",
+    dataType: d.dataType,
+    enumValues: d.enumValues ?? [],
+    unit: d.unit ?? "",
+    defaultValue: d.defaultValue ?? null,
+    required: Boolean(d.required),
+    requiredForRelease: Boolean(d.requiredForRelease),
+    editableInStates: d.editableInStates ?? [],
+    frozenAtRelease: Boolean(d.frozenAtRelease),
+    owner: d.owner ?? "onshape",
+    onshapePropertyName: d.onshapePropertyName ?? "",
+    onshapePropertyId: d.onshapePropertyId ?? "",
+    syncDirection: d.syncDirection ?? "from-onshape",
+    authority: d.authority ?? "onshape",
+    order: d.order ?? 100,
+    group: d.group ?? "",
+    system: Boolean(d.system),
+  };
+}

@@ -10,12 +10,13 @@ const Body = z.object({
 });
 
 /**
- * Generate the next number for a type, from the MOS's own UI.
+ * Generate the next number for a type, from PLM's own UI.
  *
- * Onshape's own "Part number generator" app extension is what actually hands
- * numbers to a live part, assembly or drawing — see /api/numbering/onshape-
- * extension. This endpoint exists only so a signed-in user can preview or
- * hand out a number without going through Onshape at all.
+ * Onshape's own "Part number generator" app extension is what hands numbers to
+ * a live part, assembly or drawing — see /api/numbering/onshape-extension.
+ * This endpoint exists so a signed-in user can hand out a number without going
+ * through Onshape at all: a purchased part that has no CAD model still needs
+ * an identifier, and PLM is the number master for that too.
  */
 export const POST = handler(async (req: Request) => {
   const s = await requireSession();
@@ -31,7 +32,7 @@ export const POST = handler(async (req: Request) => {
     enterpriseId: s.enterpriseId,
     type,
     number,
-    source: "manual",
+    source: "plm",
     issuedByEmail: s.email,
   });
 

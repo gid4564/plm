@@ -86,8 +86,17 @@ The workflow engine itself has no notion of an external approver — Onshape's c
 workflow docs describe only internal users, teams, and roles. **[confirmed]**
 
 **Therefore PLM cannot register itself as a workflow step.** It takes over by acting
-*as an approver account* over the API. That is the mechanism, and it is the single
-most important thing to validate on a live tenant (see Unknown U3).
+*as an approver account* over the API — specifically, as an **Onshape service user**
+that the enterprise nominates and names as a designated approver in its release
+workflow JSON. That decision has been taken (it was formerly unknown U3), and it
+shapes two things:
+
+- **PLM's local accounts stay.** The person who approves is recorded in PLM and
+  needs no Onshape seat; only the service user touches Onshape. A governance
+  reviewer with no CAD licence is the normal case, not an edge case.
+- **Setup gains a prerequisite.** If the service user is not a designated
+  approver on the workflow, the transition is refused — and PLM reports exactly
+  that, rather than a bare Onshape error.
 
 ### Proposed flow
 
@@ -224,13 +233,14 @@ Two carry-overs from MOS that matter here:
 |---|---|---|---|
 | **U1** | The discriminator in an `onshape.workflow.transition` payload that says *release package* rather than *revision*. Onshape's webhook docs show no example payload for this event and document no discriminating field. | PLM routes the whole release takeover off this event. | Log one real transition. MOS already logs every payload's keys before routing for exactly this reason |
 | **U2** | The action enum values on `POST /releasepackages/{rpid}` for approve and reject. Only `REASSIGN_TASK` is confirmed, from changelog rel-1.169. | This is the call that completes the release. | `GET /releasepackages/{rpid}` returns the available workflow actions — read them off a live package |
-| **U3** | Whether a non-human integration account can perform an `APPROVE` transition, given approve is restricted to "designated approvers or administrators" and needs an `approverSourceProperty` on the source state. | **The crux of requirement 2.** If it cannot, PLM instead fills the approver property or names its service account as an approver in the workflow JSON. | Try it on a tenant with a custom workflow; failing that, name the PLM service account as an approver in the workflow JSON |
+| ~~U3~~ | ~~Whether a non-human integration account can perform an `APPROVE` transition~~ | **Settled.** An Onshape **service user** performs the approval. | **Resolved by decision, not investigation.** The enterprise nominates an Onshape service user, and that user is named as an approver in the release workflow JSON. `decideRelease` records the decision against the PLM person who made it and performs the Onshape transition as the service account — see the two-actor note in `lib/release.ts`. **Setup requirement:** the service user must be a designated approver on the workflow, or the transition is refused with a message saying so. |
 | **U4** | Whether `syncedWithPLM` on a release package is writable by a third-party app or reserved for the Arena connection. | If writable, it is the correct way to mark packages PLM owns. | Inspect and attempt a write on a live package |
 | **U5** | Whether the released drawing must be exported against the new `versionId` or whether the revision id is addressable directly. | Determines the post-release PDF re-pull. | `GET /revisions/...` on a released drawing |
 | **U6** | Exact request body of `POST /releasepackages/release/{wfid}` beyond `wfid`, `changeOrderId`, `items[]`, `properties`. Onshape's own forum answer says "This section of the API does not seem well documented." | Only needed if PLM ever *originates* a release rather than reacting to one. | Mirror the shape of a package created through the UI |
 
-None of U1–U6 block starting: the mock client can implement the flow end to end,
-and each unknown is one live call away from being pinned down.
+U3 is settled by decision. None of the rest block progress: the mock client
+implements the flow end to end, and each remaining unknown is one live call away
+from being pinned down.
 
 ---
 

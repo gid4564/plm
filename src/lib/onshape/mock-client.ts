@@ -63,14 +63,35 @@ export class MockOnshapeClient implements OnshapeClient {
     await connectDb();
     const part: any = await MockOnshapePart.findOne(this.query(coords)).lean();
     if (part) {
-      // The simulator only models Part Studios.
-      return { id: coords.elementId, name: part.elementName, elementType: "PARTSTUDIO" };
+      return {
+        id: coords.elementId,
+        name: part.elementName,
+        elementType: String(part.elementType ?? "PARTSTUDIO").toUpperCase(),
+      };
+    }
+
+    /*
+     * Drawing tabs have to answer here too.
+     *
+     * Without this, asking about a drawing element fell through to "no part
+     * found" and the caller reported a raw lookup failure — where a real tenant
+     * answers `elementType: "DRAWING"` and lets PLM refuse it with an
+     * explanation. A mock that cannot produce the refusal is a mock that hides
+     * whether the refusal works.
+     */
+    const drawing: any = await MockOnshapeDrawing.findOne({
+      companyId: this.companyId,
+      documentId: coords.documentId,
+      elementId: coords.elementId,
+    }).lean();
+    if (drawing) {
+      return { id: coords.elementId, name: drawing.elementName, elementType: "DRAWING" };
     }
 
     // An empty partId means the caller is asking about the tab itself, which is
-    // how a BOM read probes an assembly. The simulator has no assembly tabs, so
-    // one is described for the document instead — enough for the BOM path to
-    // work end to end without inventing an element type for anything else.
+    // how a BOM read probes an assembly. The simulator has no dedicated
+    // assembly tabs, so one is described for the document instead — enough for
+    // the BOM path to work end to end.
     if (!coords.partId) {
       const doc: any = await MockOnshapePart.findOne({
         companyId: this.companyId,

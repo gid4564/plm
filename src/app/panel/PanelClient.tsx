@@ -1,94 +1,95 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { Alert, PartThumb, Spinner, StatusBadge, relTime } from "@/components/ui";
+import { Alert, PartThumb, RevChip, Spinner, StatusBadge, relTime } from "@/components/ui";
+import { AttributeInput, type Definition } from "@/components/AttributeInput";
 import { PanelHeader, SignedOut, panelWrap } from "./shared";
-import { ProductPicker } from "@/components/ProductPicker";
 
 type Ctx = {
   documentId: string; elementId: string; partId: string; configuration: string;
   workspaceId: string; versionId: string; companyId: string; userId: string;
 };
 
-const wrap = panelWrap;
-
 export function PanelClient({
-  ctx, statuses, signedIn, search,
+  ctx, signedIn, search,
 }: {
-  ctx: Ctx; statuses: string[]; signedIn: boolean; search: string;
+  ctx: Ctx; signedIn: boolean; search: string;
 }) {
-  const [item, setItem] = useState<any>(null);
-  const [loading, setLoading] = useState(signedIn && Boolean(ctx.partId));
-  const [saving, setSaving] = useState(false);
+  const [part, setPart] = useState<any>(null);
+  const [defs, setDefs] = useState<Definition[]>([]);
+  const [drawings, setDrawings] = useState<any[]>([]);
+  const [missing, setMissing] = useState<string[]>([]);
+  const [loading, setLoading] = useState(signedIn && Boolean(ctx.elementId));
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const [status, setStatus] = useState("");
-  const [remarks, setRemarks] = useState("");
-  const [product, setProduct] = useState("");
+  const [syncing, setSyncing] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [draft, setDraft] = useState<Record<string, unknown>>({});
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
+  /** Set when Onshape has us pointed somewhere PLM will not sync from. */
+  const [refusal, setRefusal] = useState<string | null>(null);
 
-  const load = useCallback(async () => {
-    if (!signedIn || !ctx.partId) return;
-    setLoading(true); setError(null);
-    try {
-      // Deliberately no sync=1: selecting a part must not enrol it in the MOS.
-      // Creation happens when someone presses Sync to MOS, or on release.
+  const params = useCallback(
+    (sync: boolean) => {
       const p = new URLSearchParams({
-        documentId: ctx.documentId, elementId: ctx.elementId, partId: ctx.partId,
+        documentId: ctx.documentId,
+        elementId: ctx.elementId,
         configuration: ctx.configuration,
       });
+      if (ctx.partId) p.set("partId", ctx.partId);
       if (ctx.workspaceId) p.set("workspaceId", ctx.workspaceId);
       if (ctx.versionId) p.set("versionId", ctx.versionId);
+      if (sync) p.set("sync", "1");
+      return p;
+    },
+    [ctx]
+  );
 
-      const res = await fetch(`/api/items/lookup?${p}`);
+  const apply = useCallback((data: any) => {
+    setPart(data.part);
+    setDefs(data.definitions ?? []);
+    setDrawings(data.drawings ?? []);
+    setMissing(data.missingForRelease ?? []);
+    setDraft({});
+    setFieldErrors({});
+  }, []);
+
+  const load = useCallback(async () => {
+    if (!signedIn || !ctx.elementId) return;
+    setLoading(true);
+    setError(null);
+    try {
+      // Deliberately no sync=1: selecting a part must not bring it into PLM.
+      // Creation happens when someone presses Sync to PLM, or on a release.
+      const res = await fetch(`/api/parts/lookup?${params(false)}`);
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Lookup failed");
-
-      setItem(data.item);
-      setStatus(data.item?.status ?? "");
-      setRemarks(data.item?.remarks ?? "");
+      apply(data);
     } catch (err: any) {
       setError(String(err.message ?? err));
     } finally {
       setLoading(false);
     }
-  }, [ctx, signedIn]);
+  }, [params, signedIn, ctx.elementId, apply]);
 
   useEffect(() => { load(); }, [load]);
 
-  const [syncing, setSyncing] = useState(false);
-  /**
-   * Set when Onshape has us pointed at an assembly rather than a Part Studio.
-   *
-   * That used to be a dead end. It no longer is: an assembly is exactly what the
-   * BOM importer wants, so the refusal offers the way through instead of just
-   * explaining itself.
-   */
-  const [assemblyContext, setAssemblyContext] = useState(false);
-
-  /** Bring this part into the MOS — the one path that allocates an MO number. */
-  async function syncNow() {
-    setSyncing(true); setError(null); setNotice(null);
+  async function sync() {
+    setSyncing(true);
+    setError(null);
+    setRefusal(null);
     try {
-      const p = new URLSearchParams({
-        documentId: ctx.documentId, elementId: ctx.elementId, partId: ctx.partId,
-        configuration: ctx.configuration, sync: "1",
-      });
-      if (ctx.workspaceId) p.set("workspaceId", ctx.workspaceId);
-      if (ctx.versionId) p.set("versionId", ctx.versionId);
-      if (product) p.set("product", product);
-
-      const res = await fetch(`/api/items/lookup?${p}`);
+      const res = await fetch(`/api/parts/lookup?${params(true)}`);
       const data = await res.json();
       if (res.status === 409) {
-        setAssemblyContext(true);
-        throw new Error(data.error || "This is not a Part Studio part");
+        // A refusal is not an error — the panel is pointed at something PLM
+        // deliberately will not file, and saying why is the useful response.
+        setRefusal(data.error);
+        return;
       }
       if (!res.ok) throw new Error(data.error || "Sync failed");
-
-      setItem(data.item);
-      setStatus(data.item?.status ?? "");
-      setRemarks(data.item?.remarks ?? "");
-      setNotice(`Created ${data.item?.moNumber}.`);
+      apply(data);
+      setNotice(`In PLM as ${data.part?.number}. Its part number has been written to Onshape.`);
     } catch (err: any) {
       setError(String(err.message ?? err));
     } finally {
@@ -97,20 +98,23 @@ export function PanelClient({
   }
 
   async function save() {
-    if (!item) return;
-    setSaving(true); setError(null); setNotice(null);
+    if (!part) return;
+    setSaving(true);
+    setFieldErrors({});
+    setNotice(null);
     try {
-      const res = await fetch(`/api/items/${item.id}`, {
+      const res = await fetch(`/api/parts/${part.id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ status, remarks, push: !item?.writeBackBlocked }),
+        body: JSON.stringify({ attributes: draft }),
       });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Save failed");
-
-      if (item?.writeBackBlocked) setNotice("Saved in the MOS.");
-      else if (data.push && !data.push.ok) setError(`Saved, but the push failed: ${data.push.error}`);
-      else setNotice("Saved and pushed to Onshape.");
+      if (res.status === 422 && data.errors) {
+        setFieldErrors(data.errors);
+        return;
+      }
+      if (!res.ok) throw new Error(data.error || "Could not save");
+      setNotice(data.changed ? `Saved as iteration ${data.part.iteration}.` : "Nothing had changed.");
       await load();
     } catch (err: any) {
       setError(String(err.message ?? err));
@@ -119,163 +123,154 @@ export function PanelClient({
     }
   }
 
-  /* ------------------------------- gate states ------------------------------ */
-
   if (!signedIn) {
-    return <SignedOut />;
-  }
-
-  if (!ctx.partId) {
     return (
-      <div style={wrap}>
+      <div style={panelWrap}>
         <PanelHeader />
-        <p style={{ color: "var(--text-muted)", margin: 0, lineHeight: 1.55 }}>
-          Select a part to see its manufacturing order.
-        </p>
+        <SignedOut />
       </div>
     );
   }
 
-  if (loading) {
+  if (!ctx.elementId) {
     return (
-      <div style={{ ...wrap, alignContent: "center", justifyContent: "center", justifyItems: "center", color: "var(--text-muted)" }}>
-        <Spinner size={18} />
-        <span style={{ fontSize: 12 }}>Syncing with Onshape…</span>
+      <div style={panelWrap}>
+        <PanelHeader />
+        <Alert kind="info">
+          Select a part in the Part Studio, or open this panel on an assembly tab, and its PLM
+          record appears here.
+        </Alert>
       </div>
     );
   }
 
-  /* --------------------------------- content -------------------------------- */
-
-  const dirty = item && (status !== (item.status ?? "") || remarks !== (item.remarks ?? ""));
-
-  const bomParams = new URLSearchParams({ documentId: ctx.documentId, elementId: ctx.elementId });
-  if (ctx.workspaceId) bomParams.set("workspaceId", ctx.workspaceId);
-  if (ctx.versionId) bomParams.set("versionId", ctx.versionId);
-  const bomHref = `/bom?${bomParams}`;
+  const dirty = Object.keys(draft).length > 0;
 
   return (
-    <div style={wrap}>
+    <div style={panelWrap}>
       <PanelHeader />
 
       {error && <Alert kind="error" onDismiss={() => setError(null)}>{error}</Alert>}
       {notice && <Alert kind="ok" onDismiss={() => setNotice(null)}>{notice}</Alert>}
+      {refusal && <Alert kind="warn" onDismiss={() => setRefusal(null)}>{refusal}</Alert>}
 
-      {!item ? (
-        <>
-          <div
-            style={{
-              background: "var(--surface)", border: "1px dashed var(--border-strong)",
-              borderRadius: 8, padding: 13, textAlign: "center",
-            }}
-          >
-            <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 3 }}>
-              {assemblyContext ? "This is an assembly" : "Not tracked in the MOS"}
-            </div>
-            <div style={{ fontSize: 11.5, color: "var(--text-muted)", lineHeight: 1.5 }}>
-              {assemblyContext
-                ? "Manufacturing orders belong to parts. Read its bill of materials to order everything it is built from."
-                : "This part has no manufacturing order. Syncing allocates an MO number and writes it back onto the part."}
-            </div>
-          </div>
-          {!assemblyContext && (
-            <div>
-              <label className="label">Product</label>
-              <ProductPicker value={product} onChange={setProduct} useProjectOption />
-            </div>
-          )}
-          {assemblyContext ? (
-            <a className="btn btn-primary" href={bomHref} target="_blank" rel="noopener noreferrer">
-              Explode this assembly&apos;s BOM ↗
-            </a>
-          ) : (
-            <button className="btn btn-primary" onClick={syncNow} disabled={syncing}>
-              {syncing && <Spinner />} Sync to MOS
-            </button>
-          )}
-          <p style={{ fontSize: 11, color: "var(--text-faint)", margin: 0, lineHeight: 1.5 }}>
-            {assemblyContext
-              ? "Importing the BOM raises one manufacturing order per part, with quantities from the model."
-              : "Parts are also brought in automatically when they are released in Onshape."}
+      {loading ? (
+        <div style={{ padding: 20, textAlign: "center" }}><Spinner size={18} /></div>
+      ) : !part ? (
+        <div style={{ display: "grid", gap: 10 }}>
+          <Alert kind="info">
+            This {ctx.partId ? "part" : "tab"} is not in PLM yet.
+          </Alert>
+          <p style={{ margin: 0, fontSize: 12, color: "var(--text-faint)" }}>
+            Adding it allocates a PLM number and writes it back onto the Onshape part. PLM is the
+            number master.
           </p>
-        </>
+          <button className="btn btn-primary" onClick={sync} disabled={syncing}>
+            {syncing ? <Spinner /> : "Sync to PLM"}
+          </button>
+        </div>
       ) : (
         <>
-          <div
-            style={{
-              background: "var(--surface)", border: "1px solid var(--border)",
-              borderRadius: 8, padding: 11,
-            }}
-          >
-            <div style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
-              <PartThumb itemId={item.id} size={46} alt={item.partName || "Part"} />
-              <div style={{ minWidth: 0, flex: 1 }}>
-                <div className="mono" style={{ fontSize: 15, fontWeight: 700, letterSpacing: "-.01em" }}>
-                  {item.moNumber || "No MO number"}
-                </div>
-            <div style={{ color: "var(--text-muted)", fontSize: 12, marginTop: 2 }}>
-              {item.partName}
-              {item.partNumber && <span className="mono"> · {item.partNumber}</span>}
-              {item.revision && <span className="mono"> · Rev {item.revision}</span>}
-            </div>
+          <div style={{ display: "flex", gap: 9, alignItems: "flex-start" }}>
+            <PartThumb partId={part.id} size={42} alt="" />
+            <div style={{ minWidth: 0, flex: 1 }}>
+              <div className="mono" style={{ fontWeight: 600, fontSize: 13 }}>{part.number}</div>
+              <div style={{ fontSize: 12, color: "var(--text-muted)", wordBreak: "break-word" }}>
+                {part.name}
+              </div>
+              <div style={{ display: "flex", gap: 5, marginTop: 4, flexWrap: "wrap" }}>
+                <RevChip revision={part.revision} iteration={part.iteration} />
+                <StatusBadge status={part.lifecycleState} />
+                {part.kind === "assembly" && <span className="badge">asm</span>}
               </div>
             </div>
-            <div style={{ marginTop: 8 }}><StatusBadge status={item.status} /></div>
           </div>
 
-          {item.writeBackBlocked ? (
-            <Alert kind="info">
-              Tracked in the MOS only — the MO number cannot be written onto this part.
+          {missing.length > 0 && part.lifecycleState !== "Released" && (
+            <Alert kind="warn">
+              Not ready to release — still needs {missing.join(", ")}.
             </Alert>
-          ) : item.pushPending && item.lastPushError ? (
-            <Alert kind="warn">{item.lastPushError}</Alert>
-          ) : null}
+          )}
 
-          <div>
-            <label className="label">Status</label>
-            <select className="select" value={status} onChange={(e) => setStatus(e.target.value)}>
-              {statuses.map((s) => <option key={s} value={s}>{s}</option>)}
-            </select>
+          {part.writeBackBlocked && (
+            <Alert kind="info">Nothing is written to Onshape for this part. {part.writeBackBlocked}</Alert>
+          )}
+          {part.pushPending && part.lastPushError && (
+            <Alert kind="warn">A write to Onshape is outstanding. {part.lastPushError}</Alert>
+          )}
+
+          <div style={{ display: "grid", gap: 9 }}>
+            {defs.map((d) => (
+              <AttributeInput
+                key={d.key}
+                def={d}
+                value={d.key in draft ? draft[d.key] : part.attributes?.[d.key] ?? null}
+                error={fieldErrors[d.key]}
+                onChange={(v) =>
+                  setDraft((prev) => {
+                    const next = { ...prev };
+                    const stored = part.attributes?.[d.key] ?? null;
+                    if (String(v ?? "") === String(stored ?? "")) delete next[d.key];
+                    else next[d.key] = v;
+                    return next;
+                  })
+                }
+              />
+            ))}
           </div>
 
-          <div>
-            <label className="label">Remarks</label>
-            <textarea
-              className="textarea" rows={4} value={remarks}
-              onChange={(e) => setRemarks(e.target.value)}
-              placeholder="Manufacturing notes…"
-            />
-          </div>
-
-          <button className="btn btn-primary" onClick={save} disabled={saving || !dirty}>
-            {saving && <Spinner />} {item?.writeBackBlocked ? "Save" : "Save & push to Onshape"}
-          </button>
-
-          <div
-            style={{
-              borderTop: "1px solid var(--border)", paddingTop: 9,
-              fontSize: 11, color: "var(--text-faint)", lineHeight: 1.6,
-            }}
-          >
-            <div>Product: {item.productName || "—"}</div>
-            <div>Material: {item.material || "—"}</div>
-            <div>Project: {item.project || "—"}</div>
-            <div>Onshape state: {item.onshapeState || "—"}</div>
-            <div style={{ marginTop: 4 }}>
-              Pulled {relTime(item.lastSyncedFromOnshapeAt)} · pushed {relTime(item.lastPushedToOnshapeAt)}
+          {dirty && (
+            <div style={{ display: "flex", gap: 7 }}>
+              <button className="btn btn-primary" onClick={save} disabled={saving} style={{ flex: 1 }}>
+                {saving ? <Spinner /> : "Save"}
+              </button>
+              <button className="btn" onClick={() => { setDraft({}); setFieldErrors({}); }}>
+                Discard
+              </button>
             </div>
+          )}
+
+          {drawings.length > 0 && (
+            <div style={{ borderTop: "1px solid var(--border)", paddingTop: 8 }}>
+              <div style={{ fontSize: 11, color: "var(--text-faint)", marginBottom: 4 }}>Drawings</div>
+              {drawings.map((d) => (
+                <div key={d.id} style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 12 }}>
+                  <span className="mono">{d.number}</span>
+                  {d.revision && <span className="badge">{d.revision}</span>}
+                  <div style={{ flex: 1 }} />
+                  {d.currentFileId && (
+                    <a
+                      className="btn btn-sm"
+                      href={`/api/drawings/${d.id}/files/${d.currentFileId}`}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      PDF
+                    </a>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+
+          <div style={{ fontSize: 11, color: "var(--text-faint)", borderTop: "1px solid var(--border)", paddingTop: 7 }}>
+            Last read from Onshape {relTime(part.lastSyncedFromOnshapeAt)}
+            {part.lastPushedToOnshapeAt ? ` · last written ${relTime(part.lastPushedToOnshapeAt)}` : ""}
           </div>
 
           <a
             className="btn btn-sm"
-            href={`/items/${item.id}`}
+            href={`/parts/${part.id}`}
             target="_blank"
-            rel="noopener noreferrer"
+            rel="noreferrer"
           >
-            Open full record ↗
+            Open in PLM
           </a>
         </>
       )}
+
+      {/* Kept so the sign-in round trip returns to this exact part context. */}
+      <input type="hidden" value={search} readOnly />
     </div>
   );
 }

@@ -27,12 +27,28 @@ const config: NextConfig = {
   async headers() {
     return [
       {
+        /*
+         * Every panel route, not just /panel.
+         *
+         * The assembly panel lives at /panel/assembly, and matching only
+         * "/panel" left it with no frame headers at all — frameable by
+         * accident rather than by decision. `:path*` covers the parent and its
+         * children, so adding a third panel needs no change here.
+         */
+        source: "/panel/:path*",
+        headers: [
+          {
+            key: "Content-Security-Policy",
+            value: "frame-ancestors 'self' https://*.onshape.com http://localhost:* ;",
+          },
+        ],
+      },
+      {
         source: "/panel",
         headers: [
           {
             key: "Content-Security-Policy",
-            value:
-              "frame-ancestors 'self' https://*.onshape.com http://localhost:* ;",
+            value: "frame-ancestors 'self' https://*.onshape.com http://localhost:* ;",
           },
         ],
       },

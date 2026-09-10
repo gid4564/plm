@@ -1,26 +1,62 @@
 import { connectDb } from "@/lib/db";
-import { Enterprise } from "@/lib/models";
+import { AttributeDefinition, Enterprise, Part } from "@/lib/models";
 import { requireSession } from "@/lib/auth/session";
 import { clientForUser } from "@/lib/onshape/factory";
-import { discoverProperties, readPropertyMap, MOS_FIELDS } from "@/lib/onshape/properties";
-import { ManufacturingItem } from "@/lib/models";
+import { discoverProperties } from "@/lib/onshape/properties";
 import type { PropertyDef } from "@/lib/onshape/types";
 import { handler, ok, fail } from "@/lib/api";
 
-/** Current mapping, without contacting Onshape. */
+/**
+ * The current attribute-to-property mapping, without contacting Onshape.
+ *
+ * Reads off the attribute definitions themselves rather than a separate map:
+ * in PLM the mapping *is* part of the metamodel, one entry per attribute, with
+ * its own direction and authority. There is no second place for it to be
+ * wrong.
+ */
 export const GET = handler(async () => {
   const s = await requireSession();
   await connectDb();
+
   const ent: any = await Enterprise.findById(s.enterpriseId).lean();
   if (!ent) return fail("Enterprise not found", 404);
 
-  const map = readPropertyMap(ent);
+  const defs: any[] = await AttributeDefinition.find({ enterpriseId: s.enterpriseId })
+    .sort({ objectType: 1, order: 1 })
+    .lean();
+
   return ok({
-    map,
-    checkedAt: ent.propertyMapCheckedAt,
-    fields: MOS_FIELDS.map((f) => ({
-      key: f.key, label: f.label, valueType: f.valueType,
-      description: f.description, propertyId: map[f.key] ?? null,
+    checkedAt: ent.onshapePropertyDefsCheckedAt ?? null,
+    /** Every property this tenant is known to have, for the mapping dropdowns. */
+    available: (ent.onshapePropertyDefs ?? []).map((d: any) => ({
+      propertyId: d.propertyId,
+      name: d.name,
+      valueType: d.valueType,
+      enumValues: d.enumValues ?? [],
+    })),
+    mappings: defs.map((d) => ({
+      id: String(d._id),
+      objectType: d.objectType,
+      key: d.key,
+      label: d.label,
+      dataType: d.dataType,
+      owner: d.owner,
+      syncDirection: d.syncDirection,
+      authority: d.authority,
+      onshapePropertyName: d.onshapePropertyName ?? "",
+      onshapePropertyId: d.onshapePropertyId ?? "",
+      /**
+       * Three states, not two.
+       *
+       * "plm-only" is a deliberate design choice, not a broken mapping — and
+       * showing it as unmapped would send an admin looking for a problem that
+       * is not there.
+       */
+      status: !d.onshapePropertyName
+        ? "plm-only"
+        : d.onshapePropertyId
+          ? "bound"
+          : "unmatched",
     })),
   });
 });
@@ -38,15 +74,17 @@ function parseOnshapeUrl(url: string) {
 }
 
 /**
- * Re-run discovery.
+ * Re-run discovery and rebind the metamodel.
  *
  * Onshape has no dependable company-level endpoint for custom property
- * definitions, but every part's metadata names its properties. So the caller may
- * pass a part URL (or we reuse an already-synced part) and read the ids straight
- * off the real thing.
+ * definitions, but every part's metadata names its properties. So the caller
+ * may pass a part URL, or PLM reuses an already-synced part, and reads the ids
+ * straight off the real thing.
  */
 export const POST = handler(async (req: Request) => {
   const s = await requireSession();
+  if (s.role !== "admin") return fail("Only an admin can run property discovery.", 403);
+
   await connectDb();
   const ent: any = await Enterprise.findById(s.enterpriseId).lean();
   if (!ent) return fail("Enterprise not found", 404);
@@ -62,7 +100,9 @@ export const POST = handler(async (req: Request) => {
     const parsed = parseOnshapeUrl(body.partUrl.trim());
     if (!parsed) {
       return fail(
-        "Could not read that Onshape URL. Open the Part Studio in Onshape and copy the address bar — it should look like https://cad.onshape.com/documents/<id>/w/<id>/e/<id>",
+        "Could not read that Onshape URL. Open the Part Studio in Onshape and copy the " +
+        "address bar — it should look like " +
+        "https://cad.onshape.com/documents/<id>/w/<id>/e/<id>",
         422
       );
     }
@@ -80,18 +120,18 @@ export const POST = handler(async (req: Request) => {
     extraDefs = meta.definitions;
     sampledFrom = `${meta.documentName || parsed.documentId} / ${meta.partName || body.partId}`;
   } else {
-    // 2. Otherwise reuse any part the MOS has already synced.
-    const item: any = await ManufacturingItem.findOne({ enterpriseId: s.enterpriseId })
+    // 2. Otherwise reuse any part PLM has already synced.
+    const part: any = await Part.findOne({ enterpriseId: s.enterpriseId })
       .sort({ lastSyncedFromOnshapeAt: -1 })
       .lean();
-    if (item) {
+    if (part) {
       try {
         const meta = await client.getPartMetadata({
-          documentId: item.documentId, elementId: item.elementId, partId: item.partId,
-          configuration: item.configuration, workspaceId: item.workspaceId, versionId: item.versionId,
+          documentId: part.documentId, elementId: part.elementId, partId: part.partId,
+          configuration: part.configuration, workspaceId: part.workspaceId, versionId: part.versionId,
         });
         extraDefs = meta.definitions;
-        sampledFrom = `${meta.documentName || item.documentName} / ${meta.partName || item.partId}`;
+        sampledFrom = `${meta.documentName || part.documentName} / ${meta.partName || part.partId}`;
       } catch {
         /* fall through to the schema endpoint alone */
       }
@@ -101,23 +141,21 @@ export const POST = handler(async (req: Request) => {
   const result = await discoverProperties(client, s.enterpriseId, ent.onshapeCompanyId, extraDefs);
 
   return ok({
-    map: result.map,
-    found: result.found,
-    missing: result.missing,
+    bound: result.bound,
+    unmatched: result.unmatched,
+    plmOnly: result.plmOnly,
     definitionCount: result.allDefinitions.length,
     sampledFrom,
     schemaError: result.schemaError,
     // Everything Onshape reported, so a name mismatch is visible rather than
-    // just showing up as "missing".
+    // just showing up as "unmatched".
     seenNames: result.allDefinitions.map((d) => d.name).sort(),
-    // Actionable setup guidance when something is not defined in the tenant.
-    instructions: result.missing.length
-      ? result.missing.map((m) =>
-          `In Onshape, go to Enterprise settings → Properties → Custom properties and add a ${m.valueType} property named exactly "${m.label}". ${m.description}` +
-          (m.valueType === "ENUM"
-            ? ` Use these enum values: ${(ent.statuses || []).join(", ")}.`
-            : "")
-        )
-      : [],
+    // Actionable guidance for an attribute naming a property the tenant lacks.
+    instructions: result.unmatched.map((u) =>
+      `No Onshape property is named "${u.wanted}", which the ${u.objectType.toLowerCase()} ` +
+      `attribute "${u.label}" maps to. Either add a custom property with that exact name ` +
+      `in Onshape (Enterprise settings → Properties), or change the attribute to point at ` +
+      `a property the tenant already has.`
+    ),
   });
 });

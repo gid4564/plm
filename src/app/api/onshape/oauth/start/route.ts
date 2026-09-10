@@ -34,7 +34,7 @@ function safeOnshapeUri(raw: string | null): string | null {
  * Onshape Dev Portal, so it is also the entry point when a user launches the app
  * from Onshape's Applications page.
  *
- * That launch can arrive with no MOS session at all, so an unauthenticated
+ * That launch can arrive with no PLM session at all, so an unauthenticated
  * caller is sent to sign in and resumed here afterwards rather than being handed
  * a 401 — a JSON error body is a dead end for someone arriving from Onshape.
  *
@@ -87,7 +87,7 @@ export const GET = handler(async (req: Request) => {
   // CSRF protection: random state echoed back by Onshape and compared.
   const state = crypto.randomBytes(16).toString("hex");
   const jar = await cookies();
-  jar.set("mos_oauth_state", `${state}|${returnTo}`, {
+  jar.set("plm_oauth_state", `${state}|${returnTo}`, {
     httpOnly: true,
     sameSite: "lax",
     secure: baseUrl().startsWith("https://"),

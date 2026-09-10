@@ -1,35 +1,80 @@
 import { connectDb } from "@/lib/db";
-import { Enterprise, ManufacturingItem, SyncLog } from "@/lib/models";
+import { ActivityLog, Enterprise, Part, Release } from "@/lib/models";
 import { clientForEnterprise } from "@/lib/onshape/factory";
 import { consumeSelfWriteMarker, syncPartFromOnshape } from "@/lib/sync";
+import { refreshReleasedDrawings, takeOverReleasePackage } from "@/lib/release";
 import { handler, ok } from "@/lib/api";
 import type { PartCoords } from "@/lib/onshape/types";
 
 /**
  * Onshape webhook receiver.
  *
- * Onshape validates a new registration by POSTing a `webhook.register` event and
- * requires a 200 back, so every path here returns 200 — a non-200 would cancel
- * the subscription. Problems are recorded in the SyncLog instead.
+ * Onshape validates a new registration by POSTing a `webhook.register` event
+ * and requires a 200 back, so every path here returns 200 — a non-200 would
+ * cancel the subscription. Problems are recorded in the activity log instead.
+ *
+ * Three events matter, and they mean three different things:
+ *
+ *   onshape.workflow.transition   a release package moved — PLM's cue to take
+ *                                 the release over
+ *   onshape.revision.created      Onshape finished creating revisions — PLM's
+ *                                 cue to collect the released drawing sheets
+ *   onshape.model.lifecycle.*     a designer edited something — keep the
+ *                                 mirrored attributes current, create nothing
  */
+
+/**
+ * Find a release-package id in a workflow-transition payload.
+ *
+ * Onshape's webhook documentation shows no example payload for
+ * `onshape.workflow.transition` and names no field distinguishing a release
+ * package from a revision, so this looks for any of the plausible keys rather
+ * than asserting one. See docs/ONSHAPE-INTEGRATION-SPEC.md, unknown U1 — the
+ * receiver logs every payload's keys before routing precisely so the real
+ * shape can be read off a live tenant and this narrowed.
+ */
+function releasePackageIdFrom(payload: Record<string, any>): string | null {
+  const objectType = String(
+    payload.objectType ?? payload.type ?? payload.workflowObjectType ?? ""
+  ).toUpperCase();
+
+  // An explicit type that says revision is a reliable negative: a revision
+  // transition is not ours to act on, whatever ids the payload also carries.
+  if (objectType === "REVISION") return null;
+
+  for (const key of [
+    "releasePackageId", "releasePackage", "rpid", "objectId",
+    "workflowObjectId", "releaseId",
+  ]) {
+    const v = payload[key] ?? payload.data?.[key];
+    if (typeof v === "string" && v.trim()) return v.trim();
+    if (v && typeof v === "object" && typeof v.id === "string" && v.id.trim()) return v.id.trim();
+  }
+  return null;
+}
+
 export const POST = handler(async (req: Request) => {
   const payload = (await req.json().catch(() => ({}))) as Record<string, any>;
   const event = String(payload.event ?? "");
 
-  // Shared-secret check. Onshape cannot send custom headers on a webhook, so the
-  // token rides in the registered callback URL as a query parameter. The header
-  // form is still accepted for the built-in simulator and for manual testing.
+  // Shared-secret check. Onshape cannot send custom headers on a webhook, so
+  // the token rides in the registered callback URL as a query parameter.
+  //
+  // This is the one place PLM still uses a shared secret: Onshape's External
+  // OAuth covers extension action URLs, but webhook registration accepts no
+  // headers and offers no signature scheme, so there is nowhere to put a
+  // bearer token. The header form is accepted too, for the simulator.
   const expected = process.env.ONSHAPE_WEBHOOK_SECRET;
   if (expected) {
     const fromQuery = new URL(req.url).searchParams.get("token");
-    const fromHeader = req.headers.get("x-mos-webhook-secret");
+    const fromHeader = req.headers.get("x-plm-webhook-secret");
     if (fromQuery !== expected && fromHeader !== expected) {
       // Recorded rather than only logged: a silently-dropped webhook is the
       // hardest possible failure to diagnose from the Onshape side.
-      console.warn("[MOS] webhook rejected: bad or missing token");
+      console.warn("[PLM] webhook rejected: bad or missing token");
       await connectDb();
-      await SyncLog.create({
-        direction: "onshape->mos", action: "error", trigger: "webhook", ok: false,
+      await ActivityLog.create({
+        direction: "onshape->plm", action: "error", trigger: "webhook", ok: false,
         message:
           "Webhook rejected: token missing or wrong. Re-register the webhook in " +
           "Settings so the callback URL carries the current ONSHAPE_WEBHOOK_SECRET.",
@@ -39,10 +84,10 @@ export const POST = handler(async (req: Request) => {
   }
 
   // Log every delivery before any routing decision. Without this an event type
-  // we do not handle vanishes silently, which is indistinguishable from Onshape
-  // never having sent it — the two need very different fixes.
+  // PLM does not handle vanishes silently, which is indistinguishable from
+  // Onshape never having sent it — and the two need very different fixes.
   console.log(
-    `[MOS] webhook in: event=${event || "(none)"} ` +
+    `[PLM] webhook in: event=${event || "(none)"} ` +
     `doc=${payload.documentId ?? "-"} el=${payload.elementId ?? "-"} ` +
     `part=${payload.partId ?? "-"} keys=[${Object.keys(payload).join(",")}]`
   );
@@ -52,40 +97,22 @@ export const POST = handler(async (req: Request) => {
     return ok({ received: true, handled: false, reason: event });
   }
 
-  /**
-   * Two events, two intents.
-   *
-   * A metadata change means "this part's details moved" — it keeps an existing
-   * item current but must never bring a new part in, or every property a
-   * designer edits would allocate an MO number they never asked for.
-   *
-   * A revision means the part has been released, which is a deliberate act and
-   * a good reason to start tracking it.
-   */
-  const INTENT: Record<string, { create: boolean; initialStatus?: string }> = {
-    "onshape.model.lifecycle.metadata": { create: false },
-    // Both are emitted around a release. Which one a tenant actually sees
-    // depends on its release workflow, so subscribe to both and let creation
-    // idempotency sort out any overlap.
-    "onshape.revision.created": { create: true, initialStatus: "Released" },
-    "onshape.workflow.transition": { create: true, initialStatus: "Released" },
-  };
+  const HANDLED = new Set([
+    "onshape.workflow.transition",
+    "onshape.revision.created",
+    "onshape.model.lifecycle.metadata",
+  ]);
 
-  const intent = INTENT[event];
-
-  const isReleaseEvent =
-    event === "onshape.revision.created" || event === "onshape.workflow.transition";
-
-  if (!intent) {
-    // Surface anything release-shaped that we are not handling: that is the
-    // signal that this tenant emits a different event than we subscribed to.
+  if (!HANDLED.has(event)) {
+    await connectDb();
+    // Surface anything release-shaped that PLM is not handling: that is the
+    // signal that this tenant emits a different event than was subscribed to.
     if (/revision|release|workflow|lifecycle/i.test(event)) {
-      await connectDb();
-      await SyncLog.create({
-        direction: "onshape->mos", action: "skipped", trigger: "webhook", ok: true,
+      await ActivityLog.create({
+        direction: "onshape->plm", action: "skipped", trigger: "webhook", ok: true,
         message:
-          `Received an unhandled event "${event}". If releases are not reaching the ` +
-          `MOS, this is likely the event your workflow emits. Payload keys: ` +
+          `Received an unhandled event "${event}". If releases are not reaching PLM, this ` +
+          `is likely the event your workflow emits. Payload keys: ` +
           `[${Object.keys(payload).join(",")}]`,
       });
     }
@@ -94,14 +121,14 @@ export const POST = handler(async (req: Request) => {
 
   await connectDb();
 
-  /**
+  /*
    * Resolve the tenant.
    *
    * Preference order matters. Onshape does not reliably send companyId — many
-   * event types omit it entirely — and matching on webhookId fails as soon as a
-   * stale subscription is still live, which is exactly when you least want the
-   * lookup to break. The enterprise id embedded in the registered callback URL
-   * is the only signal that is always present and always correct.
+   * event types omit it entirely — and matching on webhookId fails as soon as
+   * a stale subscription is still live, which is exactly when you least want
+   * the lookup to break. The enterprise id embedded in the registered callback
+   * URL is the only signal that is always present and always correct.
    */
   const url = new URL(req.url);
   const entParam = url.searchParams.get("ent");
@@ -134,170 +161,166 @@ export const POST = handler(async (req: Request) => {
   }
 
   if (!enterprise) {
-    // Record what actually arrived — "unknown enterprise" alone is not enough to
-    // act on, and this is the failure most likely to be a stale subscription.
     const detail =
       `event=${event} companyId=${companyId || "(absent)"} ` +
       `webhookId=${payloadWebhookId || "(absent)"} ent=${entParam || "(absent)"} ` +
       `payloadKeys=[${Object.keys(payload).join(",")}]`;
-    console.warn(`[MOS] webhook for unknown enterprise — ${detail}`);
-    await connectDb();
-    await SyncLog.create({
-      direction: "onshape->mos", action: "error", trigger: "webhook", ok: false,
+    console.warn(`[PLM] webhook for unknown enterprise — ${detail}`);
+    await ActivityLog.create({
+      direction: "onshape->plm", action: "error", trigger: "webhook", ok: false,
       message:
-        `Webhook could not be matched to an enterprise. This is usually a stale ` +
-        `Onshape subscription left behind by an earlier registration — remove and ` +
-        `re-register the webhook in Settings. Details: ${detail}`,
+        `Webhook could not be matched to an enterprise. This is usually a stale Onshape ` +
+        `subscription left behind by an earlier registration — remove and re-register the ` +
+        `webhook in Settings. Details: ${detail}`,
     });
     return ok({ received: true, handled: false, reason: "unknown-enterprise" });
   }
 
   const enterpriseId = String(enterprise._id);
 
-  /*
-   * Honour the release switch here — before a single Onshape call.
-   *
-   * This check used to sit further down, after the part number had been
-   * resolved to a part id. That resolution costs a /parts call and often a
-   * /documents call on top, so every release spent two calls from a rate limit
-   * shared with everyone on the tenant, only to be discarded a moment later.
-   *
-   * "Off" means do not *enrol* new parts. It does not mean ignore the release
-   * of a part already being manufactured: the MOS tracks the latest released
-   * version of what it holds, and a release is the only thing that moves it.
-   * Dropping those outright left tracked items pinned to a revision Onshape had
-   * since superseded — and a superseded revision reports as Obsolete, which is
-   * precisely how a released part comes to look obsolete in the MOS.
-   *
-   * So the event is downgraded rather than discarded, and only for parts in a
-   * document this enterprise already tracks. That check is a database lookup,
-   * so a release anywhere else still costs nothing at all.
-   */
-  let effectiveIntent = intent;
+  /* ===================================================================== */
+  /* A release package moved                                               */
+  /* ===================================================================== */
 
-  if (isReleaseEvent && enterprise.releaseSyncEnabled !== true) {
-    const tracksThisElement = await ManufacturingItem.exists({
-      enterpriseId,
-      documentId: String(payload.documentId ?? ""),
-      elementId: String(payload.elementId ?? ""),
-    });
+  if (event === "onshape.workflow.transition") {
+    const rpid = releasePackageIdFrom(payload);
 
-    if (!tracksThisElement) {
-      await Enterprise.updateOne(
-        { _id: enterpriseId },
-        { $inc: { releasesIgnored: 1 }, $set: { lastReleaseIgnoredAt: new Date() } }
-      );
-      return ok({
-        received: true,
-        handled: false,
-        reason: "release-sync-disabled",
-        hint: "Enable 'Enrol parts when they are released' in MOS Settings to change this.",
+    if (!rpid) {
+      // Not necessarily wrong — this event also fires for revision
+      // transitions, which are not PLM's to act on. Recorded with the keys so
+      // a tenant whose payload shape differs is diagnosable rather than silent.
+      await ActivityLog.create({
+        enterpriseId, direction: "onshape->plm", action: "skipped", trigger: event, ok: true,
+        message:
+          `A workflow transition arrived with no release-package id. If this was a release, ` +
+          `the payload names the package under a key PLM does not yet read — keys were: ` +
+          `[${Object.keys(payload).join(",")}].`,
       });
+      return ok({ received: true, handled: false, reason: "no-release-package-id" });
     }
 
-    // Refresh what we already hold; never bring anything new in.
-    effectiveIntent = { create: false, initialStatus: intent.initialStatus };
+    /*
+     * A package PLM already knows about is a progress report, not a new
+     * release. Onshape fires this event on every transition, including the one
+     * PLM itself performed a moment ago, so without this the approval would
+     * loop straight back into a fresh takeover attempt.
+     */
+    const known: any = await Release.findOne({
+      enterpriseId,
+      onshapeReleasePackageId: rpid,
+    }).lean();
+
+    if (known) {
+      try {
+        const { client } = await clientForEnterprise(enterpriseId);
+        const pkg = await client.getReleasePackage(rpid);
+        await Release.updateOne({ _id: known._id }, { $set: { onshapeState: pkg.state } });
+
+        // A package that has reached a released state while PLM still has
+        // drawings outstanding is the second half of requirement 5 becoming
+        // possible. Onshape's own revision event usually arrives too, but this
+        // is the earlier of the two signals and costs nothing to act on.
+        if (known.drawingRefreshPending) {
+          const refresh = await refreshReleasedDrawings(String(known._id), { client, trigger: event });
+          return ok({ received: true, handled: true, release: known.number, refresh });
+        }
+
+        return ok({ received: true, handled: true, release: known.number, onshapeState: pkg.state });
+      } catch (err: any) {
+        await ActivityLog.create({
+          enterpriseId, releaseId: known._id, direction: "onshape->plm",
+          action: "error", trigger: event, ok: false,
+          message: `Could not re-read release package ${rpid}: ${String(err?.message ?? err).slice(0, 400)}`,
+        });
+        return ok({ received: true, handled: false, error: String(err?.message ?? err) });
+      }
+    }
+
+    try {
+      const result = await takeOverReleasePackage(enterpriseId, rpid, { trigger: event });
+      return ok({ received: true, handled: result.action === "opened", ...result });
+    } catch (err: any) {
+      const message = String(err?.message ?? err);
+      console.error("[PLM] release takeover failed:", message);
+      await ActivityLog.create({
+        enterpriseId, direction: "onshape->plm", action: "error", trigger: event, ok: false,
+        message: `Could not take over release package ${rpid}: ${message}`,
+      });
+      return ok({ received: true, handled: false, error: message });
+    }
   }
 
-  // Onshape's metadata event does not name the part, so a payload without one
-  // means "something in this element changed" — the sender must tell us which
-  // part. The simulator and the panel both supply partId.
-  let partId = String(
+  /* ===================================================================== */
+  /* Onshape created revisions                                             */
+  /* ===================================================================== */
+
+  if (event === "onshape.revision.created") {
+    /*
+     * The trigger for collecting the released drawing sheets.
+     *
+     * Onshape applies the revision, the watermark and the title-block fields
+     * as it completes the release, so this is the first moment the controlled
+     * document exists. The event fires once per item, so several arrive for
+     * one release — refreshReleasedDrawings is idempotent for that reason.
+     */
+    const pending: any[] = await Release.find({
+      enterpriseId,
+      drawingRefreshPending: true,
+    }).sort({ updatedAt: -1 }).limit(5).lean();
+
+    const refreshes: unknown[] = [];
+    if (pending.length) {
+      const { client } = await clientForEnterprise(enterpriseId);
+      for (const rel of pending) {
+        refreshes.push({
+          release: rel.number,
+          ...(await refreshReleasedDrawings(String(rel._id), { client, trigger: event })),
+        });
+      }
+    }
+
+    // Also bring the released part itself up to date, so its revision and
+    // state reflect what Onshape just did — but only for parts PLM already
+    // holds. A revision elsewhere in the tenant is not PLM's business.
+    const sync = await syncReleasedPart(enterpriseId, payload, event);
+
+    return ok({ received: true, handled: refreshes.length > 0 || Boolean(sync), refreshes, sync });
+  }
+
+  /* ===================================================================== */
+  /* A designer edited metadata                                            */
+  /* ===================================================================== */
+
+  const partId = String(
     payload.partId ?? payload.data?.partId ?? payload.partIds?.[0] ?? payload.itemId ?? ""
   );
 
-  /**
-   * A revision event names the part by number, not id:
-   *
-   *   keys=[documentId, elementId, elementType, partNumber, releaseId,
-   *         revisionId, versionId, webhookId, ...]
-   *
-   * The id is the MOS's identity key, so it has to be resolved by listing the
-   * element's parts at that version and matching the number. It also carries a
-   * versionId rather than a workspaceId — versions are immutable, so any
-   * write-back has to be aimed at the document's default workspace instead.
-   */
-  let resolvedWorkspaceId: string | null = payload.workspaceId ? String(payload.workspaceId) : null;
-
-  if (!partId && payload.partNumber && enterprise) {
-    const partNumber = String(payload.partNumber);
-    try {
-      const { client } = await clientForEnterprise(String(enterprise._id));
-      const versionId = payload.versionId ? String(payload.versionId) : null;
-
-      const parts = await client.listElementParts({
-        documentId: String(payload.documentId ?? ""),
-        elementId: String(payload.elementId ?? ""),
-        partId: "",
-        workspaceId: resolvedWorkspaceId,
-        versionId,
-      });
-
-      const match = parts.find((p) => p.partNumber && p.partNumber === partNumber);
-      if (match) {
-        partId = match.partId;
-        // Point subsequent reads and the MO write-back at a workspace.
-        if (!resolvedWorkspaceId) {
-          const doc = await client.getDocumentInfo(String(payload.documentId ?? ""));
-          resolvedWorkspaceId = doc.defaultWorkspaceId;
-        }
-      } else {
-        await SyncLog.create({
-          enterpriseId: String(enterprise._id),
-          direction: "onshape->mos", action: "skipped", trigger: event, ok: true,
-          message:
-            `Revision of part number "${partNumber}" could not be matched to a part in ` +
-            `element ${payload.elementId}. ${parts.length} part(s) were found there` +
-            (parts.length ? `: ${parts.map((p) => p.partNumber || "(no number)").join(", ")}` : "") + ".",
-        });
-      }
-    } catch (err: any) {
-      await SyncLog.create({
-        enterpriseId: String(enterprise._id),
-        direction: "onshape->mos", action: "error", trigger: event, ok: false,
-        message: `Could not resolve part number "${partNumber}" to a part id: ${err?.message ?? err}`,
-      });
-    }
-  }
-
   if (!partId) {
-    // Revision payloads are not well documented; record the keys we did get so an
-    // unhandled shape is diagnosable rather than silently dropped.
-    if (event === "onshape.revision.created") {
-      await SyncLog.create({
-        enterpriseId: enterprise ? String(enterprise._id) : null,
-        direction: "onshape->mos", action: "skipped", trigger: "webhook:revision", ok: true,
-        message:
-          `Revision event carried no recognisable partId. Payload keys: ` +
-          `${Object.keys(payload).join(", ")}.`,
-      });
-      return ok({ received: true, handled: false, reason: "revision-without-partId" });
-    }
-    await SyncLog.create({
-      enterpriseId, direction: "onshape->mos", action: "skipped", trigger: "webhook", ok: true,
-      message: `Metadata event for element ${payload.elementId ?? "?"} carried no partId; nothing to sync.`,
+    await ActivityLog.create({
+      enterpriseId, direction: "onshape->plm", action: "skipped", trigger: "webhook", ok: true,
+      message:
+        `Metadata event for element ${payload.elementId ?? "?"} carried no partId; ` +
+        `nothing to sync.`,
     });
-    return ok({ received: true, handled: false, reason: "no-partId" });
+    return ok({ received: true, handled: false, reason: "no-partId", resolvedBy });
   }
 
   /*
-   * Make sure there is a workspace, whichever branch got us here.
+   * Make sure there is a workspace.
    *
-   * Only the part-number path resolved one, so a metadata event that already
-   * named a partId and carried a versionId arrived with no workspace at all —
-   * and was then read against that version. During a release that meant reading
-   * the revision the release had just obsoleted.
-   *
-   * The document lookup is cached for five minutes, so a burst of events around
-   * one release costs a single call.
+   * A metadata event can carry a versionId and no workspaceId, and reading
+   * against that version during a release means reading the revision the
+   * release has just obsoleted. The document lookup is cached for five
+   * minutes, so a burst of events around one release costs a single call.
    */
-  if (!resolvedWorkspaceId && payload.documentId) {
+  let workspaceId: string | null = payload.workspaceId ? String(payload.workspaceId) : null;
+  if (!workspaceId && payload.documentId) {
     try {
       const { client } = await clientForEnterprise(enterpriseId);
       const doc = await client.getDocumentInfo(String(payload.documentId));
-      resolvedWorkspaceId = doc.defaultWorkspaceId;
+      workspaceId = doc.defaultWorkspaceId;
     } catch {
-      // Leave it null; the sync falls back to what the item already records.
+      // Leave it null; the sync falls back to what the part already records.
     }
   }
 
@@ -306,14 +329,7 @@ export const POST = handler(async (req: Request) => {
     elementId: String(payload.elementId ?? ""),
     partId,
     configuration: String(payload.configuration ?? "default"),
-    // Both, deliberately.
-    //
-    // The workspace is where the MO number has to be written, because a version
-    // is immutable. The version is what the order is *for* — a release event
-    // means "this revision is approved to make". Discarding it here used to
-    // leave the item reading from the workspace, so the next re-sync replaced
-    // revision A with "-" and Released with In Progress.
-    workspaceId: resolvedWorkspaceId,
+    workspaceId,
     versionId: payload.versionId ? String(payload.versionId) : null,
   };
 
@@ -321,8 +337,9 @@ export const POST = handler(async (req: Request) => {
     return ok({ received: true, handled: false, reason: "incomplete-coords" });
   }
 
-  // Note whether this looks like the echo of our own write-back. We still run
-  // the sync — see consumeSelfWriteMarker for why dropping it loses real edits.
+  // Note whether this looks like the echo of PLM's own write-back. The sync
+  // still runs — see consumeSelfWriteMarker for why dropping it loses real
+  // designer edits that land inside the TTL window.
   const likelyEcho = await consumeSelfWriteMarker(enterpriseId, coords);
 
   try {
@@ -330,24 +347,107 @@ export const POST = handler(async (req: Request) => {
     const result = await syncPartFromOnshape(enterpriseId, coords, {
       trigger: likelyEcho ? `${event} (echo of our write)` : event,
       client,
-      create: effectiveIntent.create,
-      initialStatus: effectiveIntent.initialStatus,
-      // Only a release may move the revision, and it reads its own version to
-      // find it. A metadata event — including the one Onshape emits for the
-      // revision a release has just obsoleted — never touches it.
-      fromRelease: isReleaseEvent,
+      // A metadata edit never brings a new part in. Creation is deliberate:
+      // someone presses Sync in the panel, or a release package names it.
+      // Otherwise every property a designer touched would allocate a PLM
+      // number nobody asked for.
+      create: false,
     });
     return ok({ received: true, handled: result.action !== "skipped-unknown", likelyEcho, ...result });
   } catch (err: any) {
     const message = String(err?.message ?? err);
-    console.error("[MOS] webhook sync failed:", message);
-    await SyncLog.create({
-      enterpriseId, direction: "onshape->mos", action: "error", trigger: "webhook", ok: false, message,
+    console.error("[PLM] webhook sync failed:", message);
+    await ActivityLog.create({
+      enterpriseId, direction: "onshape->plm", action: "error", trigger: "webhook", ok: false, message,
     });
-    // Still 200 — see note above.
+    // Still 200 — see the note at the top.
     return ok({ received: true, handled: false, error: message });
   }
 });
+
+/**
+ * Update the part a revision event names, if PLM holds it.
+ *
+ * A revision event names the part by *number*, not id — the payload carries
+ * `partNumber`, `revisionId` and `versionId` but no partId — so the id has to
+ * be resolved by listing the element's parts at that version and matching.
+ * That costs a call, so it is only spent on an element PLM already tracks.
+ */
+async function syncReleasedPart(
+  enterpriseId: string,
+  payload: Record<string, any>,
+  event: string
+): Promise<unknown | null> {
+  const documentId = String(payload.documentId ?? "");
+  const elementId = String(payload.elementId ?? "");
+  if (!documentId || !elementId) return null;
+
+  const tracked = await Part.exists({ enterpriseId, documentId, elementId });
+  if (!tracked) return null;
+
+  let partId = String(payload.partId ?? "");
+  const versionId = payload.versionId ? String(payload.versionId) : null;
+  let workspaceId: string | null = payload.workspaceId ? String(payload.workspaceId) : null;
+
+  const { client } = await clientForEnterprise(enterpriseId);
+
+  if (!partId && payload.partNumber) {
+    const partNumber = String(payload.partNumber);
+    try {
+      const parts = await client.listElementParts({
+        documentId, elementId, partId: "", workspaceId, versionId,
+      });
+      const match = parts.find((p) => p.partNumber && p.partNumber === partNumber);
+      if (match) partId = match.partId;
+      else {
+        await ActivityLog.create({
+          enterpriseId, direction: "onshape->plm", action: "skipped", trigger: event, ok: true,
+          message:
+            `Revision of part number "${partNumber}" could not be matched to a part in ` +
+            `element ${elementId}. ${parts.length} part(s) were found there` +
+            (parts.length ? `: ${parts.map((p) => p.partNumber || "(no number)").join(", ")}` : "") + ".",
+        });
+        return null;
+      }
+    } catch (err: any) {
+      await ActivityLog.create({
+        enterpriseId, direction: "onshape->plm", action: "error", trigger: event, ok: false,
+        message: `Could not resolve part number "${partNumber}" to a part id: ${err?.message ?? err}`,
+      });
+      return null;
+    }
+  }
+
+  // Writes need a workspace: a version is immutable and cannot take the number.
+  if (!workspaceId) {
+    try {
+      workspaceId = (await client.getDocumentInfo(documentId)).defaultWorkspaceId;
+    } catch {
+      // Fall back to whatever the part already records.
+    }
+  }
+
+  try {
+    return await syncPartFromOnshape(
+      enterpriseId,
+      { documentId, elementId, partId, configuration: "default", workspaceId, versionId },
+      {
+        trigger: event,
+        client,
+        create: false,
+        // Only a release may move the revision, and it reads its own version to
+        // find it. This is that case.
+        fromRelease: true,
+      }
+    );
+  } catch (err: any) {
+    await ActivityLog.create({
+      enterpriseId, direction: "onshape->plm", action: "error", trigger: event, ok: false,
+      message: `Could not sync the released part: ${String(err?.message ?? err).slice(0, 400)}`,
+    });
+    return null;
+  }
+}
 
 /** Some tools probe the URL with GET before registering. */
 export const GET = handler(async () =>

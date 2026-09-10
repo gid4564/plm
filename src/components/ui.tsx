@@ -2,19 +2,55 @@
 
 import React from "react";
 
-/** Colour a status chip by what the status means, not by list position. */
+/**
+ * Colour a lifecycle chip by what the state means, not by list position.
+ *
+ * Approved and Released are deliberately different colours. They are one step
+ * apart and mean very different things — Approved is a decision PLM has taken
+ * that Onshape has not yet acted on, and a reader scanning a list needs to see
+ * that difference at a glance rather than read the word.
+ */
 export function StatusBadge({ status }: { status: string }) {
   const s = (status || "").toLowerCase();
   let bg = "var(--surface-2)", fg = "var(--text-muted)", bd = "var(--border)";
 
   if (s.includes("released")) { bg = "var(--ok-soft)"; fg = "var(--ok)"; bd = "var(--ok)"; }
   else if (s.includes("obsolete") || s.includes("cancel")) { bg = "var(--danger-soft)"; fg = "var(--danger)"; bd = "var(--danger)"; }
-  else if (s.includes("order") || s.includes("production")) { bg = "var(--accent-soft)"; fg = "var(--accent)"; bd = "var(--accent)"; }
-  else if (s.includes("review") || s.includes("construction")) { bg = "var(--warn-soft)"; fg = "var(--warn)"; bd = "var(--warn)"; }
+  else if (s.includes("reject")) { bg = "var(--danger-soft)"; fg = "var(--danger)"; bd = "var(--danger)"; }
+  else if (s.includes("approved")) { bg = "var(--accent-soft)"; fg = "var(--accent)"; bd = "var(--accent)"; }
+  else if (s.includes("review")) { bg = "var(--warn-soft)"; fg = "var(--warn)"; bd = "var(--warn)"; }
 
   return (
     <span className="badge" style={{ background: bg, color: fg, borderColor: bd }}>
       {status || "—"}
+    </span>
+  );
+}
+
+/**
+ * A part's version, as one legible token: "A.3", or "–.2" before release.
+ *
+ * The dash is not decoration. An unreleased part genuinely has no revision —
+ * Onshape assigns it at release — and showing the iteration alone would read
+ * as though the revision were simply missing from the display.
+ */
+export function RevChip({ revision, iteration }: { revision: string; iteration: number }) {
+  const released = Boolean(revision);
+  return (
+    <span
+      className="badge mono"
+      title={
+        released
+          ? `Revision ${revision}, iteration ${iteration}`
+          : `Not yet released — iteration ${iteration}. Onshape assigns the revision at release.`
+      }
+      style={{
+        background: released ? "var(--ok-soft)" : "var(--surface-2)",
+        color: released ? "var(--ok)" : "var(--text-faint)",
+        borderColor: released ? "var(--ok)" : "var(--border)",
+      }}
+    >
+      {released ? revision : "–"}.{iteration}
     </span>
   );
 }
@@ -103,16 +139,16 @@ export function relTime(d: string | Date | null | undefined): string {
 }
 
 /**
- * Part rendering, fetched through the MOS rather than Onshape directly —
- * Onshape's image endpoints need the integration account's credentials.
+ * Part rendering, fetched through PLM rather than Onshape directly —
+ * Onshape's image endpoints need the service account's credentials.
  *
  * Failures fall back to a neutral tile instead of a broken-image icon, and
  * loading is lazy so a long dashboard does not request every picture at once.
  */
 export function PartThumb({
-  itemId, size = 40, radius = 6, alt = "",
+  partId, size = 40, radius = 6, alt = "",
 }: {
-  itemId: string; size?: number; radius?: number; alt?: string;
+  partId: string; size?: number; radius?: number; alt?: string;
 }) {
   const [failed, setFailed] = React.useState(false);
 
@@ -133,7 +169,7 @@ export function PartThumb({
   return (
     // eslint-disable-next-line @next/next/no-img-element
     <img
-      src={`/api/items/${itemId}/thumbnail?size=${Math.max(120, size * 3)}`}
+      src={`/api/parts/${partId}/thumbnail?size=${Math.max(120, size * 3)}`}
       alt={alt}
       width={size}
       height={size}

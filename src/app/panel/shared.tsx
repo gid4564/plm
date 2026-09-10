@@ -16,7 +16,7 @@ export const panelWrap: React.CSSProperties = {
   background: "var(--bg)", display: "grid", gap: 11, alignContent: "start",
 };
 
-export function PanelHeader({ title = "Manufacturing Order" }: { title?: string }) {
+export function PanelHeader({ title = "PLM" }: { title?: string }) {
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
       {/* eslint-disable-next-line @next/next/no-img-element */}

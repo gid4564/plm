@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { connectDb } from "@/lib/db";
-import { ManufacturingItem, SyncLog } from "@/lib/models";
+import { ActivityLog, Part } from "@/lib/models";
 import { requireSession } from "@/lib/auth/session";
 import { clientForEnterprise } from "@/lib/onshape/factory";
 import { EXPORT_FORMATS, exportFilename, findFormat } from "@/lib/onshape/export-formats";
@@ -28,7 +28,7 @@ export const GET = handler(async (_req: Request, ctx: Ctx) => {
 });
 
 /**
- * Export the part behind a manufacturing item.
+ * Export the part behind a manufacturing part.
  *
  * Returns the file itself rather than a link. Onshape's download URLs are
  * short-lived and need the integration account's credentials, so handing one to
@@ -48,22 +48,22 @@ export const POST = handler(async (req: Request, ctx: Ctx) => {
   }
 
   await connectDb();
-  const item: any = await ManufacturingItem.findOne({ _id: id, enterpriseId: s.enterpriseId }).lean();
-  if (!item) return fail("Manufacturing item not found", 404);
+  const part: any = await Part.findOne({ _id: id, enterpriseId: s.enterpriseId }).lean();
+  if (!part) return fail("Part not found", 404);
 
   // Same source the rest of the MOS reads from: the workspace where there is
   // one, the pinned version only for a part that has no other home.
   const coords: PartCoords = readCoords(
     preferKnownWorkspace(
       {
-        documentId: item.documentId,
-        elementId: item.elementId,
-        partId: item.partId,
-        configuration: item.configuration,
-        workspaceId: item.workspaceId,
-        versionId: item.versionId,
+        documentId: part.documentId,
+        elementId: part.elementId,
+        partId: part.partId,
+        configuration: part.configuration,
+        workspaceId: part.workspaceId,
+        versionId: part.versionId,
       },
-      item.workspaceId ?? null
+      part.workspaceId ?? null
     )
   );
 
@@ -71,12 +71,12 @@ export const POST = handler(async (req: Request, ctx: Ctx) => {
 
   try {
     const result = await client.exportPart(coords, format);
-    const filename = exportFilename(item, format);
+    const filename = exportFilename(part, format);
 
-    await SyncLog.create({
+    await ActivityLog.create({
       enterpriseId: s.enterpriseId,
-      itemId: item._id,
-      direction: "onshape->mos",
+      partId: part._id,
+      direction: "onshape->plm",
       action: "exported",
       trigger: `export:${format.id}`,
       ok: true,
@@ -97,17 +97,17 @@ export const POST = handler(async (req: Request, ctx: Ctx) => {
         "Content-Length": String(result.data.length),
         "Cache-Control": "no-store",
         // Read by the browser so it can name the download and report the wait.
-        "X-MOS-Filename": filename,
-        "X-MOS-Elapsed-Ms": String(result.elapsedMs),
-        "X-MOS-Via": result.via,
+        "X-PLM-Filename": filename,
+        "X-PLM-Elapsed-Ms": String(result.elapsedMs),
+        "X-PLM-Via": result.via,
       },
     });
   } catch (err: any) {
     const message = String(err?.message ?? err);
-    await SyncLog.create({
+    await ActivityLog.create({
       enterpriseId: s.enterpriseId,
-      itemId: item._id,
-      direction: "onshape->mos",
+      partId: part._id,
+      direction: "onshape->plm",
       action: "error",
       trigger: `export:${format.id}`,
       ok: false,

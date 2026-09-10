@@ -1,7 +1,5 @@
 import { getSession } from "@/lib/auth/session";
 import { PanelClient } from "./PanelClient";
-import { connectDb } from "@/lib/db";
-import { Enterprise } from "@/lib/models";
 
 export const dynamic = "force-dynamic";
 
@@ -60,12 +58,8 @@ export default async function PanelPage({
   }
   const search = query.toString() ? `?${query.toString()}` : "";
 
-  let statuses: string[] = [];
-  if (session) {
-    await connectDb();
-    const ent: any = await Enterprise.findById(session.enterpriseId).lean();
-    statuses = ent?.statuses ?? [];
-  }
-
-  return <PanelClient ctx={ctx} statuses={statuses} signedIn={Boolean(session)} search={search} />;
+  // Nothing enterprise-scoped is needed up front any more: the attribute
+  // schema travels with the lookup, together with the server-computed
+  // editability for this part's lifecycle state.
+  return <PanelClient ctx={ctx} signedIn={Boolean(session)} search={search} />;
 }

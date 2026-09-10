@@ -1,39 +1,82 @@
 import { z } from "zod";
 import { connectDb } from "@/lib/db";
-import { Enterprise } from "@/lib/models";
+import { ActivityLog, Enterprise, User } from "@/lib/models";
 import { requireSession } from "@/lib/auth/session";
+import { clientForUser } from "@/lib/onshape/factory";
 import { handler, ok, fail } from "@/lib/api";
 
 export const GET = handler(async () => {
   const s = await requireSession();
   await connectDb();
+
   const ent: any = await Enterprise.findById(s.enterpriseId).lean();
   if (!ent) return fail("Enterprise not found", 404);
 
+  const service: any = ent.integrationUserId
+    ? await User.findById(ent.integrationUserId).select("email name onshapeConnectedAt").lean()
+    : null;
+
+  const candidates: any[] = await User.find({
+    enterpriseId: s.enterpriseId,
+    onshapeAccessToken: { $ne: null },
+  }).select("email name onshapeConnectedAt").lean();
+
   return ok({
     name: ent.name,
-    releaseSyncEnabled: Boolean(ent.releaseSyncEnabled),
+    onshapeCompanyId: ent.onshapeCompanyId,
+    onshapeDomain: ent.onshapeDomain ?? "",
+    releaseTakeoverEnabled: Boolean(ent.releaseTakeoverEnabled),
     releasesIgnored: ent.releasesIgnored ?? 0,
     lastReleaseIgnoredAt: ent.lastReleaseIgnoredAt ?? null,
-    facilities: ent.facilities ?? [],
+    ignoreConfigurations: ent.ignoreConfigurations !== false,
+    onshapeReleaseWorkflowId: ent.onshapeReleaseWorkflowId ?? null,
+    onshapeReleaseWorkflowName: ent.onshapeReleaseWorkflowName ?? "",
+    webhookId: ent.webhookId ?? null,
+    webhookRegisteredAt: ent.webhookRegisteredAt ?? null,
+    /**
+     * The Onshape account PLM acts as for the release transition.
+     *
+     * Named prominently because it is a setup prerequisite, not a detail:
+     * Onshape restricts an approve transition to designated approvers, so this
+     * account has to be one in the release workflow or every approval will be
+     * refused.
+     */
+    serviceAccount: service
+      ? {
+          email: service.email,
+          name: service.name ?? "",
+          connectedAt: service.onshapeConnectedAt ?? null,
+        }
+      : null,
+    serviceAccountCandidates: candidates.map((u) => ({
+      id: String(u._id),
+      email: u.email,
+      name: u.name ?? "",
+      connectedAt: u.onshapeConnectedAt ?? null,
+    })),
   });
 });
 
 const Body = z.object({
-  releaseSyncEnabled: z.boolean().optional(),
   /**
-   * The whole list, replaced — not one entry appended. Simpler for a list
-   * this short, and it is what lets removing an entry and renaming one be the
-   * same operation as adding one, from the client's point of view.
+   * Whether PLM takes over releases started in Onshape.
+   *
+   * Admin only, and off by default. Switched on, PLM begins approving and
+   * rejecting real release packages on a shared tenant — that has to be
+   * somebody's explicit decision.
    */
-  facilities: z.array(z.string().trim().min(1).max(80)).max(50).optional(),
+  releaseTakeoverEnabled: z.boolean().optional(),
+  ignoreConfigurations: z.boolean().optional(),
+  /** Which connected Onshape account PLM acts as for background writes and transitions. */
+  integrationUserId: z.string().min(1).optional(),
+  onshapeDomain: z.string().max(200).optional(),
 });
 
 /**
  * Change enterprise-wide behaviour.
  *
- * Admin only: this decides whether other people's releases create records for
- * everyone, which is not one user's call to make.
+ * Admin only: these decide how other people's releases are handled, which is
+ * not one user's call to make.
  */
 export const PATCH = handler(async (req: Request) => {
   const s = await requireSession();
@@ -41,33 +84,99 @@ export const PATCH = handler(async (req: Request) => {
 
   const parsed = Body.safeParse(await req.json());
   if (!parsed.success) return fail(parsed.error.issues[0].message, 422);
+  const b = parsed.data;
 
   await connectDb();
   const ent: any = await Enterprise.findById(s.enterpriseId);
   if (!ent) return fail("Enterprise not found", 404);
 
-  if (parsed.data.releaseSyncEnabled !== undefined) {
-    ent.releaseSyncEnabled = parsed.data.releaseSyncEnabled;
+  if (b.releaseTakeoverEnabled !== undefined) {
+    ent.releaseTakeoverEnabled = b.releaseTakeoverEnabled;
     // Enabling starts a fresh count; the old one measured a different policy.
-    if (parsed.data.releaseSyncEnabled) {
+    if (b.releaseTakeoverEnabled) {
       ent.releasesIgnored = 0;
       ent.lastReleaseIgnoredAt = null;
     }
-  }
-
-  if (parsed.data.facilities !== undefined) {
-    // De-duplicated case-insensitively — "In-house" and "in-house" typed a
-    // year apart should not both show up as separate options on every item.
-    const seen = new Set<string>();
-    ent.facilities = parsed.data.facilities.filter((f) => {
-      const key = f.toLowerCase();
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
+    await ActivityLog.create({
+      enterpriseId: s.enterpriseId, direction: "plm", action: "updated",
+      trigger: "user-edit", ok: true,
+      message:
+        `${s.email} turned release takeover ` +
+        `${b.releaseTakeoverEnabled ? "on" : "off"} for this enterprise`,
     });
   }
 
+  if (b.ignoreConfigurations !== undefined) ent.ignoreConfigurations = b.ignoreConfigurations;
+  if (b.onshapeDomain !== undefined) ent.onshapeDomain = b.onshapeDomain.trim();
+
+  if (b.integrationUserId) {
+    const user: any = await User.findOne({
+      _id: b.integrationUserId,
+      enterpriseId: s.enterpriseId,
+    }).lean();
+    if (!user) return fail("That user is not in this enterprise.", 404);
+    if (!user.onshapeAccessToken) {
+      return fail(
+        `${user.email} has not connected their Onshape account, so PLM cannot act as them. ` +
+        `Ask them to sign in and press Connect Onshape.`,
+        422
+      );
+    }
+    ent.integrationUserId = user._id;
+  }
+
+  await ent.save();
+  return ok({
+    releaseTakeoverEnabled: ent.releaseTakeoverEnabled,
+    ignoreConfigurations: ent.ignoreConfigurations,
+    onshapeDomain: ent.onshapeDomain,
+    integrationUserId: ent.integrationUserId ? String(ent.integrationUserId) : null,
+  });
+});
+
+/**
+ * Discover the Onshape release workflow this enterprise releases through.
+ *
+ * Needed before a release can be raised from PLM, and before PLM can name the
+ * transitions on a package it takes over. Kept as an explicit action rather
+ * than done lazily, because a tenant with no published custom workflow gets a
+ * null back — a normal state that an admin should see stated plainly rather
+ * than discover when the first release fails.
+ */
+export const POST = handler(async (req: Request) => {
+  const s = await requireSession();
+  if (s.role !== "admin") return fail("Only an admin can change enterprise settings", 403);
+
+  const { action } = (await req.json().catch(() => ({}))) as { action?: string };
+  if (action !== "discover-workflow") {
+    return fail(`Unknown action "${action}". Use "discover-workflow".`, 422);
+  }
+
+  await connectDb();
+  const ent: any = await Enterprise.findById(s.enterpriseId);
+  if (!ent) return fail("Enterprise not found", 404);
+
+  const client = await clientForUser(s.userId);
+  const wf = await client.getReleaseWorkflow(ent.onshapeCompanyId);
+
+  if (!wf) {
+    return ok({
+      workflow: null,
+      message:
+        "Onshape reported no release workflow for this company. An enterprise needs a " +
+        "published release workflow before PLM can transition its release packages — see " +
+        "Onshape's Enterprise settings → Release management.",
+    });
+  }
+
+  ent.onshapeReleaseWorkflowId = wf.id;
+  ent.onshapeReleaseWorkflowName = wf.name;
   await ent.save();
 
-  return ok({ releaseSyncEnabled: ent.releaseSyncEnabled, facilities: ent.facilities });
+  return ok({
+    workflow: wf,
+    message:
+      `Found "${wf.name}". Make sure the Onshape service account PLM acts as is a ` +
+      `designated approver on this workflow, or approvals will be refused.`,
+  });
 });

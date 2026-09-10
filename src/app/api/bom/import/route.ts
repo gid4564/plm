@@ -17,13 +17,17 @@ const Body = z.object({
    * a person, so they must not be accepted from the browser.
    */
   keys: z.array(z.string().min(1)).min(1).max(MAX_IMPORT),
-  /** Overwrite the quantity on parts the MOS already tracks. Off by default. */
+  /** Overwrite quantities already recorded on the structure edges. Off by default. */
   updateQuantities: z.boolean().optional().default(false),
-  /** Apply one product to every part created by this import. Left unset, each part follows its own Onshape Project. */
-  product: z.string().min(1).max(200).optional(),
 });
 
-/** Create manufacturing orders for the selected BOM rows. */
+/**
+ * Bring the selected BOM rows into PLM, under the assembly they came from.
+ *
+ * The assembly itself is synced as a PLM object first, so the rows below it
+ * become real structure rather than a flat list of parts that happen to have
+ * arrived together.
+ */
 export const POST = handler(async (req: Request) => {
   const s = await requireSession();
 
@@ -44,10 +48,7 @@ export const POST = handler(async (req: Request) => {
       versionId: b.versionId ?? null,
     },
     b.keys,
-    {
-      multiLevel: b.multiLevel, updateQuantities: b.updateQuantities,
-      product: b.product ? { name: b.product } : undefined,
-    }
+    { multiLevel: b.multiLevel, updateQuantities: b.updateQuantities }
   );
 
   return ok({ assembly, ...result });

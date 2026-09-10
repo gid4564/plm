@@ -15,6 +15,23 @@ export function handler<A extends unknown[]>(fn: (...args: A) => Promise<Respons
     try {
       return await fn(...args);
     } catch (err: unknown) {
+      /*
+       * Next signals redirect() and notFound() by throwing.
+       *
+       * These are control flow, not failures, and they carry a `digest` that
+       * Next itself reads further up the stack — so they have to pass straight
+       * through. Caught and turned into a 500, the OAuth authorize endpoint
+       * would answer "server error" at exactly the moment it meant to send the
+       * user to the consent screen.
+       */
+      if (
+        err && typeof err === "object" &&
+        typeof (err as { digest?: unknown }).digest === "string" &&
+        /^NEXT_(REDIRECT|NOT_FOUND|HTTP_ERROR_FALLBACK)/.test((err as { digest: string }).digest)
+      ) {
+        throw err;
+      }
+
       if (err instanceof HttpError) return fail(err.message, err.status);
 
       // A malformed :id reaches Mongoose as a CastError. That is a bad request
@@ -25,7 +42,7 @@ export function handler<A extends unknown[]>(fn: (...args: A) => Promise<Respons
       }
 
       const message = err instanceof Error ? err.message : String(err);
-      console.error("[MOS] route error:", message);
+      console.error("[PLM] route error:", message);
       return fail(message, 500);
     }
   };

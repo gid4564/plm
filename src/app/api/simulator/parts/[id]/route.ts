@@ -17,7 +17,7 @@ const Body = z.object({
  * The designer's "Save" in the simulated Onshape.
  *
  * Writes the properties into the mock store, then POSTs a genuine
- * onshape.model.lifecycle.metadata payload at the MOS webhook receiver over
+ * onshape.model.lifecycle.metadata payload at the PLM webhook receiver over
  * HTTP — the receiver is exercised exactly as Onshape would exercise it.
  */
 export const PATCH = handler(async (req: Request, ctx: Ctx) => {

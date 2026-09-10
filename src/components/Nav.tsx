@@ -10,8 +10,10 @@ type Me = {
 };
 
 const LINKS = [
-  { href: "/dashboard", label: "Manufacturing Items" },
+  { href: "/dashboard", label: "Parts" },
+  { href: "/releases", label: "Releases" },
   { href: "/bom", label: "Import from Assembly" },
+  { href: "/attributes", label: "Attributes" },
   { href: "/settings", label: "Settings" },
   { href: "/simulator", label: "Onshape Simulator" },
   { href: "/manual", label: "Manual" },
@@ -51,7 +53,7 @@ export function Nav() {
         >
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img src="/icon.svg" alt="" width={24} height={24} style={{ display: "block" }} />
-          <strong style={{ fontSize: 14.5, letterSpacing: "-.01em" }}>MOS</strong>
+          <strong style={{ fontSize: 14.5, letterSpacing: "-.01em" }}>PLM</strong>
         </Link>
 
         <nav style={{ display: "flex", gap: 3, flex: 1 }}>

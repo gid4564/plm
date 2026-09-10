@@ -17,7 +17,7 @@ export const GET = handler(async (req: Request) => {
   if (!code || !state) return fail("Missing code or state in OAuth callback", 400);
 
   const jar = await cookies();
-  const stored = jar.get("mos_oauth_state")?.value;
+  const stored = jar.get("plm_oauth_state")?.value;
   if (!stored) return fail("OAuth state cookie missing or expired. Start the connection again.", 400);
 
   // Split once — returnTo may itself be an absolute URL containing separators.
@@ -26,7 +26,7 @@ export const GET = handler(async (req: Request) => {
   const returnTo = sep === -1 ? "/settings" : stored.slice(sep + 1) || "/settings";
 
   if (expectedState !== state) return fail("OAuth state mismatch — possible CSRF. Aborted.", 400);
-  jar.delete("mos_oauth_state");
+  jar.delete("plm_oauth_state");
 
   const session = await requireSession();
   const tokens = await exchangeCode(code);
@@ -48,7 +48,7 @@ export const GET = handler(async (req: Request) => {
       ? `${onshapeUser.companyName} (${onshapeUser.companyId})`
       : onshapeUser.companyId;
     return fail(
-      `That Onshape account (${onshapeUser.email}) belongs to enterprise ${who}, but this MOS is bound to ` +
+      `That Onshape account (${onshapeUser.email}) belongs to enterprise ${who}, but this PLM is bound to ` +
       `${ent.name || "enterprise"} (${ent.onshapeCompanyId}). Sign out of Onshape, sign back in with an ` +
       `account in that enterprise, then connect again — retrying now will reuse the same Onshape session.`,
       403

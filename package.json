@@ -3,9 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev -p 3001",
+    "dev": "next dev -p 3011",
     "build": "next build",
-    "start": "next start -p 3001",
+    "start": "next start -p 3011",
     "lint": "next lint",
     "typecheck": "tsc --noEmit",
     "db:start": "./scripts/db.sh start",
@@ -13,14 +13,15 @@
     "db:status": "./scripts/db.sh status",
     "db:logs": "./scripts/db.sh logs",
     "test:release": "npx --yes tsx scripts/test-release-flow.ts",
-    "test": "npm run test:bom && npm run test:enum && npm run test:coords && npm run test:export && npm run test:mass && npm run test:numbering && npm run test:pagination && npm run test:release",
+    "test": "npm run test:bom && npm run test:enum && npm run test:coords && npm run test:export && npm run test:mass && npm run test:numbering && npm run test:pagination && npm run test:binary && npm run test:release",
     "test:bom": "npx --yes tsx scripts/test-bom-parser.ts",
     "test:enum": "npx --yes tsx scripts/test-enum-labels.ts",
     "test:coords": "npx --yes tsx scripts/test-sync-coords.ts",
     "test:export": "npx --yes tsx scripts/test-export-formats.ts",
     "test:mass": "npx --yes tsx scripts/test-mass-properties.ts",
     "test:numbering": "npx --yes tsx scripts/test-numbering.ts",
-    "test:pagination": "npx --yes tsx scripts/test-pagination.ts"
+    "test:pagination": "npx --yes tsx scripts/test-pagination.ts",
+    "test:binary": "npx --yes tsx scripts/test-binary.ts"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",

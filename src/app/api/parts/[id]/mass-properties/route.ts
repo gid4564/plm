@@ -1,5 +1,5 @@
 import { connectDb } from "@/lib/db";
-import { ManufacturingItem } from "@/lib/models";
+import { Part } from "@/lib/models";
 import { requireSession } from "@/lib/auth/session";
 import { clientForEnterprise } from "@/lib/onshape/factory";
 import { preferKnownWorkspace, readCoords } from "@/lib/sync";
@@ -9,7 +9,7 @@ import type { PartCoords } from "@/lib/onshape/types";
 type Ctx = { params: Promise<{ id: string }> };
 
 /**
- * Mass, volume, surface area and centroid for the part behind an item.
+ * Mass, volume, surface area and centroid for the part behind an part.
  *
  * Read on request rather than mirrored on every sync — unlike the fields that
  * change as a designer edits a part, mass properties are only interesting when
@@ -22,20 +22,20 @@ export const GET = handler(async (_req: Request, ctx: Ctx) => {
   const { id } = await ctx.params;
 
   await connectDb();
-  const item: any = await ManufacturingItem.findOne({ _id: id, enterpriseId: s.enterpriseId }).lean();
-  if (!item) return fail("Manufacturing item not found", 404);
+  const part: any = await Part.findOne({ _id: id, enterpriseId: s.enterpriseId }).lean();
+  if (!part) return fail("Part not found", 404);
 
   const coords: PartCoords = readCoords(
     preferKnownWorkspace(
       {
-        documentId: item.documentId,
-        elementId: item.elementId,
-        partId: item.partId,
-        configuration: item.configuration,
-        workspaceId: item.workspaceId,
-        versionId: item.versionId,
+        documentId: part.documentId,
+        elementId: part.elementId,
+        partId: part.partId,
+        configuration: part.configuration,
+        workspaceId: part.workspaceId,
+        versionId: part.versionId,
       },
-      item.workspaceId ?? null
+      part.workspaceId ?? null
     )
   );
 

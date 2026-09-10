@@ -120,7 +120,7 @@ export function resolveEnumLabel(value: unknown, options?: EnumOption[]): string
   if (!reportedUnresolved.has(key)) {
     reportedUnresolved.add(key);
     console.warn(
-      `[MOS] enum value ${JSON.stringify(value)} matched none of the options Onshape supplied: ` +
+      `[PLM] enum value ${JSON.stringify(value)} matched none of the options Onshape supplied: ` +
       `${JSON.stringify(options)}. Reporting it as unknown rather than guessing.`
     );
   }
@@ -163,7 +163,7 @@ export function mapStandardProperties(props: RawProperty[]) {
       if (!reportedUnresolved.has(seen)) {
         reportedUnresolved.add(seen);
         console.warn(
-          `[MOS] Onshape reported State as bare code ${code} with no option list, so it ` +
+          `[PLM] Onshape reported State as bare code ${code} with no option list, so it ` +
           `cannot be named without guessing. Full property: ${JSON.stringify(p)}`
         );
       }
@@ -187,7 +187,7 @@ export function mapStandardProperties(props: RawProperty[]) {
         if (!reportedUnresolved.has(clash)) {
           reportedUnresolved.add(clash);
           console.warn(
-            `[MOS] two Onshape properties both map to "${key}" with different values: ` +
+            `[PLM] two Onshape properties both map to "${key}" with different values: ` +
             `${JSON.stringify(toDisplayString(existing))} and ${JSON.stringify(toDisplayString(v))}. ` +
             `Keeping the first. Properties: ${JSON.stringify(props.filter((q) => normalizeName(q.name) === key))}`
           );

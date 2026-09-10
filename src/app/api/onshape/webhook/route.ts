@@ -84,7 +84,7 @@ export const POST = handler(async () => {
       removedPrevious = ent.webhookId;
     } catch (err: any) {
       // Already gone, or not ours to remove — not a reason to block re-registration.
-      console.warn(`[MOS] could not remove previous webhook ${ent.webhookId}: ${err?.message ?? err}`);
+      console.warn(`[PLM] could not remove previous webhook ${ent.webhookId}: ${err?.message ?? err}`);
     }
   }
 

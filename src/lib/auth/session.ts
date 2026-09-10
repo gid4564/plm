@@ -1,14 +1,14 @@
 import { SignJWT, jwtVerify } from "jose";
 import { cookies } from "next/headers";
 
-const COOKIE = "mos_session";
+const COOKIE = "plm_session";
 const MAX_AGE = 60 * 60 * 12; // 12h
 
 export type SessionPayload = {
   userId: string;
   email: string;
   enterpriseId: string;
-  role: "admin" | "user";
+  role: "admin" | "approver" | "user";
 };
 
 function secret(): Uint8Array {

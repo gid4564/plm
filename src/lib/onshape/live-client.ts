@@ -305,7 +305,7 @@ export class LiveOnshapeClient implements OnshapeClient {
     // returned — that is the difference between a five-minute fix and a guess.
     if (table.lines.length === 0) {
       console.warn(
-        `[MOS] BOM parsed to 0 rows (shape=${table.shape}) for element ${c.elementId}. ` +
+        `[PLM] BOM parsed to 0 rows (shape=${table.shape}) for element ${c.elementId}. ` +
         `Top-level keys: ${Object.keys(payload ?? {}).join(", ") || "none"}`
       );
     }
@@ -403,7 +403,7 @@ export class LiveOnshapeClient implements OnshapeClient {
 
     if (result.shape !== "bodies") {
       console.warn(
-        `[MOS] mass properties for part ${c.partId} did not parse (shape=${result.shape}). ` +
+        `[PLM] mass properties for part ${c.partId} did not parse (shape=${result.shape}). ` +
         `Top-level keys: ${Object.keys(payload ?? {}).join(", ") || "none"}`
       );
     }

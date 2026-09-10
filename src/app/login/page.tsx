@@ -17,7 +17,16 @@ function LoginForm() {
   const params = useSearchParams();
   // Set when arriving mid-OAuth from Onshape's Applications page, so sign-in
   // resumes the handshake instead of dumping the user on the dashboard.
-  const returnTo = params.get("returnTo");
+  /*
+   * Both spellings are accepted.
+   *
+   * The Onshape panel links here with ?returnTo=, and the OAuth flow with
+   * ?next= — which is the conventional name and the one the authorize endpoint
+   * builds. Accepting only one would silently drop the other's destination and
+   * land the user on the dashboard, which in the OAuth case abandons the
+   * authorization request entirely.
+   */
+  const returnTo = params.get("returnTo") ?? params.get("next");
   const [mode, setMode] = useState<"login" | "register">("login");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -65,7 +74,7 @@ function LoginForm() {
             style={{ display: "block", margin: "0 auto 12px" }}
           />
           <h1 style={{ fontSize: 21, margin: "0 0 5px", letterSpacing: "-.02em" }}>
-            Manufacturing Order System
+            Product Lifecycle Management
           </h1>
           <p style={{ color: "var(--text-muted)", fontSize: 13, margin: 0 }}>
             {mode === "login" ? "Sign in to continue" : "Create an account and bind it to an Onshape enterprise"}
@@ -110,7 +119,7 @@ function LoginForm() {
               <Field label="Enterprise display name">
                 <input
                   className="input" value={entName}
-                  onChange={(e) => setEntName(e.target.value)} placeholder="Acme Manufacturing"
+                  onChange={(e) => setEntName(e.target.value)} placeholder="Acme Engineering"
                 />
               </Field>
             </>
@@ -134,8 +143,8 @@ function LoginForm() {
         </form>
 
         <p style={{ textAlign: "center", fontSize: 11.5, color: "var(--text-faint)", marginTop: 16, lineHeight: 1.5 }}>
-          The first account created for an Onshape Enterprise ID becomes its admin
-          <br />and can register webhooks and map custom properties.
+          The first account created for an Onshape company id becomes its admin
+          <br />and can set the attribute schema, the Onshape connection and the webhook.
           <br />
           <a
             className="link" href="/manual" target="_blank" rel="noopener noreferrer"

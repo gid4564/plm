@@ -2,7 +2,6 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Alert, Spinner } from "@/components/ui";
-import { ProductPicker } from "@/components/ProductPicker";
 import { PanelHeader, SignedOut, panelWrap } from "../shared";
 
 type Ctx = { documentId: string; elementId: string; workspaceId: string; versionId: string };
@@ -43,7 +42,6 @@ export function AssemblyPanelClient({
   const [bom, setBom] = useState<Bom | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [multiLevel, setMultiLevel] = useState(true);
-  const [product, setProduct] = useState("");
   const [reading, setReading] = useState(false);
   const [importing, setImporting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -67,7 +65,7 @@ export function AssemblyPanelClient({
   const loadTracked = useCallback(async () => {
     if (!signedIn || !ctx.elementId) return;
     try {
-      const res = await fetch(`/api/items?assembly=${encodeURIComponent(ctx.elementId)}`);
+      const res = await fetch(`/api/parts?q=${encodeURIComponent(ctx.elementId)}`);
       const data = await res.json();
       if (res.ok) setAlreadyHere((data.items ?? []).length);
     } catch {
@@ -118,8 +116,7 @@ export function AssemblyPanelClient({
           versionId: ctx.versionId || null,
           multiLevel,
           keys: [...selected],
-          product: product || undefined,
-        }),
+                  }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Import failed");
@@ -335,11 +332,6 @@ export function AssemblyPanelClient({
                     </label>
                   );
                 })}
-              </div>
-
-              <div>
-                <label className="label" style={{ fontSize: 11 }}>Product</label>
-                <ProductPicker value={product} onChange={setProduct} useProjectOption />
               </div>
 
               <button
