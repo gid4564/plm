@@ -16,8 +16,20 @@
  */
 
 export type ExtensionRequest = {
-  /** First usable value for a key, from the body then the query string. */
+  /** First usable value for a key, from the first item then the query string. */
   read: (key: string) => string;
+  /**
+   * The context items this call is about.
+   *
+   * Usually one. The part number generator is the exception: Onshape posts a
+   * JSON *array* there and expects one answer per element — a Release candidate
+   * dialog can ask for several numbers at once. A single-object body, or a
+   * context carried in the query string, presents here as a list of one, so a
+   * route can treat every caller the same way.
+   */
+  items: Record<string, unknown>[];
+  /** Whether the body was a JSON array. Decides the response shape. */
+  bodyWasArray: boolean;
   /** Everything that arrived, for logging and for fields not read by name. */
   raw: Record<string, unknown>;
   /** One line naming the method, content type, and keys seen. */
@@ -56,16 +68,27 @@ export async function readExtensionRequest(req: Request): Promise<ExtensionReque
   }
 
   let body: Record<string, unknown> = {};
+  let items: Record<string, unknown>[] = [];
+  let bodyWasArray = false;
   let bodyKind = "empty";
 
   if (bodyText.trim()) {
     try {
       const parsed = JSON.parse(bodyText);
-      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      if (Array.isArray(parsed)) {
+        // Onshape's part number generator posts a batch. Non-object elements
+        // are dropped rather than counted, so a malformed element cannot
+        // present as a context item with no fields.
+        bodyWasArray = true;
+        items = parsed.filter((x) => x && typeof x === "object" && !Array.isArray(x));
+        body = (items[0] ?? {}) as Record<string, unknown>;
+        bodyKind = `json-array[${parsed.length}]`;
+      } else if (parsed && typeof parsed === "object") {
         body = parsed as Record<string, unknown>;
+        items = [body];
         bodyKind = "json";
       } else {
-        bodyKind = `json-but-${Array.isArray(parsed) ? "array" : typeof parsed}`;
+        bodyKind = `json-but-${typeof parsed}`;
       }
     } catch {
       /*
@@ -99,6 +122,7 @@ export async function readExtensionRequest(req: Request): Promise<ExtensionReque
 
       if (parsedForm) {
         body = parsedForm;
+        items = [body];
         bodyKind = "form-encoded";
       } else {
         bodyKind = claimsJson ? "invalid-json" : "unrecognised";
@@ -108,17 +132,26 @@ export async function readExtensionRequest(req: Request): Promise<ExtensionReque
 
   const query = Object.fromEntries(url.searchParams.entries());
 
+  /*
+   * A context in the query string is one item too. Without this, a
+   * GET-registered extension would present as a call about nothing, which is
+   * precisely the reading that made the original failure so hard to place.
+   */
+  if (items.length === 0 && Object.keys(query).length > 0) items = [query];
+
   return {
     read: (key: string) => {
       if (!unusable(body[key])) return String(body[key]).trim();
       if (!unusable(query[key])) return String(query[key]).trim();
       return "";
     },
+    items,
+    bodyWasArray,
     raw: { ...query, ...body },
     describe: () =>
       `${req.method} content-type=${contentType} body=${bodyKind}` +
       `(${bodyText.length}b) ` +
-      `bodyKeys=[${Object.keys(body).join(",")}] ` +
+      `items=${items.length} bodyKeys=[${Object.keys(body).join(",")}] ` +
       `queryKeys=[${Object.keys(query).join(",")}]` +
       // The first 200 characters of an unrecognised body are what identify a
       // shape nothing here anticipated. Only logged when parsing did not

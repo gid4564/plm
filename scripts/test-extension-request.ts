@@ -119,12 +119,56 @@ async function main() {
       ext.read("partId") === "FROM-BODY");
   }
 
-  console.log("\nA JSON array or scalar body is named, not treated as fields");
+  console.log("\nAn array body — what the part number generator actually sends");
   {
-    const ext = await readExtensionRequest(json(["not", "an", "object"]));
-    check("no fields are read", ext.read("elementType") === "");
+    const ext = await readExtensionRequest(json([
+      { id: "i1", documentId: "d1", elementId: "e1", workspaceId: "w1",
+        elementType: "PARTSTUDIO", partId: "JHD" },
+      { id: "i2", documentId: "d1", elementId: "e9", workspaceId: "w1",
+        elementType: "DRAWING", partId: "" },
+    ]));
+    check("both items are present", ext.items.length === 2, String(ext.items.length));
+    check("the array shape is recorded", ext.bodyWasArray === true);
+    check("the first item's fields read through", ext.read("elementType") === "PARTSTUDIO");
+    check("each item keeps its own type",
+      ext.items[1].elementType === "DRAWING", String(ext.items[1].elementType));
+    check("the count is described",
+      ext.describe().includes("json-array[2]") && ext.describe().includes("items=2"),
+      ext.describe());
+  }
+
+  console.log("\nA single-object body still presents as one item");
+  {
+    const ext = await readExtensionRequest(json({ elementType: "ASSEMBLY", documentId: "d1" }));
+    check("one item", ext.items.length === 1);
+    check("and not flagged as an array", ext.bodyWasArray === false);
+  }
+
+  console.log("\nA query-only call presents as one item too");
+  {
+    const ext = await readExtensionRequest(
+      new Request(`${URL_BASE}?elementType=DRAWING&documentId=d7`, { method: "GET" })
+    );
+    check("one item, from the query", ext.items.length === 1);
+    check("its fields read", ext.read("elementType") === "DRAWING");
+  }
+
+  console.log("\nMalformed array elements are dropped, not counted as empty items");
+  {
+    const ext = await readExtensionRequest(json([
+      { elementType: "PARTSTUDIO", documentId: "d1" }, "junk", null, 42, ["nested"],
+    ]));
+    check("only the real object survives", ext.items.length === 1, String(ext.items.length));
+    check("the original length is still reported",
+      ext.describe().includes("json-array[5]"), ext.describe());
+  }
+
+  console.log("\nA scalar JSON body is named, not treated as fields");
+  {
+    const ext = await readExtensionRequest(json("just a string"));
+    check("no items", ext.items.length === 0);
     check("and it is described as such",
-      ext.describe().includes("json-but-array"), ext.describe());
+      ext.describe().includes("json-but-string"), ext.describe());
   }
 
   console.log(`\n${passed} passed, ${failed} failed\n`);

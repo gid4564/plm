@@ -29,6 +29,39 @@ So PLM needs *both* halves:
 | PLM → Onshape | PLM is the OAuth **client** | PLM's own reads/writes: metadata, release packages, drawing PDFs, transitions | Reuse MOS `lib/onshape/oauth.ts` unchanged |
 | Onshape → PLM | PLM is the OAuth **authorization server** | Onshape authenticates itself when calling PLM's extension action URLs | New |
 
+### The part number generator is a batch endpoint
+
+Onshape POSTs a JSON **array** to the Part number generator action URL and
+expects an array back, one answer per element:
+
+```
+→ [ { id, documentId, elementId, workspaceId, elementType, partId }, … ]
+← [ { …the same fields, partNumber: "PN-00042" }, … ]
+```
+
+**[confirmed]** — from Onshape's own reference implementation,
+`onshape-public/inventory-oauth2-app`, whose `controllers/generator.js` assigns
+`req.body` straight to a variable and reduces over it, pushing
+`{ id, documentId, elementId, workspaceId, elementType, partId, partNumber }`
+per element and answering `res.status(200).json(results)`.
+
+Two consequences that are easy to get wrong:
+
+- **A single object is not enough.** An earlier version of this route read the
+  body as one object and answered with one object. Onshape's array then
+  presented as a request carrying no fields at all — `elementType=-` with a
+  perfectly valid bearer token — which reads as an authentication or
+  configuration fault rather than a shape mismatch.
+- **The batch is why validation happens before allocation.** A Release candidate
+  dialog can ask for several numbers at once. Since a number is never reused,
+  allocating for the readable items and then failing on a later one would burn
+  numbers on a request that produced no answer, so the whole batch is classified
+  first.
+
+Unlike the context-menu extensions, this location offers **no choice of method
+and no Action Body** in the Developer Portal. Onshape decides the payload, so
+there is nothing to configure — and nothing to blame when it does not work.
+
 ### Onshape's own token endpoint refuses HTTP Basic
 
 Worth stating because it contradicts the standard. RFC 6749 says an

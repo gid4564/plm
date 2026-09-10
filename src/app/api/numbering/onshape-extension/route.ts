@@ -19,20 +19,37 @@ import { handler, ok, fail } from "@/lib/api";
  * number on a part at the moment a release is raised, rather than after the
  * fact.
  *
- * Authenticated by **External OAuth**, not a shared secret. Onshape obtains a
- * bearer token from PLM's own token endpoint and presents it here, so the call
- * is attributable to the PLM user who granted access — which is what tells this
- * route which enterprise's numbering scheme to use. MOS put a secret in the
- * query string because it had no authorization server; PLM does.
+ * **It is a batch endpoint.** Onshape POSTs a JSON *array* and expects an array
+ * back, one answer per element, echoing the identifying fields alongside the
+ * number:
  *
- * Contract: https://onshape-public.github.io/docs/app-dev/extensions/
- * (Location: "Part number generator").
+ *   → [ { id, documentId, elementId, workspaceId, elementType, partId }, … ]
+ *   ← [ { …the same fields, partNumber: "PN-00042" }, … ]
+ *
+ * That shape is taken from Onshape's own reference implementation,
+ * onshape-public/inventory-oauth2-app (`controllers/generator.js`), which
+ * assigns `req.body` straight to a variable and reduces over it. An earlier
+ * version of this route read the body as a single object and answered with a
+ * single object; Onshape's array then presented as a request with no fields at
+ * all, which is exactly what it looked like in the log.
+ *
+ * Unlike the context-menu extensions, this one offers no choice of method and no
+ * Action Body in the Developer Portal — Onshape decides the payload, so there is
+ * nothing to configure and nothing to get wrong.
+ *
+ * Authenticated by External OAuth: Onshape obtains a bearer token from PLM's own
+ * token endpoint and presents it here, so the call is attributable to the PLM
+ * user who granted access — which is what tells this route whose numbering
+ * scheme to use.
  */
 const ELEMENT_TYPE_TO_NUMBERING_TYPE: Record<string, NumberingType> = {
   PARTSTUDIO: "PART",
   ASSEMBLY: "ASSEMBLY",
   DRAWING: "DRAWING",
 };
+
+/** The fields Onshape sends and expects echoed back, per item. */
+const ECHOED = ["id", "documentId", "elementId", "workspaceId", "elementType", "partId"] as const;
 
 export const POST = handler(async (req: Request) => {
   const identity = await authenticateBearer(req);
@@ -45,46 +62,44 @@ export const POST = handler(async (req: Request) => {
     );
   }
 
-  /*
-   * Body or query, and either encoding — see lib/onshape/extension-request.ts.
-   * Reading only the body meant a caller that put the context in the URL was
-   * seen as sending nothing at all.
-   */
   const ext = await readExtensionRequest(req);
-  const id = ext.read("id");
-  const partNumberId = ext.read("partNumberId");
-  const documentId = ext.read("documentId");
-  const elementId = ext.read("elementId");
-  const workspaceId = ext.read("workspaceId");
-  const elementType = ext.read("elementType");
-  const partId = ext.read("partId");
-  const companyId = ext.read("companyId");
 
-  // The request's shape is logged alongside the fields, because "elementType=-"
-  // on its own cannot distinguish an empty body from one whose keys are named
-  // differently — and those need different fixes.
   console.log(
-    `[PLM] numbering extension in: elementType=${elementType || "-"} ` +
-    `doc=${documentId || "-"} el=${elementId || "-"} part=${partId || "-"} ` +
-    `company=${companyId || "-"} user=${identity.userId} | ${ext.describe()}`
+    `[PLM] numbering extension in: user=${identity.userId} | ${ext.describe()}`
   );
 
-  const type = ELEMENT_TYPE_TO_NUMBERING_TYPE[elementType.toUpperCase()];
-  if (!type) {
-    /*
-     * Say what arrived, not just what was missing. Onshape shows this message
-     * to the user, and "unrecognised elementType" with no elementType at all
-     * reads as a PLM fault when it usually means the extension was registered
-     * without the field.
-     */
-    const seen = Object.keys(ext.raw);
+  if (ext.items.length === 0) {
     return fail(
-      elementType
-        ? `Unrecognised elementType "${elementType}" — expected a Part Studio, Assembly, or Drawing.`
-        : `No elementType arrived, so PLM cannot tell which numbering scheme to use. ` +
-          `The request carried ${seen.length ? `these fields: ${seen.join(", ")}` : "no fields at all"}. ` +
-          `Onshape normally posts a JSON body containing elementType — check the extension is ` +
-          `registered as the Part number generator, and that a POST registration has an Action Body.`,
+      `No items arrived, so there is nothing to number. Onshape posts a JSON array of ` +
+      `items to this endpoint. The request was: ${ext.describe()}`,
+      422
+    );
+  }
+
+  /*
+   * Classify every item before allocating anything.
+   *
+   * A number is never reused, so allocating for the readable items and then
+   * failing on a later one would burn numbers on a request that produced no
+   * answer. Validating the whole batch first means a bad request costs nothing.
+   */
+  const classified: { item: Record<string, unknown>; type: NumberingType }[] = [];
+  const unrecognised: string[] = [];
+
+  for (const item of ext.items) {
+    const raw = String(item.elementType ?? "").trim();
+    const type = ELEMENT_TYPE_TO_NUMBERING_TYPE[raw.toUpperCase()];
+    if (type) classified.push({ item, type });
+    else unrecognised.push(raw || "(no elementType)");
+  }
+
+  if (unrecognised.length) {
+    // Onshape shows this to the user, so it names what arrived rather than only
+    // what was expected.
+    return fail(
+      `${unrecognised.length} of ${ext.items.length} item(s) have an element type PLM does ` +
+      `not number: ${[...new Set(unrecognised)].join(", ")}. Expected a Part Studio, ` +
+      `Assembly, or Drawing. Nothing was numbered, so no numbers were used up.`,
       422
     );
   }
@@ -103,6 +118,7 @@ export const POST = handler(async (req: Request) => {
   const enterprise: any = await Enterprise.findById(identity.enterpriseId).lean();
   if (!enterprise) return fail("The PLM enterprise for this token no longer exists.", 404);
 
+  const companyId = String(ext.items[0]?.companyId ?? "").trim();
   if (companyId && enterprise.onshapeCompanyId && companyId !== enterprise.onshapeCompanyId) {
     return fail(
       `This token belongs to the PLM enterprise for Onshape company ` +
@@ -111,22 +127,44 @@ export const POST = handler(async (req: Request) => {
     );
   }
 
-  const { number } = await nextNumber(String(enterprise._id), type);
+  const results: Record<string, unknown>[] = [];
 
-  await NumberIssuedLog.create({
-    enterpriseId: enterprise._id,
-    type,
-    number,
-    source: "onshape",
-    documentId: documentId ?? "",
-    elementId: elementId ?? "",
-    partId: partId ?? "",
-  });
+  for (const { item, type } of classified) {
+    const { number } = await nextNumber(String(enterprise._id), type);
 
-  // Echo the request's identifiers back alongside the number, as the extension
-  // contract requires — Onshape uses them to know which object to apply it to.
-  return ok({
-    id, partNumberId, documentId, elementId, workspaceId, elementType, partId,
-    partNumber: number,
-  });
+    await NumberIssuedLog.create({
+      enterpriseId: enterprise._id,
+      type,
+      number,
+      source: "onshape",
+      documentId: String(item.documentId ?? ""),
+      elementId: String(item.elementId ?? ""),
+      partId: String(item.partId ?? ""),
+    });
+
+    // Echo the identifying fields back beside the number — Onshape uses them to
+    // know which object each answer belongs to.
+    const echo: Record<string, unknown> = {};
+    for (const key of ECHOED) if (item[key] !== undefined) echo[key] = item[key];
+    // Present on some payload shapes; harmless to return, and Onshape's own
+    // sample echoes whatever it was given.
+    if (item.partNumberId !== undefined) echo.partNumberId = item.partNumberId;
+
+    results.push({ ...echo, partNumber: number });
+  }
+
+  console.log(
+    `[PLM] numbering extension out: issued ${results.length} number(s) — ` +
+    `${results.map((r) => r.partNumber).join(", ")}`
+  );
+
+  /*
+   * Answer in the shape the request arrived in.
+   *
+   * Onshape sends an array and expects one, and returning a bare object to it
+   * would leave every item unnumbered. A single-object request — which is what
+   * a manual test or a curl sends — gets a single object back, so the endpoint
+   * stays testable by hand without pretending to be something it is not.
+   */
+  return ok(ext.bodyWasArray ? results : results[0]);
 });

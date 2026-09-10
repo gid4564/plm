@@ -311,7 +311,7 @@ erroring.
 
 | Location | Method | Context to tick | URL |
 |---|---|---|---|
-| Part number generator | POST | *(none offered)* | `/api/numbering/onshape-extension` |
+| Part number generator | *(not offered)* | *(none offered)* | `/api/numbering/onshape-extension` |
 | Element context menu | POST | Part Studio, Assembly | `/api/extensions/send-to-plm?documentId={$documentId}&workspaceOrVersion={$workspaceOrVersion}&workspaceOrVersionId={$workspaceOrVersionId}&elementId={$elementId}` |
 | Tree context menu | POST | Part | `/api/extensions/send-to-plm?documentId={$documentId}&workspaceOrVersion={$workspaceOrVersion}&workspaceOrVersionId={$workspaceOrVersionId}&elementId={$elementId}&partId={$partId}&configuration={$configuration}` |
 | Document list context menu | POST | Part Studio, Assembly | `/api/extensions/send-to-plm?documentId={$documentId}&elementId={$elementId}&partId={$partId}` |
@@ -394,6 +394,11 @@ produces a menu item that always fails, which is worse than no menu item:
 - The part number generator is limited to **one per application**, and it fires
   from every place a part number is set — including the Release candidate dialog,
   which is the useful one.
+- The part number generator offers **no method and no Action Body**: Onshape
+  decides the payload, and it is a *batch* — a JSON array of items, expecting an
+  array back with a `partNumber` on each. That is why a Release candidate dialog
+  can number several parts in one go. Nothing to configure, so if it fails the
+  cause is in PLM or in the OAuth grant, not in the registration.
 - The panels are framed from `cad.onshape.com`, so they are a third-party context.
   The CSP for `/panel/*` allows that; everything else stays frame-denied.
 - The context names above are taken from Onshape's extension documentation rather
