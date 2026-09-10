@@ -79,6 +79,8 @@ export const GET = handler(async (req: Request) => {
         onshapeRefreshToken: "mock-refresh-token",
         onshapeTokenExpiresAt: new Date(Date.now() + 3600_000),
         onshapeConnectedAt: new Date(),
+        onshapeTokenFailedAt: null,
+        onshapeTokenError: null,
       },
     });
     // First connector becomes the enterprise integration account.

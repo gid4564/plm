@@ -129,6 +129,26 @@ export function SettingsClient(p: Props) {
           OAuth direction — PLM as the client — and it is separate from how Onshape authenticates
           to PLM further down.
         </p>
+        {/*
+          * The service account's broken connection is shown here as well as in
+          * Release management, because this is where someone comes to fix it —
+          * and because the webhook path that discovers the breakage has no UI
+          * of its own to report from.
+          */}
+        {ent?.serviceAccount?.tokenFailedAt && (
+          <Alert kind="error">
+            <strong>The Onshape connection for {ent.serviceAccount.email} has stopped
+            working.</strong> A token refresh failed {relTime(ent.serviceAccount.tokenFailedAt)},
+            so background syncing and release transitions will be failing. That account has to
+            press Connect Onshape again.
+            {ent.serviceAccount.tokenError && (
+              <span style={{ display: "block", marginTop: 5, fontSize: 11.5, opacity: 0.85 }}>
+                Onshape said: {ent.serviceAccount.tokenError}
+              </span>
+            )}
+          </Alert>
+        )}
+
         {p.connected ? (
           <Alert kind="ok">Connected.</Alert>
         ) : (

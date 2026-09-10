@@ -66,6 +66,9 @@ export const GET = handler(async (req: Request) => {
       onshapeRefreshToken: tokens.refreshToken,
       onshapeTokenExpiresAt: tokens.expiresAt,
       onshapeConnectedAt: new Date(),
+      // Reconnecting is the repair, so it clears any recorded breakage.
+      onshapeTokenFailedAt: null,
+      onshapeTokenError: null,
     },
   });
 

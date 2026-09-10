@@ -79,24 +79,65 @@ export class LiveOnshapeClient implements OnshapeClient {
 
   constructor(
     private accessToken: string,
-    private apiUrl = process.env.ONSHAPE_API_URL || "https://cad.onshape.com/api"
+    private apiUrl = process.env.ONSHAPE_API_URL || "https://cad.onshape.com/api",
+    /**
+     * Obtain a fresh access token, when Onshape rejects the current one.
+     *
+     * Supplied by the factory, which owns the stored credentials. Without it a
+     * token invalidated out of band — the user re-authorised the app, an admin
+     * revoked it, a refresh elsewhere rotated it — kills every call until
+     * somebody notices and reconnects by hand. On the webhook path nobody is
+     * watching, so syncing simply stops.
+     *
+     * Returns null when it cannot be refreshed, which is a real answer: the
+     * connection needs a person, and retrying forever would only bury that.
+     */
+    private onUnauthorized?: () => Promise<string | null>
   ) {}
 
-  private async req<T>(path: string, init: RequestInit = {}): Promise<T> {
+  private headersFor(init: RequestInit): HeadersInit {
+    return {
+      Authorization: `Bearer ${this.accessToken}`,
+      Accept: "application/json;charset=UTF-8; qs=0.09",
+      "Content-Type": "application/json",
+      ...(init.headers || {}),
+    };
+  }
+
+  private async req<T>(path: string, init: RequestInit = {}, isRetry = false): Promise<T> {
     const res = await fetch(`${this.apiUrl}${path}`, {
       ...init,
-      headers: {
-        Authorization: `Bearer ${this.accessToken}`,
-        Accept: "application/json;charset=UTF-8; qs=0.09",
-        "Content-Type": "application/json",
-        ...(init.headers || {}),
-      },
+      headers: this.headersFor(init),
       cache: "no-store",
     });
 
+    /*
+     * One retry on 401, and only one.
+     *
+     * The proactive refresh in the factory covers a token that is *about* to
+     * expire, which is not the same thing as one Onshape has decided to reject.
+     * A single reactive attempt turns that from a permanent failure into a
+     * round trip; retrying more than once would just hammer an endpoint that
+     * has already given its answer.
+     */
+    if (res.status === 401 && !isRetry && this.onUnauthorized) {
+      const fresh = await this.onUnauthorized();
+      if (fresh) {
+        this.accessToken = fresh;
+        return this.req<T>(path, init, true);
+      }
+    }
+
     if (!res.ok) {
       const body = await res.text().catch(() => "");
-      throw new Error(`Onshape ${init.method || "GET"} ${path} -> ${res.status}: ${body.slice(0, 500)}`);
+      throw new Error(
+        `Onshape ${init.method || "GET"} ${path} -> ${res.status}: ${body.slice(0, 500)}` +
+        (res.status === 401
+          ? ` — the stored Onshape token was rejected and could not be refreshed. ` +
+            `Press Connect Onshape in Settings to re-authorise the account this ` +
+            `enterprise acts as.`
+          : "")
+      );
     }
     if (res.status === 204) return undefined as T;
     return (await res.json()) as T;
@@ -330,43 +371,81 @@ export class LiveOnshapeClient implements OnshapeClient {
    * Returns null rather than throwing — a missing picture must never break a
    * page that is otherwise fine.
    */
+  /**
+   * A rendering of one part, or of a whole assembly.
+   *
+   * The two need different endpoints, and this is the reason an assembly synced
+   * without a picture: the part endpoint addresses its subject as
+   * `.../e/{eid}/partid/{partId}/shadedviews`, and an assembly has no partId —
+   * so the URL came out as `partid//shadedviews`, which Onshape rejects. MOS
+   * never hit this because it refused to track assemblies at all.
+   *
+   * An assembly is rendered from the assembly endpoint instead, which takes the
+   * element alone. Both paths are env-overridable, and both degrade to null
+   * rather than throwing: a missing picture is a cosmetic problem, and the
+   * caller shows a placeholder.
+   */
   async getPartThumbnail(c: PartCoords, size = 300): Promise<Thumbnail | null> {
     const wv = c.workspaceId ? `w/${c.workspaceId}` : `v/${c.versionId}`;
     const cfg = c.configuration && c.configuration !== "default" && !/^\{\$.*\}$/.test(c.configuration)
       ? `&configuration=${encodeURIComponent(c.configuration)}`
       : "";
-    const base = process.env.ONSHAPE_SHADEDVIEWS_PATH || "/parts";
-    const path =
-      `${base}/d/${c.documentId}/${wv}/e/${c.elementId}/partid/${encodeURIComponent(c.partId)}` +
-      `/shadedviews?outputWidth=${size}&outputHeight=${size}&pixelSize=0&viewMatrix=0.612,0.612,0,0,-0.354,0.354,0.866,0,0.707,-0.707,0.5,0${cfg}`;
+
+    // An isometric-ish view, so a rendering reads as a solid rather than a
+    // silhouette. Shared by both endpoints.
+    const view =
+      `outputWidth=${size}&outputHeight=${size}&pixelSize=0` +
+      `&viewMatrix=0.612,0.612,0,0,-0.354,0.354,0.866,0,0.707,-0.707,0.5,0`;
+
+    const partId = String(c.partId ?? "").trim();
+    const path = partId
+      ? `${process.env.ONSHAPE_SHADEDVIEWS_PATH || "/parts"}` +
+        `/d/${c.documentId}/${wv}/e/${c.elementId}/partid/${encodeURIComponent(partId)}` +
+        `/shadedviews?${view}${cfg}`
+      : `${process.env.ONSHAPE_ASSEMBLY_SHADEDVIEWS_PATH || "/assemblies"}` +
+        `/d/${c.documentId}/${wv}/e/${c.elementId}` +
+        `/shadedviews?${view}${cfg}`;
 
     try {
       const res = await this.req<Record<string, any>>(path);
       const b64 = Array.isArray(res?.images) ? res.images[0] : res?.images;
       if (!b64 || typeof b64 !== "string") return null;
       return { contentType: "image/png", data: Buffer.from(b64, "base64") };
-    } catch {
+    } catch (err: any) {
+      // Logged rather than silent: a whole catalogue with no pictures is worth
+      // being able to explain, and the reason is only ever in the response.
+      console.warn(
+        `[PLM] no thumbnail for ${partId ? `part ${partId}` : `assembly ${c.elementId}`}: ` +
+        `${String(err?.message ?? err).slice(0, 200)}`
+      );
       return null;
     }
   }
 
   /** Fetch bytes rather than JSON. Onshape redirects downloads, so follow them. */
-  private async reqBinary(path: string): Promise<{ data: Buffer; contentType: string }> {
+  private async reqBinary(path: string, isRetry = false): Promise<{ data: Buffer; contentType: string }> {
     const res = await fetch(`${this.apiUrl}${path}`, {
       headers: { Authorization: `Bearer ${this.accessToken}`, Accept: "*/*" },
-      redirect: "follow",
       cache: "no-store",
     });
 
-    if (!res.ok) {
-      const body = await res.text().catch(() => "");
-      throw new Error(`Onshape GET ${path} -> ${res.status}: ${body.slice(0, 400)}`);
+    // Same single reactive refresh as req(); binary downloads are how
+    // thumbnails and exports leave, and they fail the same way.
+    if (res.status === 401 && !isRetry && this.onUnauthorized) {
+      const fresh = await this.onUnauthorized();
+      if (fresh) {
+        this.accessToken = fresh;
+        return this.reqBinary(path, true);
+      }
     }
 
-    return {
-      data: Buffer.from(await res.arrayBuffer()),
-      contentType: res.headers.get("content-type") || "application/octet-stream",
-    };
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      throw new Error(`Onshape GET ${path} -> ${res.status}: ${body.slice(0, 300)}`);
+    }
+
+    const buf = Buffer.from(await res.arrayBuffer());
+    return { data: buf, contentType: res.headers.get("content-type") || "application/octet-stream" };
   }
 
   /**

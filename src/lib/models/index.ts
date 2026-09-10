@@ -123,6 +123,16 @@ const UserSchema = new Schema(
     onshapeRefreshToken: { type: String, default: null },
     onshapeTokenExpiresAt: { type: Date, default: null },
     onshapeConnectedAt: { type: Date, default: null },
+    /*
+     * Set when a token refresh has failed, cleared when one succeeds.
+     *
+     * Without it a dead connection still reads as "Connected" — the timestamp
+     * above only records that it once worked. On the webhook path nobody sees
+     * the failure, so syncing stops with the UI insisting everything is fine,
+     * which is how it went unnoticed.
+     */
+    onshapeTokenFailedAt: { type: Date, default: null },
+    onshapeTokenError: { type: String, default: null },
   },
   { timestamps: true }
 );

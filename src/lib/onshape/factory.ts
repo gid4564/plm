@@ -6,6 +6,75 @@ import { isMock, refreshTokens } from "./oauth";
 import type { OnshapeClient } from "./types";
 
 /**
+ * In-flight refreshes, one per user.
+ *
+ * Onshape rotates the refresh token on use, so two concurrent refreshes race:
+ * the second presents a token the first has already spent, and *both* end up
+ * broken. A webhook burst is exactly when several calls discover an expired
+ * token at once, so this is the common case rather than a corner.
+ *
+ * Sharing the promise means the first caller does the work and the rest wait
+ * for its answer. In-process only — good enough here, where one server holds
+ * the connection; a multi-instance deployment would need this in the database.
+ */
+const refreshing = new Map<string, Promise<string | null>>();
+
+/**
+ * Refresh one user's Onshape tokens and persist them.
+ *
+ * Returns the new access token, or null when the connection cannot be repaired
+ * without a person — no refresh token stored, or Onshape refusing the one there
+ * is. Null is deliberately not an exception: the caller is usually deciding
+ * whether to retry, and "cannot" is an answer to that question.
+ */
+async function refreshFor(userId: string): Promise<string | null> {
+  const inFlight = refreshing.get(userId);
+  if (inFlight) return inFlight;
+
+  const run = (async (): Promise<string | null> => {
+    try {
+      await connectDb();
+      const user: any = await User.findById(userId);
+      if (!user?.onshapeRefreshToken) return null;
+
+      const t = await refreshTokens(user.onshapeRefreshToken);
+      user.onshapeAccessToken = t.accessToken;
+      if (t.refreshToken) user.onshapeRefreshToken = t.refreshToken;
+      user.onshapeTokenExpiresAt = t.expiresAt;
+      // A working refresh clears any previous failure: the connection has
+      // repaired itself and should stop being reported as broken.
+      user.onshapeTokenFailedAt = null;
+      user.onshapeTokenError = null;
+      await user.save();
+      return t.accessToken;
+    } catch (err: any) {
+      /*
+       * Recorded, not swallowed. A refresh that fails means the connection is
+       * broken until somebody reconnects, and on the webhook path nobody is
+       * looking at a response — the log is the only place it can surface.
+       */
+      const message = String(err?.message ?? err).slice(0, 400);
+      console.warn(
+        `[PLM] could not refresh the Onshape token for user ${userId}: ${message}. ` +
+        `That account must press Connect Onshape again.`
+      );
+      // Recorded on the user as well as logged, so Settings can stop claiming
+      // the connection is healthy.
+      await User.updateOne(
+        { _id: userId },
+        { $set: { onshapeTokenFailedAt: new Date(), onshapeTokenError: message } }
+      ).catch(() => {});
+      return null;
+    } finally {
+      refreshing.delete(userId);
+    }
+  })();
+
+  refreshing.set(userId, run);
+  return run;
+}
+
+/**
  * Build a client acting as a specific PLM user, refreshing their Onshape token
  * first if it is within 60s of expiry.
  */
@@ -33,14 +102,18 @@ export async function clientForUser(userId: string): Promise<OnshapeClient> {
     !user.onshapeTokenExpiresAt || user.onshapeTokenExpiresAt.getTime() - Date.now() < 60_000;
 
   if (expiringSoon && user.onshapeRefreshToken) {
-    const t = await refreshTokens(user.onshapeRefreshToken);
-    user.onshapeAccessToken = t.accessToken;
-    if (t.refreshToken) user.onshapeRefreshToken = t.refreshToken;
-    user.onshapeTokenExpiresAt = t.expiresAt;
-    await user.save();
+    await refreshFor(userId);
   }
 
-  return new LiveOnshapeClient(user.onshapeAccessToken);
+  const fresh: any = await User.findById(userId);
+
+  // The callback is what turns a rejected token into a retry rather than a
+  // dead client — see the note on LiveOnshapeClient's constructor.
+  return new LiveOnshapeClient(
+    fresh.onshapeAccessToken,
+    undefined,
+    () => refreshFor(userId)
+  );
 }
 
 /**

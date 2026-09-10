@@ -12,7 +12,9 @@ export const GET = handler(async () => {
   const ent: any = await Enterprise.findById(s.enterpriseId).lean();
   if (!ent) return fail("Enterprise not found", 404);
 
-  const FIELDS = "email name onshapeConnectedAt onshapeEmail onshapeName onshapeUserId";
+  const FIELDS =
+    "email name onshapeConnectedAt onshapeEmail onshapeName onshapeUserId " +
+    "onshapeTokenFailedAt onshapeTokenError";
 
   const service: any = ent.integrationUserId
     ? await User.findById(ent.integrationUserId).select(FIELDS).lean()
@@ -57,6 +59,13 @@ export const GET = handler(async () => {
           onshapeEmail: service.onshapeEmail ?? null,
           onshapeName: service.onshapeName ?? null,
           onshapeUserId: service.onshapeUserId ?? null,
+          /*
+           * A connection that once worked is not the same as one that works.
+           * Reported so Settings can say so rather than showing the timestamp
+           * of a success that has since stopped being true.
+           */
+          tokenFailedAt: service.onshapeTokenFailedAt ?? null,
+          tokenError: service.onshapeTokenError ?? null,
         }
       : null,
     serviceAccountCandidates: candidates.map((u) => ({
