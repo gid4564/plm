@@ -52,10 +52,10 @@ excludes `sharp` — nothing in it is compiled for the build host.
 ```bash
 scp dist/plm-release.tar.gz user@server:/tmp/
 ssh user@server
-sudo mkdir -p /opt/plm && sudo chown $USER /opt/plm
+sudo mkdir -p /apps/plm && sudo chown $USER /apps/plm
 tar -xzf /tmp/plm-release.tar.gz -C /tmp
-rsync -a --delete --exclude .env.local --exclude .pm2 /tmp/plm/ /opt/plm/
-cd /opt/plm
+rsync -a --delete --exclude .env.local --exclude .pm2 /tmp/plm/ /apps/plm/
+cd /apps/plm
 ```
 
 `rsync --delete` rather than extracting over the top, so a file removed in this
@@ -106,8 +106,10 @@ PLM listens on **3005**, set in `ecosystem.config.cjs` rather than `.env.local`
 — it is a property of how the box is wired up, not of the application's
 configuration, and pm2 is where someone looks for it. `APP_BASE_URL` is the
 opposite: it belongs in `.env.local`, because it is the public HTTPS URL Onshape
-must reach, not the local port. Put a reverse proxy in front terminating TLS and
-forwarding to 3005.
+must reach, not the local port.
+
+For this deployment: `plm.gidpaull.com` terminates TLS at the reverse proxy and
+forwards to `127.0.0.1:3005`, with the app served from `/apps/plm`.
 
 The app name and port are both distinct from MOS, so the two can run on the same
 box.
@@ -120,7 +122,7 @@ historically be filed twice, under `"default"` and under the literal
 `"{$configuration}"`. `ignoreConfigurations` (on by default) prevents new ones.
 
 ```bash
-cd /opt/plm
+cd /apps/plm
 node find-duplicates.mjs            # dry run — reports, changes nothing
 node find-duplicates.mjs --merge    # apply
 ```
@@ -138,11 +140,17 @@ decision.
 Copy `env.example` to `.env.local` and fill it in. Two settings matter more than
 the rest:
 
-**`APP_BASE_URL`** is the one most often got wrong. It must be the public HTTPS
-URL — not localhost, not the internal port. It determines the OAuth redirect URI,
-the webhook callback given to Onshape, the extension action URLs, and whether
-session cookies are issued `SameSite=None`. If it is not `https://`, the Onshape
-panel cannot hold a session and appears permanently signed out.
+**`APP_BASE_URL`** is the one most often got wrong. For this deployment it is:
+
+```
+APP_BASE_URL=https://plm.gidpaull.com
+```
+
+Not localhost, and not `:3005` — that is the port the reverse proxy forwards to,
+not the address Onshape resolves. This one setting determines the OAuth redirect
+URI, the webhook callback given to Onshape, the extension action URLs, and
+whether session cookies are issued `SameSite=None`. If it is not `https://`, the
+Onshape panel cannot hold a session and appears permanently signed out.
 
 **`SESSION_SECRET`** must be at least 16 characters and stable across restarts.
 Changing it signs everyone out.
@@ -163,7 +171,7 @@ In the Developer Portal, create an OAuth application and set:
 
 | Field | Value |
 |---|---|
-| Redirect URL | `https://YOUR-HOST/api/onshape/oauth/callback` |
+| Redirect URL | `https://plm.gidpaull.com/api/onshape/oauth/callback` |
 | Scopes | `OAuth2Read`, `OAuth2Write`, `OAuth2ReadPII` |
 
 Put the client id and secret in `ONSHAPE_CLIENT_ID` / `ONSHAPE_CLIENT_SECRET`.
@@ -181,8 +189,8 @@ PLM is the authorization server. PLM issues Onshape a client id and secret.
 
 | Field | Value |
 |---|---|
-| Authorization URL | `https://YOUR-HOST/api/oauth/authorize` |
-| Token URL | `https://YOUR-HOST/api/oauth/token` |
+| Authorization URL | `https://plm.gidpaull.com/api/oauth/authorize` |
+| Token URL | `https://plm.gidpaull.com/api/oauth/token` |
 
 Onshape shows users an **External access** button when they enable the
 application; approving it sends them through PLM's consent screen once.
@@ -215,7 +223,8 @@ what your workflow actually emits.
 ## 4. App extensions
 
 Register these in the Developer Portal against the same application. Settings
-shows the exact URLs for your host, ready to copy.
+shows the exact URLs for your host, ready to copy — for this deployment they are
+all rooted at `https://plm.gidpaull.com`.
 
 | Location | Type | Path |
 |---|---|---|

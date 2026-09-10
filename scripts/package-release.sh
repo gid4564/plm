@@ -114,10 +114,10 @@ On the server:
 
   scp dist/plm-release.tar.gz user@server:/tmp/
   ssh user@server
-  sudo mkdir -p /opt/plm && sudo chown $USER /opt/plm
+  sudo mkdir -p /apps/plm && sudo chown $USER /apps/plm
   tar -xzf /tmp/plm-release.tar.gz -C /tmp
-  rsync -a --delete --exclude .env.local --exclude .pm2 /tmp/plm/ /opt/plm/
-  cd /opt/plm
+  rsync -a --delete --exclude .env.local --exclude .pm2 /tmp/plm/ /apps/plm/
+  cd /apps/plm
 
 First deploy only — write the environment, then start:
 
