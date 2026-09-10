@@ -148,30 +148,54 @@ export function SettingsClient(p: Props) {
           </p>
         </div>
 
+        {/*
+          * The Onshape identity leads, because that is the one Onshape checks
+          * against the workflow's approver list. The PLM login is shown beneath
+          * it as provenance — it is merely the account holding the tokens.
+          */}
         <KV
-          k="Service account"
+          k="Releases execute as"
           v={
-            ent?.serviceAccount ? (
+            !ent?.serviceAccount ? (
+              <span style={{ color: "var(--warn)" }}>not set</span>
+            ) : ent.serviceAccount.onshapeEmail ? (
               <>
-                {ent.serviceAccount.email}
-                <span style={{ color: "var(--text-faint)" }}>
-                  {" "}· connected {relTime(ent.serviceAccount.connectedAt)}
+                <strong>{ent.serviceAccount.onshapeEmail}</strong>
+                {ent.serviceAccount.onshapeName ? ` (${ent.serviceAccount.onshapeName})` : ""}
+                <span style={{ display: "block", color: "var(--text-faint)", fontSize: 11.5 }}>
+                  in Onshape · via the PLM login {ent.serviceAccount.email} · connected{" "}
+                  {relTime(ent.serviceAccount.connectedAt)}
                 </span>
               </>
             ) : (
-              <span style={{ color: "var(--warn)" }}>not set</span>
+              <>
+                <span style={{ color: "var(--warn)" }}>
+                  Onshape identity not recorded
+                </span>
+                <span style={{ display: "block", color: "var(--text-faint)", fontSize: 11.5 }}>
+                  Held by the PLM login {ent.serviceAccount.email}, connected before PLM
+                  started recording which Onshape account a token acts as. Press Connect
+                  Onshape again to capture it.
+                </span>
+              </>
             )
           }
         />
         <p style={{ fontSize: 11.5, color: "var(--text-faint)", margin: "-4px 0 0", lineHeight: 1.5 }}>
-          <strong>This Onshape user must be a designated approver on the release workflow.</strong>{" "}
-          Onshape restricts an approve transition to designated approvers, and PLM performs that
-          transition as this account — the PLM person who decided is recorded separately, and needs
-          no Onshape seat at all.
+          <strong>
+            The Onshape account named above must be a designated approver on the release
+            workflow.
+          </strong>{" "}
+          Onshape restricts an approve transition to designated approvers, and PLM performs
+          that transition as this account. Whoever decides the release in PLM is recorded
+          separately and needs no Onshape seat at all.
         </p>
 
         {isAdmin && (ent?.serviceAccountCandidates ?? []).length > 0 && (
-          <Field label="Act as">
+          <Field
+            label="Act as"
+            hint="Labelled by the Onshape account each connection authenticates as, which is what matters here — not by the PLM login holding it."
+          >
             <select
               className="select"
               value={""}
@@ -184,12 +208,56 @@ export function SettingsClient(p: Props) {
                 })
               }
             >
-              <option value="">— choose a connected account —</option>
+              <option value="">— choose a connected Onshape account —</option>
               {ent.serviceAccountCandidates.map((c: any) => (
-                <option key={c.id} value={c.id}>{c.email}</option>
+                <option key={c.id} value={c.id}>
+                  {c.onshapeEmail
+                    ? `${c.onshapeEmail}${c.onshapeName ? ` — ${c.onshapeName}` : ""}  (via PLM login ${c.email})`
+                    : `Onshape identity unknown — held by PLM login ${c.email}`}
+                </option>
               ))}
             </select>
           </Field>
+        )}
+
+        {isAdmin && (
+          <details>
+            <summary style={{ cursor: "pointer", fontSize: 12.5, fontWeight: 600 }}>
+              Using a dedicated Onshape service account, not your own
+            </summary>
+            <div style={{ fontSize: 12, color: "var(--text-muted)", lineHeight: 1.6, marginTop: 8 }}>
+              <p style={{ margin: "0 0 8px" }}>
+                The list above holds PLM logins, because an Onshape token has to belong to
+                one. But the token can authenticate as <em>any</em> Onshape account — so a
+                dedicated service user is a matter of which Onshape account you are signed in
+                as at the moment you connect, not of which PLM user you are.
+              </p>
+              <ol style={{ margin: "0 0 8px", paddingLeft: 20 }}>
+                <li>Create the service user in your Onshape enterprise and give it a seat.</li>
+                <li>
+                  Add it as a <strong>designated approver</strong> on the release workflow
+                  (Onshape: Enterprise settings → Release management).
+                </li>
+                <li>
+                  In a private window, sign in to <em>Onshape</em> as the service user.
+                </li>
+                <li>
+                  In that same window, sign in to PLM — a dedicated PLM login such as{" "}
+                  <span className="mono">service@…</span> keeps the audit trail legible, but
+                  any will do — and press <strong>Connect Onshape</strong>.
+                </li>
+                <li>
+                  Come back here. The entry will name the service user, and you can nominate
+                  it.
+                </li>
+              </ol>
+              <p style={{ margin: 0 }}>
+                The private window matters: connecting from your normal session links your own
+                Onshape account, and every release would then be executed and attributed to
+                you in Onshape&rsquo;s own records.
+              </p>
+            </div>
+          </details>
         )}
 
         <KV

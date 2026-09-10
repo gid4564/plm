@@ -12,14 +12,16 @@ export const GET = handler(async () => {
   const ent: any = await Enterprise.findById(s.enterpriseId).lean();
   if (!ent) return fail("Enterprise not found", 404);
 
+  const FIELDS = "email name onshapeConnectedAt onshapeEmail onshapeName onshapeUserId";
+
   const service: any = ent.integrationUserId
-    ? await User.findById(ent.integrationUserId).select("email name onshapeConnectedAt").lean()
+    ? await User.findById(ent.integrationUserId).select(FIELDS).lean()
     : null;
 
   const candidates: any[] = await User.find({
     enterpriseId: s.enterpriseId,
     onshapeAccessToken: { $ne: null },
-  }).select("email name onshapeConnectedAt").lean();
+  }).select(FIELDS).lean();
 
   return ok({
     name: ent.name,
@@ -41,11 +43,20 @@ export const GET = handler(async () => {
      * account has to be one in the release workflow or every approval will be
      * refused.
      */
+    /*
+     * Both identities, deliberately. `email` is the PLM login that holds the
+     * tokens; `onshapeEmail` is the Onshape account they authenticate as, and
+     * that is the one Onshape checks against the workflow's approver list. They
+     * are frequently different, which is the whole point of a service account.
+     */
     serviceAccount: service
       ? {
           email: service.email,
           name: service.name ?? "",
           connectedAt: service.onshapeConnectedAt ?? null,
+          onshapeEmail: service.onshapeEmail ?? null,
+          onshapeName: service.onshapeName ?? null,
+          onshapeUserId: service.onshapeUserId ?? null,
         }
       : null,
     serviceAccountCandidates: candidates.map((u) => ({
@@ -53,6 +64,9 @@ export const GET = handler(async () => {
       email: u.email,
       name: u.name ?? "",
       connectedAt: u.onshapeConnectedAt ?? null,
+      onshapeEmail: u.onshapeEmail ?? null,
+      onshapeName: u.onshapeName ?? null,
+      onshapeUserId: u.onshapeUserId ?? null,
     })),
   });
 });

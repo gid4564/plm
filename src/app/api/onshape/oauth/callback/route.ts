@@ -58,6 +58,10 @@ export const GET = handler(async (req: Request) => {
   await User.findByIdAndUpdate(session.userId, {
     $set: {
       onshapeUserId: onshapeUser.id,
+      // Kept so the service-account picker can name the Onshape identity these
+      // tokens act as, which may not be the PLM user holding them.
+      onshapeEmail: onshapeUser.email || null,
+      onshapeName: onshapeUser.name || null,
       onshapeAccessToken: tokens.accessToken,
       onshapeRefreshToken: tokens.refreshToken,
       onshapeTokenExpiresAt: tokens.expiresAt,

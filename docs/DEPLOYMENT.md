@@ -413,10 +413,42 @@ That user must be a **designated approver** on your release workflow, or every
 approval will be refused. Onshape restricts approve transitions to designated
 approvers.
 
-1. Nominate the service user: **Settings → Release management → Act as**. It must
-   have pressed *Connect Onshape* first.
-2. Add that user as an approver in your Onshape release workflow JSON
+### The two identities, and why the picker looks the way it does
+
+**Act as** lists PLM logins, because an Onshape token has to belong to one. But
+the token can authenticate as *any* Onshape account — so which Onshape user
+executes your releases is decided by who you are signed in to **Onshape** as at
+the moment you press Connect Onshape, not by which PLM user you are.
+
+The picker names the Onshape account each connection authenticates as, with the
+PLM login that holds it in brackets. That is the distinction that matters:
+Onshape checks the **Onshape** account against the workflow's approver list, and
+records the release against it.
+
+### Connecting a dedicated Onshape service account
+
+```
+1. Create the service user in your Onshape enterprise and give it a seat.
+2. Add it as a designated approver on the release workflow
    (Onshape: Enterprise settings → Release management).
+3. In a private window, sign in to Onshape as that service user.
+4. In the same window, sign in to PLM and press Connect Onshape.
+5. Back in Settings → Release management, nominate it under "Act as".
+```
+
+The private window is the load-bearing step. Connecting from your normal session
+links *your* Onshape account, and every release is then executed and attributed
+to you in Onshape's own records — which is exactly what a service account exists
+to avoid.
+
+A dedicated PLM login for it (`service@…`) keeps the audit trail legible, but any
+PLM login will do; nothing about the PLM side reaches Onshape.
+
+### The order to do it in
+
+1. Connect the service account as above, then nominate it under **Settings →
+   Release management → Act as**.
+2. Confirm it is a **designated approver** in your Onshape release workflow JSON.
 3. **Discover the release workflow** in PLM Settings.
 4. Turn on **Take over releases raised in Onshape**.
 

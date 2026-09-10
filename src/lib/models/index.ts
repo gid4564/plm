@@ -106,6 +106,19 @@ const UserSchema = new Schema(
     // and writes. Distinct from the OAuth server models further down, which is
     // how Onshape authenticates itself when calling *us*.
     onshapeUserId: { type: String, default: null, index: true },
+    /*
+     * Who these tokens actually authenticate as, in Onshape's terms.
+     *
+     * Not the same person as the PLM account holding them, and the difference
+     * is the point: to have PLM act as a dedicated Onshape service user, a PLM
+     * user connects while their browser is signed in to Onshape as that
+     * account. Storing only the id made that indistinguishable from connecting
+     * your own account — the service-account picker could label candidates
+     * only by their PLM login, which says nothing about which Onshape identity
+     * would execute a release.
+     */
+    onshapeEmail: { type: String, default: null },
+    onshapeName: { type: String, default: null },
     onshapeAccessToken: { type: String, default: null },
     onshapeRefreshToken: { type: String, default: null },
     onshapeTokenExpiresAt: { type: Date, default: null },

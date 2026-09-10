@@ -60,9 +60,21 @@ export const GET = handler(async (req: Request) => {
   if (isMock()) {
     await connectDb();
     const ent: any = await Enterprise.findById(session.enterpriseId);
+    /*
+     * Record an Onshape identity distinct from the PLM login, on purpose.
+     *
+     * The live callback stores whoever Onshape says the tokens authenticate as,
+     * and that is routinely a different account — a dedicated service user. A
+     * mock that echoed the PLM email back would make the two look like one
+     * thing, and hide the distinction the service-account picker exists to
+     * surface.
+     */
+    const localPart = session.email.split("@")[0] || "user";
     await User.findByIdAndUpdate(session.userId, {
       $set: {
         onshapeUserId: `mock-user-${session.userId.slice(-6)}`,
+        onshapeEmail: `${localPart}@mockenterprise.test`,
+        onshapeName: `${localPart} (mock Onshape account)`,
         onshapeAccessToken: "mock-access-token",
         onshapeRefreshToken: "mock-refresh-token",
         onshapeTokenExpiresAt: new Date(Date.now() + 3600_000),
