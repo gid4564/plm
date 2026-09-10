@@ -62,6 +62,43 @@ Unlike the context-menu extensions, this location offers **no choice of method
 and no Action Body** in the Developer Portal. Onshape decides the payload, so
 there is nothing to configure — and nothing to blame when it does not work.
 
+### `elementType` arrives as an integer, and the mapping is undocumented
+
+The live part-number payload sends `elementType: 0`, not the string
+`"PARTSTUDIO"` that Onshape's reference sample implies. `resourceType` is also
+an integer, and `mimeType` is `null` — so neither is a usable fallback.
+
+I could not find the numeric mapping in Onshape's API documentation, its
+samples, or its forum.
+
+| Code | Meaning | Basis |
+|---|---|---|
+| `0` | Part Studio | **[confirmed]** — observed live, arriving with `partId: "JMD"`, and only a part carries a part id |
+| `1` | Assembly | **[likely]** — PARTSTUDIO, ASSEMBLY, DRAWING is the order Onshape lists its string element types in throughout its docs |
+| `2` | Drawing | **[likely]** — same reasoning |
+
+Because 1 and 2 are inferences, `lib/onshape/element-type.ts` does not lean on
+them. It prefers the **structure** of the request: a non-empty `partId`
+identifies a part whatever the code claims, which is what made the live request
+classifiable at all. The numeric table is the last resort, and its non-zero
+entries are flagged as unconfident so the log says when a guess was made.
+
+The full live payload, for reference:
+
+```json
+{ "id": "…", "elementType": 0, "workSpaceId": "…", "configuration": "default",
+  "documentId": "…", "elementId": "…", "partNumber": "", "versionId": null,
+  "partId": "JMD", "mimeType": null, "companyId": "…", "resourceType": 0,
+  "categories": [] }
+```
+
+Note `workSpaceId` — **capital S** — where the sample uses `workspaceId`. Both
+spellings are echoed back.
+
+**To confirm 1 and 2:** request a number from an assembly and from a drawing, and
+read the logged `elementType`. The log names the signal each classification came
+from, so a wrong prefix says why.
+
 ### Onshape's own token endpoint refuses HTTP Basic
 
 Worth stating because it contradicts the standard. RFC 6749 says an

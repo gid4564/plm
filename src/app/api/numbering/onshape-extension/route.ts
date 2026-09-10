@@ -1,6 +1,7 @@
 import { connectDb } from "@/lib/db";
 import { Enterprise, NumberIssuedLog } from "@/lib/models";
-import { nextNumber, type NumberingType } from "@/lib/numbering";
+import { nextNumber } from "@/lib/numbering";
+import { classify } from "@/lib/onshape/element-type";
 import { authenticateBearer } from "@/lib/oauth-server";
 import { readExtensionRequest } from "@/lib/onshape/extension-request";
 import { handler, ok, fail } from "@/lib/api";
@@ -42,54 +43,6 @@ import { handler, ok, fail } from "@/lib/api";
  * user who granted access — which is what tells this route whose numbering
  * scheme to use.
  */
-/*
- * How Onshape names an element type, in every spelling seen or plausible.
- *
- * The live payload carries more than the reference sample showed — resourceType,
- * mimeType and categories alongside elementType — so the value in elementType
- * is not guaranteed to be the bare "PARTSTUDIO" the sample implies. Keys here
- * are compared with punctuation and spacing stripped, so "Part Studio",
- * "PART_STUDIO" and "partstudio" all land on the same entry.
- */
-const ELEMENT_TYPE_TO_NUMBERING_TYPE: Record<string, NumberingType> = {
-  PARTSTUDIO: "PART",
-  PART: "PART",
-  PARTS: "PART",
-  ASSEMBLY: "ASSEMBLY",
-  ASSEMBLIES: "ASSEMBLY",
-  SUBASSEMBLY: "ASSEMBLY",
-  DRAWING: "DRAWING",
-  DRAWINGS: "DRAWING",
-};
-
-/**
- * Classify one item, from whichever field actually identifies it.
- *
- * elementType first, since that is what Onshape documents. Then mimeType, which
- * is a reliable secondary signal — Onshape's element mime types name the kind
- * directly. Then resourceType. Refusing outright because a type string is
- * spelled unexpectedly would break the whole feature over a label, when the
- * request itself is unambiguous: someone asked for a number.
- */
-function classify(item: Record<string, unknown>): { type: NumberingType; from: string } | null {
-  const norm = (v: unknown) => String(v ?? "").toUpperCase().replace(/[\s_\-.]+/g, "");
-
-  const direct = ELEMENT_TYPE_TO_NUMBERING_TYPE[norm(item.elementType)];
-  if (direct) return { type: direct, from: "elementType" };
-
-  // Mime types read like application/vnd.onshape.ins-partstudio, so a substring
-  // match is what identifies them rather than an exact table.
-  const mime = norm(item.mimeType);
-  for (const [key, type] of Object.entries(ELEMENT_TYPE_TO_NUMBERING_TYPE)) {
-    if (mime && mime.includes(key)) return { type, from: "mimeType" };
-  }
-
-  const resource = ELEMENT_TYPE_TO_NUMBERING_TYPE[norm(item.resourceType)];
-  if (resource) return { type: resource, from: "resourceType" };
-
-  return null;
-}
-
 /*
  * The fields echoed back beside the number.
  *
@@ -152,29 +105,23 @@ export const POST = handler(async (req: Request) => {
    * failing on a later one would burn numbers on a request that produced no
    * answer. Validating the whole batch first means a bad request costs nothing.
    */
-  const classified: { item: Record<string, unknown>; type: NumberingType; from: string }[] = [];
-  const unrecognised: string[] = [];
+  const classified = ext.items.map((item) => ({ item, ...classify(item) }));
 
-  for (const item of ext.items) {
-    const hit = classify(item);
-    if (hit) classified.push({ item, ...hit });
-    else {
-      unrecognised.push(
-        `elementType=${JSON.stringify(item.elementType ?? null)}` +
-        `/resourceType=${JSON.stringify(item.resourceType ?? null)}` +
-        `/mimeType=${JSON.stringify(item.mimeType ?? null)}`
-      );
-    }
-  }
-
-  if (unrecognised.length) {
-    // Onshape shows this to the user, so it quotes exactly what arrived — a
-    // message naming only what was expected leaves nobody able to act on it.
-    return fail(
-      `${unrecognised.length} of ${ext.items.length} item(s) could not be identified as a ` +
-      `Part Studio, Assembly or Drawing: ${[...new Set(unrecognised)].join("; ")}. ` +
-      `Nothing was numbered, so no numbers were used up.`,
-      422
+  /*
+   * Nothing is refused for being unidentifiable any more.
+   *
+   * The scheme decides a prefix, and a number with the wrong prefix is a
+   * cosmetic problem; refusing leaves the Release candidate dialog unable to
+   * number anything at all, which is a broken feature. Guesses are logged as
+   * guesses so the mapping can be corrected from real traffic rather than
+   * argued about.
+   */
+  const guessed = classified.filter((c) => !c.confident);
+  if (guessed.length) {
+    console.warn(
+      `[PLM] numbering extension: ${guessed.length} of ${classified.length} item(s) classified ` +
+      `without a trustworthy signal — ${guessed.map((g) => `${g.type} from ${g.from}`).join("; ")}. ` +
+      `Numbers were still issued. If a prefix looks wrong, this is why.`
     );
   }
 
