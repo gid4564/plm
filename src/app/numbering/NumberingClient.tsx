@@ -3,10 +3,26 @@
 import { useCallback, useEffect, useState } from "react";
 import { Alert, Spinner } from "@/components/ui";
 
-type NumberingType = "PART" | "ASSEMBLY" | "DRAWING";
+type NumberingType = "PART" | "ASSEMBLY" | "DRAWING" | "RELEASE";
 
 const LABELS: Record<NumberingType, string> = {
-  PART: "Part", ASSEMBLY: "Assembly", DRAWING: "Drawing",
+  PART: "Part", ASSEMBLY: "Assembly", DRAWING: "Drawing", RELEASE: "Release",
+};
+
+/** What each scheme numbers, and where those numbers surface. */
+const PURPOSE: Record<NumberingType, string> = {
+  PART:
+    "Parts, whether synced from a Part Studio or created here. Written onto the Onshape part, " +
+    "and what Onshape's Release candidate dialog asks for.",
+  ASSEMBLY:
+    "Assemblies, which PLM holds as objects in their own right rather than only as containers " +
+    "to explode.",
+  DRAWING:
+    "Drawing documents. Issued when a drawing arrives with a release package, since Onshape " +
+    "attaches the active sheets itself.",
+  RELEASE:
+    "Releases. Travels to Onshape as the release package's changeOrderId, which is how a " +
+    "package is traced back to PLM from the Onshape side.",
 };
 
 type Sequence = {
@@ -58,11 +74,12 @@ export function NumberingClient({ isAdmin }: { isAdmin: boolean }) {
   return (
     <div style={{ display: "grid", gap: 16 }}>
       <div>
-        <h1 style={{ fontSize: 20, margin: "0 0 3px", letterSpacing: "-.02em" }}>Part Numbering</h1>
-        <p style={{ color: "var(--text-muted)", fontSize: 13, margin: 0, lineHeight: 1.55 }}>
-          A standalone number generator — not part of the manufacturing order system. Onshape's own
-          "Part number generator" app extension calls this tool directly to hand out and apply the
-          next number, the way an external numbering app would.
+        <h1 style={{ fontSize: 20, margin: "0 0 3px", letterSpacing: "-.02em" }}>Numbering</h1>
+        <p style={{ color: "var(--text-muted)", fontSize: 13, margin: 0, lineHeight: 1.55, maxWidth: 760 }}>
+          PLM is the number master. Every part, assembly, drawing and release takes its identifier
+          from a scheme below, and Onshape&rsquo;s own <em>Part number generator</em> extension calls
+          in for one — which is what puts a PLM number on a part at the moment someone opens the
+          Release candidate dialog, rather than after the fact.
         </p>
       </div>
 
@@ -80,9 +97,13 @@ export function NumberingClient({ isAdmin }: { isAdmin: boolean }) {
           <input className="input mono" style={{ fontSize: 12 }} value={extensionUrl} readOnly />
           <button className="btn btn-sm" onClick={copyUrl} type="button">{copied ? "Copied" : "Copy"}</button>
         </div>
-        <p style={{ fontSize: 11, color: "var(--text-faint)", margin: 0 }}>
-          Once set, Onshape's own Release dialog, properties dialog, BOM table and configuration table
-          can all request a number from this tool and apply it directly — no MOS UI involved.
+        <p style={{ fontSize: 11, color: "var(--text-faint)", margin: 0, lineHeight: 1.6 }}>
+          Once set, Onshape&rsquo;s Release candidate dialog, properties dialog, BOM table and
+          configuration table can each request a number and apply it directly — PLM never writes it,
+          because that write is Onshape&rsquo;s own job once it has an answer. It is a batch endpoint:
+          Onshape may ask for several numbers in one call, so raising a release candidate over a set
+          of unnumbered parts numbers them all at once. This location takes no method and no Action
+          Body — Onshape decides the payload.
         </p>
       </div>
 
@@ -100,9 +121,10 @@ export function NumberingClient({ isAdmin }: { isAdmin: boolean }) {
 
       <div className="card" style={{ padding: 18 }}>
         <h2 style={{ fontSize: 14, margin: "0 0 4px", fontWeight: 650 }}>Recently issued</h2>
-        <p style={{ fontSize: 11.5, color: "var(--text-faint)", margin: "0 0 12px" }}>
+        <p style={{ fontSize: 11.5, color: "var(--text-faint)", margin: "0 0 12px", lineHeight: 1.55 }}>
           Most recent 25 numbers, across every type. A number is never reused, even one issued for a
-          request that failed afterward.
+          request that failed afterwards — it may already have been read, quoted or written onto a
+          drawing, and two things wearing one number is worse than one number that looks unused.
         </p>
         {log.length === 0 ? (
           <p style={{ color: "var(--text-muted)", fontSize: 13, margin: 0 }}>Nothing issued yet.</p>
@@ -162,13 +184,14 @@ function TypeCard({
         body: JSON.stringify({ type: seq.type, prefix, suffix, padding: Number(padding) }),
       });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error);
+      if (!res.ok) throw new Error(data.error || "Could not save this scheme");
       setEditing(false);
       onChanged();
-    } catch {
-      // Fields simply do not update; pressing Save again after fixing the
-      // value works normally, so a card-local alert would add more state for
-      // a rare admin-only mistake than it is worth.
+    } catch (err: any) {
+      // Reported rather than swallowed. A save that appears to do nothing is
+      // indistinguishable from one that worked and displayed the old value,
+      // and an admin has no way to tell which happened.
+      setGenError(String(err.message ?? err));
     } finally {
       setSaving(false);
     }
@@ -203,13 +226,20 @@ function TypeCard({
 
   return (
     <div className="card" style={{ padding: 16, display: "grid", gap: 12 }}>
-      <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between" }}>
-        <h2 style={{ fontSize: 14, margin: 0, fontWeight: 650 }}>{LABELS[seq.type]}</h2>
-        {isAdmin && (
-          <button className="btn btn-sm" onClick={() => setEditing((e) => !e)}>
-            {editing ? "Cancel" : "Edit"}
-          </button>
-        )}
+      <div>
+        <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between" }}>
+          <h2 style={{ fontSize: 14, margin: 0, fontWeight: 650 }}>{LABELS[seq.type]}</h2>
+          {isAdmin && (
+            <button className="btn btn-sm" onClick={() => setEditing((e) => !e)}>
+              {editing ? "Cancel" : "Edit"}
+            </button>
+          )}
+        </div>
+        {/* Four schemes look interchangeable without this; what each one
+            numbers, and where those numbers surface, is the distinction. */}
+        <p style={{ fontSize: 11.5, color: "var(--text-faint)", margin: "4px 0 0", lineHeight: 1.5 }}>
+          {PURPOSE[seq.type]}
+        </p>
       </div>
 
       {editing ? (

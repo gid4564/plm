@@ -95,11 +95,29 @@ keep an existing part current.
 PLM issues them, and writes them onto the Onshape part. This also works from
 inside Onshape: the *Part number generator* extension means opening the Release
 candidate dialog gets a PLM number applied then and there, rather than after the
-fact.
+fact — and because it is a batch request, a candidate covering several unnumbered
+parts numbers them all in one go.
 
 Numbers are never reused, even if the write to Onshape fails afterwards. A number
 that might already be in a quote or a drawing is worse to reissue than to leave
 looking unused.
+
+**Setting the schemes** is on the **Numbering** page. There are four, one per
+kind of thing PLM numbers, each with a prefix, an optional suffix, and how many
+digits the counter is padded to:
+
+| Scheme | Numbers | Default |
+|---|---|---|
+| Part | Parts, and what the Release candidate dialog asks for | `PN-00001` |
+| Assembly | Assemblies, which PLM holds as objects in their own right | `AS-00001` |
+| Drawing | Drawing documents, issued when one arrives with a release | `DWG-00001` |
+| Release | Releases. Travels to Onshape as the package's change order id | `REL-00001` |
+
+Admins can change any of them. Changing a scheme affects only numbers issued
+afterwards — nothing already issued is renumbered, because a number that has been
+written onto a part, a drawing or a quote is not PLM's to take back. The page
+also lists the last 25 numbers issued and where each went, which is how you
+answer "what got this number, and why".
 
 ### Versions: revision and iteration
 

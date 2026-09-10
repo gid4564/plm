@@ -14,6 +14,7 @@ const LINKS = [
   { href: "/releases", label: "Releases" },
   { href: "/bom", label: "Import from Assembly" },
   { href: "/attributes", label: "Attributes" },
+  { href: "/numbering", label: "Numbering" },
   { href: "/settings", label: "Settings" },
   { href: "/simulator", label: "Onshape Simulator" },
   { href: "/manual", label: "Manual" },
