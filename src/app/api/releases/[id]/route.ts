@@ -29,10 +29,26 @@ export const GET = handler(async (_req: Request, ctx: Ctx) => {
           .select("number name revision lifecycleState currentFileId documentName elementName")
           .lean()
       : [],
-    // Bytes excluded: the list shows which sheets exist and their stage, and a
-    // release with a dozen drawings would otherwise be megabytes of JSON.
+    /*
+     * This release's sheets only — scoped by releaseId, not just by drawing.
+     *
+     * A drawing outlives any one release, so an unscoped query returned every
+     * sheet ever captured of it: a reviewer opening this release saw an earlier
+     * release's as-submitted sheet listed as though it were what they were
+     * being asked to approve. Two "as submitted" rows with no way to tell them
+     * apart is worse than showing none.
+     *
+     * The drawing's own page is where the full history belongs, and it labels
+     * each sheet with the release it came from.
+     *
+     * Bytes excluded: a release with a dozen drawings would otherwise be
+     * megabytes of JSON.
+     */
     drawingIds.length
-      ? DrawingFile.find({ drawingId: { $in: drawingIds } }).select("-data").sort({ version: 1 }).lean()
+      ? DrawingFile.find({ drawingId: { $in: drawingIds }, releaseId: id })
+          .select("-data")
+          .sort({ version: 1 })
+          .lean()
       : [],
     ActivityLog.find({ releaseId: id }).sort({ createdAt: -1 }).limit(50).lean(),
   ]);
