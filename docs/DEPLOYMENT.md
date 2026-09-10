@@ -473,20 +473,38 @@ half is wrong:
 | `invalid_grant` | **This is the pass.** The credentials authenticated; only the code was rejected, which is expected |
 | `unauthorized_client` | The client id or secret is not being accepted |
 
-It tries all three ways of presenting the credentials — in the form body (what
-the app does today), as HTTP Basic (what RFC 6749 prefers), and both — because a
-server is allowed to require Basic and refuse form parameters. If only Basic
-passes, that is the bug and `tokenRequest()` in `lib/onshape/oauth.ts` needs
-changing. If none passes, the credentials themselves are wrong.
+It tries all three ways of presenting the credentials — in the form body, as HTTP
+Basic, and both. Against Onshape only the **form body** works: Basic answers
+`unauthorized_client`, which contradicts RFC 6749 but is what the live endpoint
+does, and is why the app sends credentials in the body. So a healthy run looks
+like this:
+
+```
+credentials in the form body   HTTP 400  invalid_grant        ← the pass
+credentials as HTTP Basic      HTTP 401  unauthorized_client  ← expected
+credentials both ways          HTTP 401  unauthorized_client  ← expected
+```
+
+If the first line passes, the credentials and the method are both right and the
+fault is elsewhere. If none passes, the credentials themselves are wrong.
 
 It needs no browser, no user and no real code, which is the point: this failure
 happens mid-redirect, where there is nothing left to inspect.
 
+The app also names what it sent. A token-exchange failure now carries the
+client id and secret as a length plus first and last four characters, the
+`redirect_uri`, and the endpoint — in the same format this script prints, so the
+two can be compared directly. And missing credentials are refused before the
+call, with a message saying so, rather than surfacing as Onshape's
+`unauthorized_client`.
+
 **Most likely causes, in order:**
 
 1. **`.env.local` was written but the app was not restarted.** Next reads it at
-   startup, so the old process is still holding the old values. `pm2 restart plm
-   --update-env` — `deploy.sh` does this for you.
+   startup, so the old process is still holding the old values — which is
+   precisely the case where the file on disk is correct and the error insists the
+   credentials are wrong. `pm2 restart plm --update-env` — `deploy.sh` does this
+   for you.
 2. **The values are quoted or padded.** `ONSHAPE_CLIENT_ID="abc"` passes the
    quotes through as part of the id. The script reports both, and any stray
    whitespace, without printing the secret.

@@ -29,6 +29,30 @@ So PLM needs *both* halves:
 | PLM → Onshape | PLM is the OAuth **client** | PLM's own reads/writes: metadata, release packages, drawing PDFs, transitions | Reuse MOS `lib/onshape/oauth.ts` unchanged |
 | Onshape → PLM | PLM is the OAuth **authorization server** | Onshape authenticates itself when calling PLM's extension action URLs | New |
 
+### Onshape's own token endpoint refuses HTTP Basic
+
+Worth stating because it contradicts the standard. RFC 6749 says an
+authorization server **MUST** support HTTP Basic for client authentication and
+that clients **SHOULD** prefer it, with form parameters as the fallback.
+Onshape's `POST /oauth/token` does the opposite:
+
+| Credentials sent as | Onshape answers |
+|---|---|
+| Form parameters (`client_id`, `client_secret` in the body) | **Accepted** |
+| HTTP Basic | `401 unauthorized_client` |
+| Both at once | `401 unauthorized_client` |
+
+**[confirmed]** — established against the live endpoint with real credentials, by
+sending a deliberately invalid authorization code and comparing which half
+Onshape objected to. `invalid_grant` for the form-parameter form proves the
+client authenticated; `unauthorized_client` for the other two proves it did not.
+`scripts/check-onshape-oauth.mjs` re-runs that comparison on demand.
+
+So `tokenRequest()` in `lib/onshape/oauth.ts` sends credentials in the body
+deliberately, not as the lazier of two options — and sending Basic *as well*
+makes it fail, so a well-meant "be standards-compliant" change here would break
+the connection.
+
 ### The authorization-server contract
 
 Taken from the sample app's `controllers/oauth2.js`, `models/code.js`, and

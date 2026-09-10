@@ -51,20 +51,75 @@ export function authorizeUrl(state: string): string {
   return `${OAUTH()}/oauth/authorize?${p.toString()}`;
 }
 
+/**
+ * Identify a credential without disclosing it, for error messages.
+ *
+ * Enough to tell "the wrong value" from "no value" and to compare against the
+ * Developer Portal at a glance, and not enough to be worth redacting from a
+ * ticket or a log.
+ */
+function fingerprint(value: string | undefined): string {
+  if (!value) return "not set";
+  if (value.length <= 8) return `${value.length} chars`;
+  return `${value.length} chars, ${value.slice(0, 4)}…${value.slice(-4)}`;
+}
+
+/**
+ * Exchange with Onshape's token endpoint.
+ *
+ * The credentials go in the **form body**, not as HTTP Basic. RFC 6749 says a
+ * server MUST accept Basic and a client SHOULD prefer it, but Onshape answers
+ * `unauthorized_client` to Basic and accepts only the form-parameter form — so
+ * this is deliberate rather than the lazier of two options. Verified against
+ * the live endpoint; scripts/check-onshape-oauth.mjs re-establishes it on demand.
+ */
 async function tokenRequest(body: Record<string, string>): Promise<OAuthTokens> {
+  const clientId = process.env.ONSHAPE_CLIENT_ID || "";
+  const clientSecret = process.env.ONSHAPE_CLIENT_SECRET || "";
+
+  /*
+   * Refuse before calling out, when there is plainly nothing to authenticate
+   * with. Onshape answers an empty client_id with `unauthorized_client`, which
+   * reads as "your credentials are wrong" and sends people to check values that
+   * are, in the file, entirely correct — the actual fault being that this
+   * process started before the file did.
+   */
+  if (!clientId || !clientSecret) {
+    throw new Error(
+      `Onshape credentials are missing from this process: ` +
+      `ONSHAPE_CLIENT_ID is ${fingerprint(clientId)}, ` +
+      `ONSHAPE_CLIENT_SECRET is ${fingerprint(clientSecret)}. ` +
+      `They are read once at startup, so a .env.local written afterwards is not ` +
+      `picked up until the app restarts — try "pm2 restart plm --update-env".`
+    );
+  }
+
   const res = await fetch(`${OAUTH()}/oauth/token`, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({
-      client_id: process.env.ONSHAPE_CLIENT_ID || "",
-      client_secret: process.env.ONSHAPE_CLIENT_SECRET || "",
+      client_id: clientId,
+      client_secret: clientSecret,
       ...body,
     }).toString(),
     cache: "no-store",
   });
 
   if (!res.ok) {
-    throw new Error(`Onshape token exchange failed (${res.status}): ${(await res.text()).slice(0, 400)}`);
+    const detail = (await res.text()).slice(0, 300);
+    /*
+     * Say what was actually sent. Onshape's own reply names neither the client
+     * it rejected nor the redirect_uri it compared against, so without this the
+     * error is indistinguishable from a dozen different causes — and the values
+     * held by a running process are exactly what nobody can see.
+     */
+    throw new Error(
+      `Onshape token exchange failed (${res.status}): ${detail} ` +
+      `— sent client_id ${fingerprint(clientId)}, secret ${fingerprint(clientSecret)}, ` +
+      `redirect_uri ${redirectUri()}, to ${OAUTH()}/oauth/token. ` +
+      `If those look right, run scripts/check-onshape-oauth.mjs from the deployment ` +
+      `directory: it reports whether Onshape accepts the credentials at all.`
+    );
   }
 
   const j = (await res.json()) as Record<string, any>;
