@@ -171,6 +171,25 @@ async function main() {
       ext.describe().includes("json-but-string"), ext.describe());
   }
 
+  console.log("\nThe live part-number payload, as Onshape actually sends it");
+  {
+    // Captured from a real request: more fields than the reference sample
+    // showed, and workSpaceId with a capital S.
+    const ext = await readExtensionRequest(json([{
+      id: "abc123", elementType: "PARTSTUDIO", workSpaceId: "w1a2b3", configuration: "default",
+      documentId: "d1a2b3", elementId: "e1a2b3", versionId: null, partId: "JHD",
+      resourceType: "part", mimeType: "application/vnd.onshape.part", partNumber: "",
+      companyId: "c1", categories: [],
+    }]));
+    check("it parses as one item", ext.items.length === 1 && ext.bodyWasArray);
+    check("elementType reads through", ext.read("elementType") === "PARTSTUDIO");
+    check("workSpaceId is available under Onshape's own spelling",
+      ext.read("workSpaceId") === "w1a2b3");
+    check("the unfamiliar fields are kept, not dropped",
+      ext.items[0].resourceType === "part" && ext.items[0].mimeType !== undefined);
+    check("an empty partNumber does not read as a value", ext.read("partNumber") === "");
+  }
+
   console.log(`\n${passed} passed, ${failed} failed\n`);
   process.exit(failed ? 1 : 0);
 }

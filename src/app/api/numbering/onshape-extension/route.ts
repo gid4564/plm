@@ -42,14 +42,67 @@ import { handler, ok, fail } from "@/lib/api";
  * user who granted access — which is what tells this route whose numbering
  * scheme to use.
  */
+/*
+ * How Onshape names an element type, in every spelling seen or plausible.
+ *
+ * The live payload carries more than the reference sample showed — resourceType,
+ * mimeType and categories alongside elementType — so the value in elementType
+ * is not guaranteed to be the bare "PARTSTUDIO" the sample implies. Keys here
+ * are compared with punctuation and spacing stripped, so "Part Studio",
+ * "PART_STUDIO" and "partstudio" all land on the same entry.
+ */
 const ELEMENT_TYPE_TO_NUMBERING_TYPE: Record<string, NumberingType> = {
   PARTSTUDIO: "PART",
+  PART: "PART",
+  PARTS: "PART",
   ASSEMBLY: "ASSEMBLY",
+  ASSEMBLIES: "ASSEMBLY",
+  SUBASSEMBLY: "ASSEMBLY",
   DRAWING: "DRAWING",
+  DRAWINGS: "DRAWING",
 };
 
-/** The fields Onshape sends and expects echoed back, per item. */
-const ECHOED = ["id", "documentId", "elementId", "workspaceId", "elementType", "partId"] as const;
+/**
+ * Classify one item, from whichever field actually identifies it.
+ *
+ * elementType first, since that is what Onshape documents. Then mimeType, which
+ * is a reliable secondary signal — Onshape's element mime types name the kind
+ * directly. Then resourceType. Refusing outright because a type string is
+ * spelled unexpectedly would break the whole feature over a label, when the
+ * request itself is unambiguous: someone asked for a number.
+ */
+function classify(item: Record<string, unknown>): { type: NumberingType; from: string } | null {
+  const norm = (v: unknown) => String(v ?? "").toUpperCase().replace(/[\s_\-.]+/g, "");
+
+  const direct = ELEMENT_TYPE_TO_NUMBERING_TYPE[norm(item.elementType)];
+  if (direct) return { type: direct, from: "elementType" };
+
+  // Mime types read like application/vnd.onshape.ins-partstudio, so a substring
+  // match is what identifies them rather than an exact table.
+  const mime = norm(item.mimeType);
+  for (const [key, type] of Object.entries(ELEMENT_TYPE_TO_NUMBERING_TYPE)) {
+    if (mime && mime.includes(key)) return { type, from: "mimeType" };
+  }
+
+  const resource = ELEMENT_TYPE_TO_NUMBERING_TYPE[norm(item.resourceType)];
+  if (resource) return { type: resource, from: "resourceType" };
+
+  return null;
+}
+
+/*
+ * The fields echoed back beside the number.
+ *
+ * Both spellings of the workspace id are listed on purpose: the reference
+ * sample uses `workspaceId`, and the live payload sends `workSpaceId` with a
+ * capital S. Echoing whichever arrived means Onshape gets its own field back
+ * rather than a renamed one, without this route having to decide which is
+ * canonical.
+ */
+const ECHOED = [
+  "id", "documentId", "elementId", "workspaceId", "workSpaceId", "versionId",
+  "elementType", "partId", "configuration", "resourceType", "mimeType",
+] as const;
 
 export const POST = handler(async (req: Request) => {
   const identity = await authenticateBearer(req);
@@ -64,8 +117,24 @@ export const POST = handler(async (req: Request) => {
 
   const ext = await readExtensionRequest(req);
 
+  /*
+   * The values, not only the key names.
+   *
+   * A previous round of this logged which keys arrived, which proved the body
+   * was being parsed but left the actual refusal unexplained — the fields that
+   * decide the outcome are elementType and companyId, and their contents are
+   * what matters.
+   */
+  const preview = ext.items.slice(0, 3).map((i, n) =>
+    `#${n}{elementType=${JSON.stringify(i.elementType ?? null)} ` +
+    `resourceType=${JSON.stringify(i.resourceType ?? null)} ` +
+    `mimeType=${JSON.stringify(i.mimeType ?? null)} ` +
+    `partId=${JSON.stringify(i.partId ?? null)} ` +
+    `companyId=${JSON.stringify(i.companyId ?? null)}}`
+  ).join(" ");
+
   console.log(
-    `[PLM] numbering extension in: user=${identity.userId} | ${ext.describe()}`
+    `[PLM] numbering extension in: user=${identity.userId} | ${ext.describe()} | ${preview}`
   );
 
   if (ext.items.length === 0) {
@@ -83,23 +152,28 @@ export const POST = handler(async (req: Request) => {
    * failing on a later one would burn numbers on a request that produced no
    * answer. Validating the whole batch first means a bad request costs nothing.
    */
-  const classified: { item: Record<string, unknown>; type: NumberingType }[] = [];
+  const classified: { item: Record<string, unknown>; type: NumberingType; from: string }[] = [];
   const unrecognised: string[] = [];
 
   for (const item of ext.items) {
-    const raw = String(item.elementType ?? "").trim();
-    const type = ELEMENT_TYPE_TO_NUMBERING_TYPE[raw.toUpperCase()];
-    if (type) classified.push({ item, type });
-    else unrecognised.push(raw || "(no elementType)");
+    const hit = classify(item);
+    if (hit) classified.push({ item, ...hit });
+    else {
+      unrecognised.push(
+        `elementType=${JSON.stringify(item.elementType ?? null)}` +
+        `/resourceType=${JSON.stringify(item.resourceType ?? null)}` +
+        `/mimeType=${JSON.stringify(item.mimeType ?? null)}`
+      );
+    }
   }
 
   if (unrecognised.length) {
-    // Onshape shows this to the user, so it names what arrived rather than only
-    // what was expected.
+    // Onshape shows this to the user, so it quotes exactly what arrived — a
+    // message naming only what was expected leaves nobody able to act on it.
     return fail(
-      `${unrecognised.length} of ${ext.items.length} item(s) have an element type PLM does ` +
-      `not number: ${[...new Set(unrecognised)].join(", ")}. Expected a Part Studio, ` +
-      `Assembly, or Drawing. Nothing was numbered, so no numbers were used up.`,
+      `${unrecognised.length} of ${ext.items.length} item(s) could not be identified as a ` +
+      `Part Studio, Assembly or Drawing: ${[...new Set(unrecognised)].join("; ")}. ` +
+      `Nothing was numbered, so no numbers were used up.`,
       422
     );
   }
@@ -120,9 +194,16 @@ export const POST = handler(async (req: Request) => {
 
   const companyId = String(ext.items[0]?.companyId ?? "").trim();
   if (companyId && enterprise.onshapeCompanyId && companyId !== enterprise.onshapeCompanyId) {
+    console.warn(
+      `[PLM] numbering extension refused: token enterprise company ` +
+      `"${enterprise.onshapeCompanyId}" != request company "${companyId}"`
+    );
     return fail(
-      `This token belongs to the PLM enterprise for Onshape company ` +
-      `"${enterprise.onshapeCompanyId}", but the request came from "${companyId}".`,
+      `This token belongs to the PLM enterprise registered for Onshape company ` +
+      `"${enterprise.onshapeCompanyId}", but the request came from "${companyId}". ` +
+      `Nothing was numbered. If "${companyId}" is the correct company, the PLM enterprise ` +
+      `was registered with the wrong id — correct it in Settings, or register the ` +
+      `enterprise against that company.`,
       403
     );
   }
@@ -155,7 +236,7 @@ export const POST = handler(async (req: Request) => {
 
   console.log(
     `[PLM] numbering extension out: issued ${results.length} number(s) — ` +
-    `${results.map((r) => r.partNumber).join(", ")}`
+    `${classified.map((c, n) => `${results[n].partNumber} (${c.type} via ${c.from})`).join(", ")}`
   );
 
   /*
