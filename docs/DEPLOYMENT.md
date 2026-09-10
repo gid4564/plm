@@ -474,6 +474,30 @@ If the id matches but the grant still fails, the next check is the redirect URI 
 that error also names what Onshape sent and what the client has registered, for
 an admin.
 
+### `That redirect_uri is not registered for this client`
+
+The client id is right and PLM has recognised it; now it is refusing where
+Onshape asked for the code to be sent.
+
+**The registered URI has to be whatever Onshape actually sends, and Onshape does
+not document it.** So read it rather than guess:
+
+1. Press **Grant Access** in Onshape. You land on this PLM's
+   `/api/oauth/authorize`.
+2. The browser's address bar carries `redirect_uri=…`, percent-encoded. That is
+   the value.
+3. In PLM: **Settings → How Onshape authenticates to PLM**, press **Redirect
+   URI** on the client, and paste it URL-decoded.
+
+Signed in as an admin, the refusal names both sides — what Onshape sent and what
+the client permits — so you can usually copy it straight out of the error.
+
+Correcting it **keeps the client's credentials**, so there is nothing to re-paste
+into the Developer Portal. Matching stays exact at redemption: only the contents
+of the permitted list change, never how strictly it is compared, because a prefix
+match on a redirect URI is how an authorization server becomes a
+token-exfiltration path.
+
 ### `Could not authenticate client` on the token exchange
 
 ```

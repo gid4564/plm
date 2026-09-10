@@ -26,7 +26,16 @@ export function SettingsClient(p: Props) {
   // Shown once, then gone: the secret is stored only as a hash.
   const [newSecret, setNewSecret] = useState<{ clientId: string; clientSecret: string; warning: string } | null>(null);
   const [clientName, setClientName] = useState("Onshape");
-  const [redirectUri, setRedirectUri] = useState("https://oauth.onshape.com/callback");
+  /*
+   * Deliberately blank. This used to default to a guessed Onshape callback URL,
+   * which is worse than empty: a wrong value that looks authoritative gets
+   * registered unread, and the mismatch only surfaces later as a refusal during
+   * Grant Access. The right value is whatever Onshape actually sends, and the
+   * hint on the field says how to find it.
+   */
+  const [redirectUri, setRedirectUri] = useState("");
+  const [editing, setEditing] = useState<string | null>(null);
+  const [editUri, setEditUri] = useState("");
   const [partUrl, setPartUrl] = useState("");
   const [partId, setPartId] = useState("");
   const [resync, setResync] = useState<any>(null);
@@ -342,6 +351,16 @@ export function SettingsClient(p: Props) {
           <KV k="Authorize URL" v={clients?.endpoints?.authorize} mono />
           <KV k="Token URL" v={clients?.endpoints?.token} mono />
 
+          <Alert kind="info">
+            <strong>Finding the redirect URI.</strong> It is whatever Onshape sends, and it
+            is not documented — so read it rather than guess. Press Grant Access in Onshape:
+            you land on this PLM&rsquo;s <span className="mono">/api/oauth/authorize</span>,
+            and the browser&rsquo;s address bar carries{" "}
+            <span className="mono">redirect_uri=…</span>. Register that value exactly,
+            URL-decoded. If it does not match, the refusal names both what Onshape sent and
+            what the client permits.
+          </Alert>
+
           {newSecret && (
             <Alert kind="warn">
               <div style={{ display: "grid", gap: 5 }}>
@@ -367,22 +386,69 @@ export function SettingsClient(p: Props) {
                 <div style={{ fontSize: 11, color: "var(--text-faint)" }}>
                   {c.liveTokens} live token{c.liveTokens === 1 ? "" : "s"} · last used {relTime(c.lastUsedAt)}
                 </div>
+                {/* Shown because a mismatch here is the commonest reason Grant
+                    Access fails, and it is otherwise invisible. */}
+                <div style={{ fontSize: 11, color: "var(--text-faint)", marginTop: 2 }}>
+                  sends codes to:{" "}
+                  <span className="mono">{(c.redirectUris ?? []).join(", ") || "nothing registered"}</span>
+                </div>
+
+                {editing === c.clientId && (
+                  <div style={{ display: "flex", gap: 6, marginTop: 6, alignItems: "flex-start" }}>
+                    <input
+                      className="input"
+                      style={{ flex: 1, minWidth: 0 }}
+                      placeholder="https://… exactly as Onshape sent it"
+                      value={editUri}
+                      onChange={(e) => setEditUri(e.target.value)}
+                    />
+                    <button
+                      className="btn btn-primary btn-sm"
+                      disabled={busy != null || !editUri.trim()}
+                      onClick={() =>
+                        run(`edit-${c.id}`, async () => {
+                          const j = await post("/api/oauth/clients", {
+                            clientId: c.clientId,
+                            redirectUris: [editUri.trim()],
+                          }, "PATCH");
+                          setNotice(j.message);
+                          setEditing(null);
+                          await load();
+                        })
+                      }
+                    >
+                      {busy === `edit-${c.id}` ? <Spinner /> : "Save"}
+                    </button>
+                    <button className="btn btn-sm" onClick={() => setEditing(null)}>Cancel</button>
+                  </div>
+                )}
               </div>
-              {!c.disabledAt && (
-                <button
-                  className="btn btn-sm btn-danger"
-                  disabled={busy != null}
-                  onClick={() =>
-                    run(`revoke-${c.id}`, async () => {
-                      if (!confirm(`Disable "${c.name}" and revoke its ${c.liveTokens} live token(s)?`)) return;
-                      const j = await post(`/api/oauth/clients?clientId=${encodeURIComponent(c.clientId)}`, undefined, "DELETE");
-                      setNotice(`Disabled. ${j.tokensRevoked} token(s) revoked.`);
-                      await load();
-                    })
-                  }
-                >
-                  {busy === `revoke-${c.id}` ? <Spinner /> : "Disable"}
-                </button>
+              {!c.disabledAt && editing !== c.clientId && (
+                <>
+                  <button
+                    className="btn btn-sm"
+                    onClick={() => {
+                      setEditing(c.clientId);
+                      setEditUri((c.redirectUris ?? [])[0] ?? "");
+                    }}
+                  >
+                    Redirect URI
+                  </button>
+                  <button
+                    className="btn btn-sm btn-danger"
+                    disabled={busy != null}
+                    onClick={() =>
+                      run(`revoke-${c.id}`, async () => {
+                        if (!confirm(`Disable "${c.name}" and revoke its ${c.liveTokens} live token(s)?`)) return;
+                        const j = await post(`/api/oauth/clients?clientId=${encodeURIComponent(c.clientId)}`, undefined, "DELETE");
+                        setNotice(`Disabled. ${j.tokensRevoked} token(s) revoked.`);
+                        await load();
+                      })
+                    }
+                  >
+                    {busy === `revoke-${c.id}` ? <Spinner /> : "Disable"}
+                  </button>
+                </>
               )}
             </div>
           ))}
@@ -391,8 +457,16 @@ export function SettingsClient(p: Props) {
             <Field label="Name">
               <input className="input" value={clientName} onChange={(e) => setClientName(e.target.value)} />
             </Field>
-            <Field label="Redirect URI" hint="Matched exactly, never by prefix">
-              <input className="input" value={redirectUri} onChange={(e) => setRedirectUri(e.target.value)} />
+            <Field
+              label="Redirect URI"
+              hint="Whatever Onshape sends — see below. Matched exactly, never by prefix."
+            >
+              <input
+                className="input"
+                placeholder="https://…"
+                value={redirectUri}
+                onChange={(e) => setRedirectUri(e.target.value)}
+              />
             </Field>
             <button
               className="btn btn-primary"
