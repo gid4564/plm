@@ -195,11 +195,33 @@ In the Developer Portal, create an OAuth application and set:
 
 | Field | Value |
 |---|---|
-| Redirect URL | `https://plm.gidpaull.com/api/onshape/oauth/callback` |
-| Scopes | `OAuth2Read`, `OAuth2Write`, `OAuth2ReadPII` |
+| Redirect URLs | `https://plm.gidpaull.com/api/onshape/oauth/callback` |
+| OAuth URL | `https://plm.gidpaull.com/api/onshape/oauth/start` |
+| Type | Integrated Cloud App |
+| Permissions | `OAuth2Read`, `OAuth2Write`, `OAuth2ReadPII` |
 
 Put the client id and secret in `ONSHAPE_CLIENT_ID` / `ONSHAPE_CLIENT_SECRET`.
 Then each user presses **Connect Onshape** in PLM's Settings.
+
+Why each is that:
+
+- **Redirect URL must match character for character.** PLM sends `redirect_uri`
+  on the authorize request and again on the token exchange, built as
+  `APP_BASE_URL + /api/onshape/oauth/callback`. A trailing slash, `http://`, or
+  the bare port in `APP_BASE_URL` produces a redirect-URI mismatch at the token
+  step — the likeliest cause of "Connect Onshape" failing.
+- **OAuth URL** is the cold-start entry point Onshape uses from its Applications
+  page. `/api/onshape/oauth/start` is written for that: a user arriving with no
+  PLM session is sent to sign in and resumed afterwards rather than handed a JSON
+  401, and Onshape's `redirectOnshapeUri` is honoured — validated to
+  `*.onshape.com` over HTTPS, so it cannot be turned into an open redirect.
+- **Integrated Cloud App** because the application also carries right-panel
+  iframes and action-URL extensions (section 4).
+- The three permissions are exactly what `authorizeUrl()` requests, so a missing
+  one fails visibly at consent rather than later: read for metadata, BOMs,
+  thumbnails, mass properties and release packages; write for part numbers and
+  release transitions; PII to identify the signing-in user's company, which is
+  how PLM binds an account to the right enterprise.
 
 ### (b) Onshape calling PLM — an OAuth *server*
 
@@ -218,6 +240,25 @@ PLM is the authorization server. PLM issues Onshape a client id and secret.
 
 Onshape shows users an **External access** button when they enable the
 application; approving it sends them through PLM's consent screen once.
+
+**Scopes: leave blank.** PLM defines none and enforces none. If a scope arrives
+on the authorize request it is shown on the consent screen and recorded on the
+token, but nothing checks it — `authenticateBearer` returns it and neither
+inbound endpoint inspects it. So a token is all-or-nothing: it can call both the
+part number generator and Send to PLM.
+
+Do not reuse the `OAuth2*` permissions from (a) here. Those are Onshape's
+vocabulary for PLM's access *to* Onshape; this direction is PLM's own
+authorization server, and its vocabulary is currently empty.
+
+Two consequences worth knowing:
+
+- The consent screen displays a scope it will not honour, which is mildly
+  misleading. If that matters for a demo, the fix is to define real scopes — one
+  for numbering, one for creating parts — and require them in the two routes.
+- Adding such a requirement later invalidates existing grants until each user
+  re-consents, so it is better decided before the application is handed out than
+  after.
 
 ### (c) The webhook — a shared secret, not a token
 
