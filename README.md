@@ -81,6 +81,22 @@ packages, workflow transitions, revision creation and drawing PDFs, and the mock
 fires real webhooks over HTTP at the registered callback URL — so the receiver is
 exercised exactly as Onshape would exercise it.
 
+### Shipping it
+
+The server cannot build this — `next build` needs far more RAM than it has — so
+the build happens on a workstation and the server receives finished JavaScript:
+
+```bash
+./scripts/package-release.sh
+```
+
+That produces `dist/plm-release.tar.gz` (~10MB, ~52MB extracted) and prints the
+deploy commands. It refuses to ship a bundle that would fail on the server —
+development chunks mixed in by a running dev server, a type error, a native
+binary traced in from macOS, or a missing `server.js`. PLM runs on **port 3005**
+under pm2 as `plm`, both distinct from MOS so the two coexist on one box. Full
+detail in [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md).
+
 ### Tests
 
 ```bash

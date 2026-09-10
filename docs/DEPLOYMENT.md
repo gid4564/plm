@@ -8,22 +8,134 @@ are easy to confuse.
 
 ## What you need
 
-- Node 20+ and MongoDB 6+ (Atlas is fine)
-- A public **HTTPS** hostname Onshape can reach
-- An Onshape **Enterprise** plan, for the release workflow and custom properties
-- An Onshape Developer Portal application
+**On the machine you build on** — Node 20+, and enough RAM for `next build`
+(roughly 2GB free).
+
+**On the server** — Node 20+ and pm2. No npm install, no build toolchain, and
+about 60MB of disk. MongoDB 6+ somewhere it can reach; Atlas is fine, but
+whitelist *the server's* IP, not your laptop's.
+
+**From Onshape** — a public **HTTPS** hostname Onshape can reach, an
+**Enterprise** plan (for the release workflow and custom properties), and a
+Developer Portal application.
 
 ---
 
-## 1. The app
+## 1. The app: build here, ship a tarball
+
+**Do not build on the server.** `next build` needs well over a gigabyte of RAM
+to compile, which the server does not have. The traced output runs in a fraction
+of that, so the build happens on a workstation and the server receives finished
+JavaScript — no npm install, no devDependencies, no build step, ~52MB on disk.
 
 ```bash
-npm install
-npm run build      # emits .next/standalone — a self-contained server
-npm start          # or run .next/standalone/server.js under a supervisor
+./scripts/package-release.sh
 ```
 
-Copy `.env.example` to `.env.local` and fill it in. Two settings matter more than
+That typechecks, builds, assembles `dist/plm/`, and packs
+`dist/plm-release.tar.gz` (~10MB). It refuses to ship rather than produce a
+bundle that will fail on the server:
+
+| Refuses when | Because |
+|---|---|
+| A dev server is listening on 3011 | It writes into `.next` mid-build, mixing development chunks into the bundle |
+| `.next/static/development` or hot-update chunks are present | Same contamination, caught after the fact as well as before |
+| `tsc --noEmit` fails | A type error would otherwise surface on the server, where there is no toolchain to diagnose it |
+| Any `.node`, `.dylib` or `.so` was traced in | A host-specific binary would not survive the trip from macOS to Linux |
+| `server.js` is missing | The only failure that would otherwise appear as a pm2 crash loop |
+
+The bundle is portable because `next.config.ts` sets `output: "standalone"` and
+excludes `sharp` — nothing in it is compiled for the build host.
+
+### Deploying it
+
+```bash
+scp dist/plm-release.tar.gz user@server:/tmp/
+ssh user@server
+sudo mkdir -p /opt/plm && sudo chown $USER /opt/plm
+tar -xzf /tmp/plm-release.tar.gz -C /tmp
+rsync -a --delete --exclude .env.local --exclude .pm2 /tmp/plm/ /opt/plm/
+cd /opt/plm
+```
+
+`rsync --delete` rather than extracting over the top, so a file removed in this
+release is removed on the server too — extracting in place leaves orphans that
+can shadow the new build. The two excludes are what must survive a deploy: the
+environment file, and pm2's logs.
+
+**First deploy only:**
+
+```bash
+cp env.example .env.local && $EDITOR .env.local
+pm2 start ecosystem.config.cjs && pm2 save
+```
+
+**Later deploys** — the rsync above already replaced the code:
+
+```bash
+pm2 restart plm
+```
+
+**Then check that what you meant to deploy is what is running:**
+
+```bash
+curl -s localhost:3005/api/version
+```
+
+The `buildId` it reports is printed by `package-release.sh`. If they differ, the
+rsync did not land or pm2 is still holding the old process — which is worth
+being able to tell apart from a bug in the code.
+
+### What is in the bundle
+
+| | |
+|---|---|
+| `server.js`, `.next/`, `node_modules/` | The traced standalone app |
+| `ecosystem.config.cjs` | pm2 definition — **port 3005**, app name `plm` |
+| `env.example` | Template. The real `.env.local` is never packaged; it holds secrets and stays on the server |
+| `docs/` | MANUAL.md, DEPLOYMENT.md, ONSHAPE-INTEGRATION-SPEC.md |
+| `build-info.json` | The build stamp `/api/version` reports |
+| `find-duplicates.mjs` | Admin tool, below |
+
+The manual is read from disk at request time rather than compiled in, so it can
+be corrected on the server without a rebuild.
+
+### Ports
+
+PLM listens on **3005**, set in `ecosystem.config.cjs` rather than `.env.local`
+— it is a property of how the box is wired up, not of the application's
+configuration, and pm2 is where someone looks for it. `APP_BASE_URL` is the
+opposite: it belongs in `.env.local`, because it is the public HTTPS URL Onshape
+must reach, not the local port. Put a reverse proxy in front terminating TLS and
+forwarding to 3005.
+
+The app name and port are both distinct from MOS, so the two can run on the same
+box.
+
+### Finding duplicate parts
+
+Configuration is part of a part's identity, and Onshape reports the
+configuration string inconsistently across entry points — so a part could
+historically be filed twice, under `"default"` and under the literal
+`"{$configuration}"`. `ignoreConfigurations` (on by default) prevents new ones.
+
+```bash
+cd /opt/plm
+node find-duplicates.mjs            # dry run — reports, changes nothing
+node find-duplicates.mjs --merge    # apply
+```
+
+It runs with plain `node` against the MongoDB driver already in the bundle. A
+merge repoints structure edges and drawing references onto the row it keeps
+rather than deleting them, and **refuses any group where more than one row is
+released** — picking one of two release records to destroy is not a cleanup
+decision.
+
+---
+
+## 2. Configuration
+
+Copy `env.example` to `.env.local` and fill it in. Two settings matter more than
 the rest:
 
 **`APP_BASE_URL`** is the one most often got wrong. It must be the public HTTPS
@@ -35,12 +147,9 @@ panel cannot hold a session and appears permanently signed out.
 **`SESSION_SECRET`** must be at least 16 characters and stable across restarts.
 Changing it signs everyone out.
 
-The build is portable: `output: "standalone"` traces only the modules actually
-needed, and `sharp` is excluded so a macOS build runs unchanged on Linux.
-
 ---
 
-## 2. Onshape → PLM: the three things to configure
+## 3. Onshape → PLM: the three things to configure
 
 This is where the two directions of OAuth get confused, so they are separated
 here explicitly.
@@ -103,7 +212,7 @@ what your workflow actually emits.
 
 ---
 
-## 3. App extensions
+## 4. App extensions
 
 Register these in the Developer Portal against the same application. Settings
 shows the exact URLs for your host, ready to copy.
@@ -131,7 +240,7 @@ Notes that save time:
 
 ---
 
-## 4. Release workflow prerequisites
+## 5. Release workflow prerequisites
 
 PLM cannot be a step in an Onshape workflow — Onshape's workflow engine has no
 concept of an external approver. It acts on the release package over the API
@@ -154,7 +263,7 @@ actually offered.
 
 ---
 
-## 5. Checking it works
+## 6. Checking it works
 
 In order, and each one tells you something different:
 
