@@ -572,20 +572,41 @@ export function SettingsClient(p: Props) {
         </div>
         <table className="table">
           <thead>
-            <tr><th>Location</th><th>Type</th><th>URL</th></tr>
+            <tr>
+              <th>Location</th>
+              <th style={{ width: 60 }}>Type</th>
+              <th style={{ width: 70 }}>Method</th>
+              <th style={{ width: 130 }}>Context</th>
+              <th>URL</th>
+            </tr>
           </thead>
           <tbody>
+            {/*
+              * Method and Context are both required by the Developer Portal and
+              * neither is guessable, so they are listed beside the URL rather
+              * than left to the docs. A context PLM refuses — Drawing, Blob, or
+              * an assembly Instance — produces a menu item that always fails,
+              * which is worse than no menu item at all.
+              */}
             {[
-              ["Element right panel (Part Studio)", "iFrame", "/panel?documentId={$documentId}&workspaceOrVersion={$workspaceOrVersion}&workspaceOrVersionId={$workspaceOrVersionId}&elementId={$elementId}&partId={$partId}&configuration={$configuration}"],
-              ["Element right panel (Assembly)", "iFrame", "/panel/assembly?documentId={$documentId}&workspaceOrVersion={$workspaceOrVersion}&workspaceOrVersionId={$workspaceOrVersionId}&elementId={$elementId}"],
-              ["Part number generator", "Action", "/api/numbering/onshape-extension"],
-              ["Element context menu", "Action", "/api/extensions/send-to-plm?documentId={$documentId}&workspaceOrVersion={$workspaceOrVersion}&workspaceOrVersionId={$workspaceOrVersionId}&elementId={$elementId}"],
-              ["Tree context menu (part)", "Action", "/api/extensions/send-to-plm?documentId={$documentId}&workspaceOrVersion={$workspaceOrVersion}&workspaceOrVersionId={$workspaceOrVersionId}&elementId={$elementId}&partId={$partId}&configuration={$configuration}"],
-              ["Document list context menu", "Action", "/api/extensions/send-to-plm?documentId={$documentId}&elementId={$elementId}&partId={$partId}"],
-            ].map(([loc, type, path]) => (
-              <tr key={loc}>
+              ["Element right panel", "iFrame", "—", "Part, Part Studio",
+               "/panel?documentId={$documentId}&workspaceOrVersion={$workspaceOrVersion}&workspaceOrVersionId={$workspaceOrVersionId}&elementId={$elementId}&partId={$partId}&configuration={$configuration}"],
+              ["Element right panel", "iFrame", "—", "Assembly",
+               "/panel/assembly?documentId={$documentId}&workspaceOrVersion={$workspaceOrVersion}&workspaceOrVersionId={$workspaceOrVersionId}&elementId={$elementId}"],
+              ["Part number generator", "Action", "POST", "—",
+               "/api/numbering/onshape-extension"],
+              ["Element context menu", "Action", "POST", "Part Studio, Assembly",
+               "/api/extensions/send-to-plm?documentId={$documentId}&workspaceOrVersion={$workspaceOrVersion}&workspaceOrVersionId={$workspaceOrVersionId}&elementId={$elementId}"],
+              ["Tree context menu", "Action", "POST", "Part",
+               "/api/extensions/send-to-plm?documentId={$documentId}&workspaceOrVersion={$workspaceOrVersion}&workspaceOrVersionId={$workspaceOrVersionId}&elementId={$elementId}&partId={$partId}&configuration={$configuration}"],
+              ["Document list context menu", "Action", "POST", "Part Studio, Assembly",
+               "/api/extensions/send-to-plm?documentId={$documentId}&elementId={$elementId}&partId={$partId}"],
+            ].map(([loc, type, method, context, path], i) => (
+              <tr key={`${loc}-${i}`}>
                 <td style={{ fontSize: 12.5 }}>{loc}</td>
                 <td style={{ fontSize: 12 }}>{type}</td>
+                <td style={{ fontSize: 12 }} className="mono">{method}</td>
+                <td style={{ fontSize: 12 }}>{context}</td>
                 <td className="mono" style={{ fontSize: 10.5, wordBreak: "break-all" }}>
                   {p.appBaseUrl}{path}
                 </td>
@@ -593,6 +614,59 @@ export function SettingsClient(p: Props) {
             ))}
           </tbody>
         </table>
+
+        <p style={{ fontSize: 11.5, color: "var(--text-faint)", margin: 0, lineHeight: 1.55 }}>
+          Either method works on the Send to PLM action URLs — both GET and POST are
+          exported, and each field is read from whichever of the Action Body or the query
+          string carries a usable value. GET needs one field less; POST is semantically
+          right, since the call creates a PLM object and writes a part number back to
+          Onshape. GET is safe rather than merely tolerated: the operation is idempotent,
+          so a second call reports the number that already exists instead of allocating
+          another.
+          {" "}Leave <strong>Drawing</strong>, <strong>Blob</strong> and an assembly{" "}
+          <strong>Instance</strong> unticked — PLM refuses all three deliberately, and a
+          menu item that always fails is worse than one that is not there.
+        </p>
+
+        {/*
+          * The Developer Portal requires an Action Body in valid JSON whenever the
+          * action type is POST, and it is not obvious what belongs in it — so it is
+          * offered here rather than left to the docs.
+          */}
+        <details>
+          <summary style={{ cursor: "pointer", fontSize: 12.5, fontWeight: 600 }}>
+            Action Body JSON, if you register the context menus as POST
+          </summary>
+          <p style={{ fontSize: 11.5, color: "var(--text-faint)", margin: "8px 0 6px", lineHeight: 1.55 }}>
+            With a body supplying the context, the Action URL needs no query string —
+            just <span className="mono">{p.appBaseUrl}/api/extensions/send-to-plm</span>.
+          </p>
+          {[
+            ["Element context menu, and document list context menu", [
+              "documentId", "workspaceOrVersion", "workspaceOrVersionId", "elementId",
+            ]],
+            ["Tree context menu — also names the selected part", [
+              "documentId", "workspaceOrVersion", "workspaceOrVersionId", "elementId",
+              "partId", "configuration",
+            ]],
+          ].map(([label, keys]) => (
+            <div key={label as string} style={{ marginBottom: 10 }}>
+              <div style={{ fontSize: 11.5, color: "var(--text-muted)", marginBottom: 3 }}>
+                {label as string}
+              </div>
+              <pre
+                className="mono"
+                style={{
+                  margin: 0, fontSize: 11, lineHeight: 1.5, overflowX: "auto",
+                  background: "var(--surface-2)", border: "1px solid var(--border)",
+                  borderRadius: 6, padding: "8px 10px",
+                }}
+              >
+{`{\n${(keys as string[]).map((k) => `  "${k}": "{$${k}}"`).join(",\n")}\n}`}
+              </pre>
+            </div>
+          ))}
+        </details>
       </section>
     </div>
   );

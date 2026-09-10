@@ -20,7 +20,7 @@ import { handler, ok, fail } from "@/lib/api";
  * says "put this in PLM" — so unlike a metadata webhook, this path IS allowed
  * to create, and to allocate a PLM number.
  */
-export const POST = handler(async (req: Request) => {
+async function sendToPlm(req: Request): Promise<Response> {
   const identity = await authenticateBearer(req);
   if (!identity) {
     return fail(
@@ -41,13 +41,27 @@ export const POST = handler(async (req: Request) => {
   const url = new URL(req.url);
   const body = (await req.json().catch(() => ({}))) as Record<string, any>;
 
-  // Discard placeholders Onshape did not substitute — an element with no
-  // configurations leaves {$configuration} verbatim, and passing that on makes
-  // the follow-up metadata call fail with a 400.
-  const read = (key: string): string => {
-    const raw = String(body[key] ?? url.searchParams.get(key) ?? "");
-    return /^\{\$.*\}$/.test(raw) ? "" : raw;
+  /*
+   * Read a value from the body or the query, taking the first *usable* one.
+   *
+   * Two things are going on. Onshape leaves a {$token} verbatim when it has
+   * nothing to substitute — an element with no configurations sends the literal
+   * "{$configuration}" — and passing that on makes the follow-up metadata call
+   * fail with a 400, so an unsubstituted placeholder counts as absent.
+   *
+   * And the order matters more than it looks. A POST extension carries its
+   * context in an Action Body while the URL may also carry it, so both sources
+   * can be present at once. Falling back with `body[key] ?? query` would take a
+   * placeholder sitting in the body — non-null, so the fallback never fires —
+   * and discard a perfectly good value in the query. Hence "first usable"
+   * rather than "first present".
+   */
+  const usable = (v: unknown): string => {
+    const raw = String(v ?? "").trim();
+    return !raw || /^\{\$.*\}$/.test(raw) ? "" : raw;
   };
+  const read = (key: string): string =>
+    usable(body[key]) || usable(url.searchParams.get(key));
 
   const documentId = read("documentId");
   const elementId = read("elementId");
@@ -62,9 +76,16 @@ export const POST = handler(async (req: Request) => {
   const versionId = wv === "v" ? wvId : read("versionId");
 
   if (!documentId || !elementId) {
+    /*
+     * Name both places the context can come from, because which one is at fault
+     * depends on how the extension was registered — and the person reading this
+     * is looking at the Developer Portal, not at this code.
+     */
     return fail(
-      "Onshape did not supply a document and element. Check that the extension's Action " +
-      "URL includes the {$documentId} and {$elementId} placeholders.",
+      "Onshape did not supply a document and element. For a GET extension, check the " +
+      "Action URL includes the {$documentId} and {$elementId} placeholders; for POST, " +
+      "check the Action Body does. Placeholders that arrive unsubstituted are treated " +
+      "as absent, which is the same symptom.",
       422
     );
   }
@@ -142,4 +163,23 @@ export const POST = handler(async (req: Request) => {
         ? `Added to PLM as ${result.number}. Its part number has been written back to Onshape.`
         : `Updated in PLM as ${result.number}.`,
   });
-});
+}
+
+/*
+ * Both verbs, because the Developer Portal makes the caller choose.
+ *
+ * A context-menu extension is registered with an explicit GET or POST, and
+ * picking the one the route does not export produces a 405 before any of the
+ * code above runs — a failure that looks like a broken endpoint rather than a
+ * misconfigured menu item. Everything here is read from the query string when
+ * it is not in a body, so both work identically.
+ *
+ * POST is the better choice where the form allows it: this creates a PLM object
+ * and writes a part number back to Onshape, which is not what GET is for. GET is
+ * safe rather than merely tolerated, though, because the operation is
+ * idempotent — a second call reports the number that already exists instead of
+ * allocating another. That property is what makes a prefetch, a double-click or
+ * a retry harmless.
+ */
+export const POST = handler(sendToPlm);
+export const GET = handler(sendToPlm);

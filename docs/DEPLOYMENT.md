@@ -291,16 +291,100 @@ Register these in the Developer Portal against the same application. Settings
 shows the exact URLs for your host, ready to copy — for this deployment they are
 all rooted at `https://plm.gidpaull.com`.
 
-| Location | Type | Path |
-|---|---|---|
-| Element right panel (Part Studio) | iFrame | `/panel?documentId={$documentId}&workspaceOrVersion={$workspaceOrVersion}&workspaceOrVersionId={$workspaceOrVersionId}&elementId={$elementId}&partId={$partId}&configuration={$configuration}` |
-| Element right panel (Assembly) | iFrame | `/panel/assembly?documentId={$documentId}&workspaceOrVersion={$workspaceOrVersion}&workspaceOrVersionId={$workspaceOrVersionId}&elementId={$elementId}` |
-| Part number generator | Action | `/api/numbering/onshape-extension` |
-| Element context menu | Action | `/api/extensions/send-to-plm?documentId={$documentId}&workspaceOrVersion={$workspaceOrVersion}&workspaceOrVersionId={$workspaceOrVersionId}&elementId={$elementId}` |
-| Tree context menu (part) | Action | `/api/extensions/send-to-plm?…&partId={$partId}&configuration={$configuration}` |
-| Document list context menu | Action | `/api/extensions/send-to-plm?documentId={$documentId}&elementId={$elementId}&partId={$partId}` |
+The form asks for four things per extension: a location, a **Context**, an
+**action type** (GET or POST, for action URLs), and the URL. Context and method
+are both required and neither is obvious, so they are given explicitly below.
 
-Notes that save time:
+### The two panels — iFrame, no method to choose
+
+| Location | Context to tick | URL |
+|---|---|---|
+| Element right panel | Part, Part Studio | `/panel?documentId={$documentId}&workspaceOrVersion={$workspaceOrVersion}&workspaceOrVersionId={$workspaceOrVersionId}&elementId={$elementId}&partId={$partId}&configuration={$configuration}` |
+| Element right panel | Assembly | `/panel/assembly?documentId={$documentId}&workspaceOrVersion={$workspaceOrVersion}&workspaceOrVersionId={$workspaceOrVersionId}&elementId={$elementId}` |
+
+The part panel takes **Part** *and* **Part Studio**: with a part selected it shows
+that part's record, and on the tab with nothing selected it says so rather than
+erroring.
+
+### The action URLs — pick a method
+
+| Location | Method | Context to tick | URL |
+|---|---|---|---|
+| Part number generator | POST | *(none offered)* | `/api/numbering/onshape-extension` |
+| Element context menu | POST | Part Studio, Assembly | `/api/extensions/send-to-plm?documentId={$documentId}&workspaceOrVersion={$workspaceOrVersion}&workspaceOrVersionId={$workspaceOrVersionId}&elementId={$elementId}` |
+| Tree context menu | POST | Part | `/api/extensions/send-to-plm?documentId={$documentId}&workspaceOrVersion={$workspaceOrVersion}&workspaceOrVersionId={$workspaceOrVersionId}&elementId={$elementId}&partId={$partId}&configuration={$configuration}` |
+| Document list context menu | POST | Part Studio, Assembly | `/api/extensions/send-to-plm?documentId={$documentId}&elementId={$elementId}&partId={$partId}` |
+
+**Either method works.** `/api/extensions/send-to-plm` exports both GET and POST,
+and reads its context from the Action Body or the query string — whichever
+carries a usable value. So choosing the verb the route did not export (a 405 that
+looks like a broken endpoint rather than a misconfigured menu item) is not a
+failure mode here.
+
+#### Choosing POST means filling in an Action Body
+
+The Developer Portal requires an **Action Body** in valid JSON when the action
+type is POST. Paste this for the **element context menu** and the **document list
+context menu**:
+
+```json
+{
+  "documentId": "{$documentId}",
+  "workspaceOrVersion": "{$workspaceOrVersion}",
+  "workspaceOrVersionId": "{$workspaceOrVersionId}",
+  "elementId": "{$elementId}"
+}
+```
+
+And this for the **tree context menu**, which additionally names the selected
+part:
+
+```json
+{
+  "documentId": "{$documentId}",
+  "workspaceOrVersion": "{$workspaceOrVersion}",
+  "workspaceOrVersionId": "{$workspaceOrVersionId}",
+  "elementId": "{$elementId}",
+  "partId": "{$partId}",
+  "configuration": "{$configuration}"
+}
+```
+
+With a body supplying the context, the Action URL itself needs no query string —
+just `https://plm.gidpaull.com/api/extensions/send-to-plm`. Sending both is
+harmless: each field is taken from whichever source has a usable value, so a
+placeholder Onshape could not substitute in the body does not shadow a real value
+in the URL.
+
+#### Which to pick
+
+**POST** is semantically right — the call creates a PLM object and writes a part
+number back to Onshape, which is not what GET is for. The cost is the Action Body
+above.
+
+**GET** is one field less to fill in: the placeholders go in the URL and there is
+no body. It is genuinely safe rather than merely tolerated, because the operation
+is idempotent — a second call reports the number that already exists instead of
+allocating another, so a prefetch, a double-click or a retry is harmless.
+
+For a demo either is defensible. If you want one rule: use GET for the context
+menus, since there is less to get wrong, and leave the part number generator on
+POST, where Onshape defines the body itself.
+
+### Contexts to leave unticked, and why
+
+Onshape offers more contexts than PLM should accept. Ticking one PLM refuses
+produces a menu item that always fails, which is worse than no menu item:
+
+| Context | Why not |
+|---|---|
+| Drawing | PLM refuses it, by design — drawings reach PLM with a release package, where Onshape attaches the active sheets itself. The refusal explains that, but it is still a dead menu item |
+| Blob element | Nothing to sync: no metadata, no part |
+| Instance (tree menu) | An instance resolves to the *assembly's* element id plus a part id. PLM refuses that pairing deliberately — the part is defined in a Part Studio, and filing it under the assembly would create a second PLM object for a part already tracked |
+| Feature, Mate, Mate feature | Not objects PLM holds |
+| Sub assembly (tree menu) | How Onshape resolves the ids here is not established; leave it off until it is, rather than register a menu item whose behaviour is unknown |
+
+### Notes that save time
 
 - Onshape leaves a `{$token}` **verbatim** when it has nothing to substitute — an
   element with no configurations sends the literal `{$configuration}`. PLM strips
@@ -311,6 +395,10 @@ Notes that save time:
   which is the useful one.
 - The panels are framed from `cad.onshape.com`, so they are a third-party context.
   The CSP for `/panel/*` allows that; everything else stays frame-denied.
+- The context names above are taken from Onshape's extension documentation rather
+  than from the form itself, so the labels may read slightly differently in the
+  Developer Portal. What matters is the mapping: Part Studio and Assembly yes,
+  Drawing and Blob no.
 
 ---
 
