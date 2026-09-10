@@ -119,6 +119,7 @@ in one command rather than inferred from behaviour.
 | `docs/` | MANUAL.md, DEPLOYMENT.md, ONSHAPE-INTEGRATION-SPEC.md |
 | `build-info.json` | The build stamp `/api/version` reports |
 | `deploy.sh` | The installer above — rsyncs into place, restarts pm2, verifies the build |
+| `check-onshape-oauth.mjs` | Diagnoses a failing token exchange — see Troubleshooting |
 | `find-duplicates.mjs` | Admin tool, below |
 
 The manual is read from disk at request time rather than compiled in, so it can
@@ -423,7 +424,6 @@ If step 2 is missed, PLM reports it in plain terms rather than passing through a
 bare Onshape error — the release detail page names the transitions the package
 actually offered.
 
----
 
 ## 6. Checking it works
 
@@ -444,6 +444,60 @@ In order, and each one tells you something different:
 
 Every step is recorded in the activity log with its direction and trigger, so a
 step that did nothing can be told apart from one that was never attempted.
+
+---
+
+## Troubleshooting the Onshape connection
+
+### `Could not authenticate client` on the token exchange
+
+```
+Onshape token exchange failed (401): {"error":"unauthorized_client",
+"error_description":"Could not authenticate client"}
+```
+
+The authorize step worked — PLM got a code back — and Onshape then refused PLM's
+own credentials when exchanging it. Run:
+
+```bash
+cd /home/gid/apps/plm
+node check-onshape-oauth.mjs
+```
+
+It sends a deliberately invalid authorization code. Onshape authenticates the
+*client* before it looks at the code, so the error that comes back says which
+half is wrong:
+
+| Onshape answers | Meaning |
+|---|---|
+| `invalid_grant` | **This is the pass.** The credentials authenticated; only the code was rejected, which is expected |
+| `unauthorized_client` | The client id or secret is not being accepted |
+
+It tries all three ways of presenting the credentials — in the form body (what
+the app does today), as HTTP Basic (what RFC 6749 prefers), and both — because a
+server is allowed to require Basic and refuse form parameters. If only Basic
+passes, that is the bug and `tokenRequest()` in `lib/onshape/oauth.ts` needs
+changing. If none passes, the credentials themselves are wrong.
+
+It needs no browser, no user and no real code, which is the point: this failure
+happens mid-redirect, where there is nothing left to inspect.
+
+**Most likely causes, in order:**
+
+1. **`.env.local` was written but the app was not restarted.** Next reads it at
+   startup, so the old process is still holding the old values. `pm2 restart plm
+   --update-env` — `deploy.sh` does this for you.
+2. **The values are quoted or padded.** `ONSHAPE_CLIENT_ID="abc"` passes the
+   quotes through as part of the id. The script reports both, and any stray
+   whitespace, without printing the secret.
+3. **The secret is not the one Onshape holds.** It is shown once in the Developer
+   Portal; if it was not saved, generate a new one rather than guess.
+4. **`APP_BASE_URL` disagrees with the registered Redirect URL.** The script
+   prints the exact `redirect_uri` PLM sends — compare it character for character
+   against the portal. Scheme, host, path, no trailing slash.
+
+The script reports the credentials by length and first/last four characters only,
+so its output is safe to paste into a ticket.
 
 ---
 

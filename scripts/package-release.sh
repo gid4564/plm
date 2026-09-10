@@ -55,6 +55,10 @@ cp ecosystem.config.cjs "$OUT/"
 cp scripts/find-duplicates.mjs "$OUT/"
 # The installer, so it is to hand as soon as the tarball is extracted.
 cp scripts/deploy.sh "$OUT/"
+# OAuth diagnostic. Belongs on the server because that is where the real
+# credentials are, and the failure it diagnoses happens mid-redirect where
+# there is nothing to inspect.
+cp scripts/check-onshape-oauth.mjs "$OUT/"
 
 # The manual is read from disk at request time, so it ships as a file rather
 # than being compiled in — it can be corrected on the server without a rebuild.
