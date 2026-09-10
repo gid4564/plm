@@ -449,6 +449,31 @@ step that did nothing can be told apart from one that was never attempted.
 
 ## Troubleshooting the Onshape connection
 
+### `Unknown or disabled client application.` when granting External access
+
+This one is PLM's own message, from its authorize endpoint: Onshape presented a
+`client_id` that this instance does not recognise. **Signed in to PLM as an
+admin, the message says which of the three causes it is** — including the client
+ids the instance does hold, which usually makes it obvious at a glance. Anyone
+not signed in as an admin gets the vague wording, so the ids cannot be
+enumerated.
+
+The three causes:
+
+| Cause | Fix |
+|---|---|
+| No client registered on **this** instance | Register one: **Settings → How Onshape authenticates to PLM → Register**. A client registered on a laptop does not exist on the server — they are different databases |
+| The client was disabled | Disabling revokes every token it held. Register a new one and re-paste both values into the Developer Portal |
+| The wrong value was pasted | Check it is the client **id** and not the secret, and that it carries no quotes or stray whitespace |
+
+The first is much the most common: the External OAuth credentials are issued by
+PLM, not by Onshape, so they have to be generated on the instance Onshape will
+actually reach.
+
+If the id matches but the grant still fails, the next check is the redirect URI —
+that error also names what Onshape sent and what the client has registered, for
+an admin.
+
 ### `Could not authenticate client` on the token exchange
 
 ```

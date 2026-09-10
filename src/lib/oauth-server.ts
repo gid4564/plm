@@ -333,3 +333,51 @@ export async function revokeConsent(clientId: string, userId: string): Promise<n
   );
   return res.modifiedCount ?? 0;
 }
+
+/**
+ * Explain why a client id was not accepted, for an admin of this instance.
+ *
+ * `findClient` returns null for three different reasons — no such client, a
+ * disabled one, and (indirectly) a client registered against a *different* PLM
+ * instance or database. One message covering all three sends someone to
+ * re-check a value that is fine.
+ *
+ * Only ever shown to a signed-in admin. Naming the client ids an instance holds
+ * would otherwise let an anonymous caller enumerate them, which is why the
+ * public message stays deliberately vague.
+ */
+export async function describeClientFailure(clientId: string): Promise<string> {
+  await connectDb();
+
+  const exact: any = await OAuthClient.findOne({ clientId }).lean();
+  if (exact?.disabledAt) {
+    return (
+      `The client "${exact.name}" (${clientId}) was disabled on ` +
+      `${new Date(exact.disabledAt).toISOString().slice(0, 10)}, and every token it held ` +
+      `was revoked. Register a new one in Settings and paste the new id and secret into ` +
+      `Onshape's Developer Portal.`
+    );
+  }
+
+  const all: any[] = await OAuthClient.find({}).select("clientId name disabledAt").lean();
+
+  if (all.length === 0) {
+    return (
+      `No OAuth client is registered on this PLM instance at all, so nothing could match ` +
+      `"${clientId}". Register one under Settings → How Onshape authenticates to PLM, then ` +
+      `paste its id and secret into Onshape's Developer Portal. If you registered one ` +
+      `already, it was against a different instance or a different database — a client ` +
+      `registered on a laptop does not exist on the server.`
+    );
+  }
+
+  const live = all.filter((c) => !c.disabledAt);
+  return (
+    `No client with id "${clientId}" is registered here. This instance holds ` +
+    `${live.length} enabled client(s): ` +
+    `${live.map((c) => `${c.name} (${c.clientId})`).join(", ") || "none"}. ` +
+    `Either Onshape is configured with an id from a different PLM instance, or the value ` +
+    `pasted into the Developer Portal is not the client id — check it is not the secret, ` +
+    `and that it carries no quotes or stray whitespace.`
+  );
+}

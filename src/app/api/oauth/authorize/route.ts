@@ -2,7 +2,7 @@ import { redirect } from "next/navigation";
 import { connectDb } from "@/lib/db";
 import { ActivityLog } from "@/lib/models";
 import { getSession } from "@/lib/auth/session";
-import { findClient, issueAuthCode, redirectAllowed } from "@/lib/oauth-server";
+import { describeClientFailure, findClient, issueAuthCode, redirectAllowed } from "@/lib/oauth-server";
 import { handler, fail } from "@/lib/api";
 
 /**
@@ -33,6 +33,7 @@ export const GET = handler(async (req: Request) => {
 
   await connectDb();
   const client = await findClient(clientId);
+  const session = await getSession();
 
   /*
    * A bad client or redirect URI is answered here, not by redirecting.
@@ -41,16 +42,32 @@ export const GET = handler(async (req: Request) => {
    * becomes an open redirector. Until the URI is known to be registered, the
    * only safe place to report a problem is this page.
    */
-  if (!client) return fail("Unknown or disabled client application.", 400);
+  if (!client) {
+    /*
+     * An admin of this instance gets the real reason; anyone else gets the
+     * vague one. The detail names the client ids this instance holds, which is
+     * exactly what makes "registered on the wrong instance" obvious — and
+     * exactly what an anonymous caller should not be able to enumerate.
+     */
+    return fail(
+      session?.role === "admin"
+        ? await describeClientFailure(clientId)
+        : "Unknown or disabled client application.",
+      400
+    );
+  }
   if (!redirectAllowed(client, redirectUri)) {
     return fail(
-      "That redirect_uri is not registered for this client. It must match one of the " +
-      "registered URIs exactly.",
+      `That redirect_uri is not registered for this client. It must match one of the ` +
+      `registered URIs exactly.` +
+      (session?.role === "admin"
+        ? ` Onshape sent "${redirectUri}"; this client is registered for: ` +
+          `${(client.redirectUris ?? []).join(", ") || "nothing"}.`
+        : ""),
       400
     );
   }
 
-  const session = await getSession();
   const consent = new URLSearchParams({ client_id: clientId, redirect_uri: redirectUri, state, scope });
 
   if (!session) {
@@ -82,7 +99,14 @@ export const POST = handler(async (req: Request) => {
 
   await connectDb();
   const client = await findClient(clientId);
-  if (!client) return fail("Unknown or disabled client application.", 400);
+  if (!client) {
+    return fail(
+      session.role === "admin"
+        ? await describeClientFailure(clientId)
+        : "Unknown or disabled client application.",
+      400
+    );
+  }
   if (!redirectAllowed(client, redirectUri)) {
     return fail("That redirect_uri is not registered for this client.", 400);
   }
