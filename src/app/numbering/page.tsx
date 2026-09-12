@@ -11,7 +11,7 @@ export const dynamic = "force-dynamic";
  * Deliberately its own page, not folded into the dashboard: it demonstrates a
  * different Onshape integration pattern — an external app handing out the
  * next number in a sequence and writing it onto a part, assembly or drawing —
- * and has nothing to do with manufacturing orders.
+ * and has nothing to do with any order of work.
  */
 export default async function NumberingPage() {
   const session = await getSession();

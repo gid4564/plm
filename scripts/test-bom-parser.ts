@@ -11,6 +11,7 @@
  * the server logs the top-level keys of any payload that parses to nothing.
  */
 import { parseBom, parseOnshapeUrl } from "../src/lib/onshape/bom";
+import { assessLine, importableLines } from "../src/lib/bom-import";
 
 let pass = 0, fail = 0;
 const check = (name: string, cond: boolean, extra?: unknown) => {
@@ -86,8 +87,18 @@ console.log("Rows that cannot become items");
       { itemSource: src("P4"), quantity: 1, name: "Real part" },
     ],
   });
-  check("subassembly flagged, not importable", t.lines[0].source === null && t.lines[0].isAssembly, t.lines[0]);
-  check("subassembly explains itself", (t.lines[0].unresolvable ?? "").includes("Subassembly"), t.lines[0].unresolvable);
+  /*
+   * A subassembly now resolves to a source and IS importable — as an assembly.
+   * It used to be refused, which is what flattened a multi-level BOM: the
+   * subassembly was skipped and its children were attached to whatever row was
+   * above it.
+   */
+  check("subassembly is flagged as one", t.lines[0].isAssembly, JSON.stringify(t.lines[0]));
+  check("and is addressable as an element, with no part id",
+    t.lines[0].source?.elementId === "b".repeat(24) && t.lines[0].source?.partId === "",
+    JSON.stringify(t.lines[0].source));
+  check("and needs no reason, because nothing is wrong with it",
+    t.lines[0].unresolvable === null, String(t.lines[0].unresolvable));
   check("sourceless row flagged", t.lines[1].source === null && !!t.lines[1].unresolvable, t.lines[1]);
   check("real part still importable", t.lines[2].source !== null, t.lines[2]);
   check("all three rows survive for display", t.lines.length === 3, t.lines.length);
@@ -134,6 +145,71 @@ console.log("Onshape URL parsing");
   check("version extracted", vs.versionId === V && vs.workspaceId === null, vs);
   const cfg = parseOnshapeUrl(`https://cad.onshape.com/documents/${D}/w/${W}/e/${E}?configuration=size%3Dlarge`)!;
   check("configuration extracted", cfg.configuration === "size=large", cfg.configuration);
+}
+
+/*
+ * What blocks a row from coming into PLM.
+ *
+ * A missing part number does not, and that is the whole point of these
+ * assertions. PLM is the number master: it issues the number and writes it back
+ * onto the Onshape part, so an unnumbered part is the normal case on the way in.
+ *
+ * The importer used to refuse one, greying the row out with "give the part a
+ * number in Onshape and import the assembly again" — a rule inherited from MOS,
+ * where a part number was a precondition for raising a manufacturing order
+ * against an existing number. In PLM it asked the user to do by hand the one
+ * job the system exists to do. Nothing tested it, which is how it survived the
+ * fork.
+ *
+ * What does block a row is not being able to address the part in Onshape.
+ */
+console.log("Importability");
+{
+  const row = (over: Partial<Parameters<typeof assessLine>[0]>) =>
+    assessLine({
+      key: "k", partNumber: "", name: "Leg Structure", description: "", material: "",
+      quantity: 1, vendor: "", project: "", indentLevel: 0, isAssembly: false,
+      source: { documentId: "d", elementId: "e", partId: "P", configuration: "" },
+      sourceWvmType: "w", unresolvable: null,
+      ...over,
+    } as Parameters<typeof assessLine>[0]);
+
+  const noNumber = row({ partNumber: "" });
+  check("a part with no part number is importable", noNumber.importable, String(noNumber.reason));
+  check("and no reason is given, because there is nothing wrong",
+    noNumber.reason === null, String(noNumber.reason));
+
+  check("a numbered part is importable too", row({ partNumber: "PN-1" }).importable);
+
+  // Addresses, not data PLM can supply.
+  const noSource = row({ source: null, unresolvable: "Row has no part id." });
+  check("a row PLM cannot address is refused", !noSource.importable);
+  check("with the parser's own reason", noSource.reason === "Row has no part id.", String(noSource.reason));
+
+  const asm = row({ isAssembly: true, source: null, unresolvable: "Subassembly — this import brings in its parts." });
+  check("a subassembly row is still held back", !asm.importable);
+  check("and its reason no longer mentions manufacturing orders",
+    !/manufacturing order/i.test(asm.reason ?? ""), String(asm.reason));
+
+  /* The filter used by the UI agrees with the per-row assessment. */
+  const table = {
+    lines: [
+      row({}) && { key: "a", partNumber: "", name: "No number", description: "", material: "",
+        quantity: 1, vendor: "", project: "", indentLevel: 0, isAssembly: false,
+        source: { documentId: "d", elementId: "e", partId: "P1", configuration: "" },
+        sourceWvmType: "w" as const, unresolvable: null },
+      { key: "b", partNumber: "", name: "Unaddressable", description: "", material: "",
+        quantity: 1, vendor: "", project: "", indentLevel: 0, isAssembly: false,
+        source: null, sourceWvmType: null, unresolvable: "Row has no part id." },
+    ],
+    headers: [],
+    shape: "test",
+  } as never;
+  const importable = importableLines(table);
+  check("importableLines keeps the unnumbered part", importable.length === 1,
+    JSON.stringify(importable.map((l) => l.name)));
+  check("and drops only the unaddressable one", importable[0]?.name === "No number",
+    importable[0]?.name);
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

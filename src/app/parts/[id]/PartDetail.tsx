@@ -2,9 +2,11 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
+import { ProductField } from "@/components/ProductField";
 import { useRouter } from "next/navigation";
 import { Alert, KV, PartThumb, RevChip, Spinner, StatusBadge, relTime } from "@/components/ui";
 import { AttributeInput, type Definition } from "@/components/AttributeInput";
+import { PartTasks, TaskCountBadge, type PartTask } from "@/components/PartTasks";
 
 type Data = {
   part: any;
@@ -16,6 +18,8 @@ type Data = {
   release: { id: string; number: string; state: string } | null;
   onshapeUrl: string | null;
   logs: any[];
+  tasks: PartTask[];
+  openTaskCount: number;
 };
 
 export function PartDetail({ id, isAdmin }: { id: string; isAdmin: boolean }) {
@@ -127,6 +131,24 @@ export function PartDetail({ id, isAdmin }: { id: string; isAdmin: boolean }) {
     }
   }
 
+  /**
+   * Move this part into a product.
+   *
+   * Creating one is handled by the picker; this only ever receives an id.
+   */
+  async function setProduct(productId: string) {
+    if (!productId || productId === p.productId) return;
+    const r = await fetch(`/api/products/${productId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "assign", partIds: [id] }),
+    });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || "Could not change the product");
+    setNotice(j.message ?? "Product changed.");
+    await load();
+  }
+
   async function loadMass() {
     setBusy("mass");
     try {
@@ -134,6 +156,21 @@ export function PartDetail({ id, isAdmin }: { id: string; isAdmin: boolean }) {
       const j = await r.json();
       if (!r.ok) throw new Error(j.error || "Onshape could not measure this part");
       setMass(j);
+      /*
+       * The reading is now stored on the part's Mass attribute, so the
+       * attributes panel above is stale until the part is re-read. Reloading is
+       * cheaper than telling somebody to refresh, and a page showing two
+       * different masses for one part is the kind of thing that costs trust.
+       */
+      if (j?.stored?.written) {
+        setNotice(
+          `Mass ${j.stored.was == null ? "recorded as" : `updated to`} ` +
+          `${j.stored.now} ${j.stored.unit}.`
+        );
+        await load();
+      } else if (j?.stored?.why) {
+        setNotice(`Measured, but not stored: ${j.stored.why}`);
+      }
     } catch (e: any) {
       setError(String(e?.message ?? e));
     } finally {
@@ -179,6 +216,20 @@ export function PartDetail({ id, isAdmin }: { id: string; isAdmin: boolean }) {
           <div style={{ color: "var(--text-muted)", fontSize: 14, marginTop: 3 }}>{p.name}</div>
           <div style={{ color: "var(--text-faint)", fontSize: 12, marginTop: 2 }}>
             {p.documentName}{p.elementName ? ` · ${p.elementName}` : ""}
+            {" · "}
+            {/*
+              The product is shown beside the Onshape location because the two
+              answer the same kind of question — where does this live — and
+              people look for both in the same glance. It is a link, not a
+              label: from a part, the most likely next thing is its siblings.
+            */}
+            {p.productId ? (
+              <Link href={`/dashboard?product=${p.productId}`} style={{ color: "var(--accent)" }}>
+                {p.productName || "product"}
+              </Link>
+            ) : (
+              <span style={{ color: "var(--text-faint)" }}>not filed to a product</span>
+            )}
             {p.partIdInOnshape ? ` · part ${p.partIdInOnshape}` : ""}
           </div>
         </div>
@@ -290,6 +341,48 @@ export function PartDetail({ id, isAdmin }: { id: string; isAdmin: boolean }) {
 
         <div style={{ display: "grid", gap: 16 }}>
           {/* ------------------------------ Drawings --------------------------- */}
+          {/* --------------------------------- Product --------------------------- */}
+          <div className="card">
+            <h2 style={{ margin: "0 0 10px", fontSize: 15 }}>Product</h2>
+            <p style={{ margin: "0 0 8px", color: "var(--text-faint)", fontSize: 12 }}>
+              What this {p.kind === "assembly" ? "assembly" : "part"} is part of. PLM&rsquo;s own
+              grouping — Onshape organises by document, which is a container for CAD rather than a
+              statement about what is being built.
+            </p>
+
+            <ProductField
+              label=""
+              value={p.productId ?? null}
+              onChange={(productId) => setProduct(productId)}
+            />
+
+            {p.productId && (
+              <Link
+                href={`/dashboard?product=${p.productId}`}
+                className="btn btn-sm"
+                style={{ marginTop: 8, display: "inline-block" }}
+              >
+                Show everything in {p.productName}
+              </Link>
+            )}
+          </div>
+
+          {/* --------------------------------- Tasks ---------------------------
+            * Above Drawings on purpose: a drawing is a record of what the part
+            * is, and an open task is a request to change it. The second is the
+            * one somebody needs to see before they touch anything.
+            */}
+          <div className="card" id="tasks">
+            <h2 style={{ margin: "0 0 10px", fontSize: 15, display: "flex", alignItems: "center", gap: 8 }}>
+              Tasks
+              <TaskCountBadge open={data.openTaskCount} total={(data.tasks ?? []).length} />
+              <Link href="/tasks" className="btn btn-sm" style={{ marginLeft: "auto" }}>
+                Task board
+              </Link>
+            </h2>
+            <PartTasks tasks={data.tasks ?? []} />
+          </div>
+
           <div className="card">
             <h2 style={{ margin: "0 0 10px", fontSize: 15 }}>Drawings</h2>
             {data.drawings.length === 0 ? (
@@ -368,12 +461,26 @@ export function PartDetail({ id, isAdmin }: { id: string; isAdmin: boolean }) {
               <div style={{ marginTop: 8 }}>
                 <KV k="Mass" v={mass.massKg != null ? `${mass.massKg.toFixed(3)} kg` : "—"} />
                 <KV k="Volume" v={mass.volumeM3 != null ? `${(mass.volumeM3 * 1e6).toFixed(1)} cm³` : "—"} />
-                <KV k="Surface area" v={mass.areaM2 != null ? `${(mass.areaM2 * 1e4).toFixed(1)} cm²` : "—"} />
+                {/* surfaceAreaM2, not areaM2 — the latter never existed on the
+                    response, so this row silently read "—" on every part. */}
+                <KV
+                  k="Surface area"
+                  v={mass.surfaceAreaM2 != null
+                    ? `${(mass.surfaceAreaM2 * 1e4).toFixed(1)} cm²`
+                    : "—"}
+                />
+                <KV
+                  k="Stored on this part"
+                  v={mass.stored?.written
+                    ? `Yes — Mass = ${mass.stored.now} ${mass.stored.unit}`
+                    : mass.stored?.why ?? "—"}
+                />
               </div>
             ) : (
               <p style={{ margin: "8px 0 0", color: "var(--text-faint)", fontSize: 12.5 }}>
-                Read from Onshape on request rather than mirrored — it is only interesting when
-                somebody looks.
+                Read from Onshape on request rather than on every sync — it is only interesting
+                when somebody looks. Measuring also records the mass on this part's Mass
+                attribute, since Onshape is the authority on it.
               </p>
             )}
           </div>
@@ -383,10 +490,18 @@ export function PartDetail({ id, isAdmin }: { id: string; isAdmin: boolean }) {
       {/* ------------------------------- Iterations --------------------------- */}
       <div className="card" style={{ padding: 0 }}>
         <h2 style={{ margin: 0, fontSize: 15, padding: "13px 16px 10px" }}>
-          Iteration history
+          Version history
           <span style={{ fontWeight: 400, color: "var(--text-faint)", fontSize: 12, marginLeft: 8 }}>
-            PLM&rsquo;s own pre-release history. Onshape keeps microversions, but nothing a
-            reviewer can read.
+            {/*
+              This used to say "pre-release history", which undersold it: the
+              release snapshots are in here too, each holding the attributes and
+              the Onshape version as they stood at that revision. Nothing is
+              rewritten in place, so an earlier revision still reads as it was
+              released.
+            */}
+            Every iteration this {p.kind === "assembly" ? "assembly" : "part"} has had, including
+            the released revisions. Each row is the state as it stood — nothing is overwritten,
+            so revision A still reads as revision A after B is released.
           </span>
         </h2>
         <table className="table">
@@ -405,7 +520,15 @@ export function PartDetail({ id, isAdmin }: { id: string; isAdmin: boolean }) {
               <tr key={it.iteration}>
                 <td><RevChip revision={it.revision} iteration={it.iteration} /></td>
                 <td><StatusBadge status={it.lifecycleState} /></td>
-                <td style={{ fontSize: 12 }}>{it.cause}</td>
+                <td style={{ fontSize: 12 }}>
+                  {it.releaseId ? (
+                    <Link href={`/releases/${it.releaseId}`} style={{ color: "var(--accent)" }}>
+                      {it.cause}
+                    </Link>
+                  ) : (
+                    it.cause
+                  )}
+                </td>
                 <td style={{ fontSize: 12 }}>
                   {it.changedKeys.length ? it.changedKeys.join(", ") : <span style={{ color: "var(--text-faint)" }}>—</span>}
                 </td>

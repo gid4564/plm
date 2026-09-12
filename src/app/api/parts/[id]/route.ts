@@ -5,9 +5,13 @@ import {
 } from "@/lib/models";
 import { requireSession } from "@/lib/auth/session";
 import { deletePart, plainAttributes, pushPartToOnshape, syncPartFromOnshape } from "@/lib/sync";
-import { editabilityReason, isEditable, listDefinitions, missingForRelease, validateAttributes } from "@/lib/attributes";
+import {
+  editabilityReason, isEditable, listDefinitions, missingForRelease, missingForReleaseKeys,
+  validateAttributes,
+} from "@/lib/attributes";
 import { handler, ok, fail } from "@/lib/api";
 import { onshapeElementUrl } from "@/lib/onshape/oauth";
+import { tasksForPart } from "@/lib/tasks";
 
 type Ctx = { params: Promise<{ id: string }> };
 
@@ -30,7 +34,7 @@ export const GET = handler(async (_req: Request, ctx: Ctx) => {
   const attributes = plainAttributes(part.attributes);
   const state = String(part.lifecycleState);
 
-  const [children, parents, iterations, drawings, logs, ent, release] = await Promise.all([
+  const [children, parents, iterations, drawings, logs, ent, release, tasks] = await Promise.all([
     /*
      * Self-referencing edges are excluded rather than shown.
      *
@@ -46,6 +50,14 @@ export const GET = handler(async (_req: Request, ctx: Ctx) => {
     ActivityLog.find({ partId: id }).sort({ createdAt: -1 }).limit(25).lean(),
     Enterprise.findById(s.enterpriseId).lean(),
     part.releaseId ? Release.findById(part.releaseId).lean() : null,
+    /*
+     * The tasks Onshape has open against this part.
+     *
+     * Read from PLM's own mirror, not from Onshape: the tasks were synced with
+     * their part links already resolved, so answering this costs one indexed
+     * query and a part page does not wait on a network call to render.
+     */
+    tasksForPart(s.enterpriseId, id),
   ]);
 
   // Resolve the other end of each structure edge in two queries, not one per row.
@@ -80,6 +92,8 @@ export const GET = handler(async (_req: Request, ctx: Ctx) => {
     part: {
       id: String(part._id),
       number: part.number,
+      productId: part.productId ? String(part.productId) : null,
+      productName: part.productName || "",
       name: part.name,
       kind: part.kind,
       revision: part.revision || "",
@@ -131,6 +145,8 @@ export const GET = handler(async (_req: Request, ctx: Ctx) => {
       lockReason: editabilityReason(d, state),
     })),
     missingForRelease: missingForRelease(defs, attributes),
+    /* Keys as well as labels, so a caller rendering the fields can match them. */
+    missingForReleaseKeys: missingForReleaseKeys(defs, attributes),
     structure: {
       children: children.map((l: any) => describe(l, "childId")),
       usedIn: parents.map((l: any) => describe(l, "parentId")),
@@ -143,6 +159,14 @@ export const GET = handler(async (_req: Request, ctx: Ctx) => {
       changedKeys: i.changedKeys ?? [],
       createdByEmail: i.createdByEmail ?? null,
       createdAt: i.createdAt,
+      /*
+       * The release this iteration came from, when it came from one.
+       *
+       * Carried so the history can link to it: a released revision is the row
+       * people most often want to follow up, and the snapshot already records
+       * which release produced it.
+       */
+      releaseId: i.releaseId ? String(i.releaseId) : null,
     })),
     drawings: drawings.map((d: any) => ({
       id: String(d._id),
@@ -155,6 +179,8 @@ export const GET = handler(async (_req: Request, ctx: Ctx) => {
     release: release
       ? { id: String((release as any)._id), number: (release as any).number, state: (release as any).state }
       : null,
+    tasks,
+    openTaskCount: tasks.filter((t) => t.open).length,
     onshapeUrl: onshapeElementUrl(part, (ent as any)?.onshapeDomain),
     logs: logs.map((l: any) => ({
       id: String(l._id),

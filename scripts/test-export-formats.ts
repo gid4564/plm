@@ -4,7 +4,7 @@
  * Run with:  npm run test:export
  *
  * Filenames matter more than they look: these files leave the building. A
- * supplier quotes against the part number and the MOS reconciles against the MO
+ * supplier quotes against the part number PLM issued and wrote back to Onshape
  * number, so both have to survive whatever characters a designer typed.
  */
 import { EXPORT_FORMATS, exportFilename, findFormat } from "../src/lib/onshape/export-formats";

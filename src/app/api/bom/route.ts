@@ -1,7 +1,7 @@
 import { requireSession } from "@/lib/auth/session";
 import { clientForUser } from "@/lib/onshape/factory";
 import { parseOnshapeUrl } from "@/lib/onshape/bom";
-import { annotateTracked, assessLine, describeAssembly, importableLines, MAX_IMPORT, partNumberColumnMissing } from "@/lib/bom-import";
+import { annotateTracked, assessLine, describeAssembly, importableLines, MAX_IMPORT } from "@/lib/bom-import";
 import { handler, ok, fail } from "@/lib/api";
 import type { AssemblyCoords } from "@/lib/onshape/types";
 
@@ -73,7 +73,6 @@ export const GET = handler(async (req: Request) => {
   }
 
   const tracked = await annotateTracked(s.enterpriseId, table.lines);
-  const columnMissing = partNumberColumnMissing(table);
 
   return ok({
     assembly,
@@ -86,7 +85,6 @@ export const GET = handler(async (req: Request) => {
     importable: importableLines(table).length,
     // Surfaced so an unmapped column reads as a parsing problem rather than as
     // an assembly whose parts all happen to be unnumbered.
-    partNumberColumnMissing: columnMissing,
     lines: table.lines.map((l) => ({
       key: l.key,
       quantity: l.quantity,
@@ -97,8 +95,8 @@ export const GET = handler(async (req: Request) => {
       revision: l.revision,
       state: l.state,
       indentLevel: l.indentLevel,
-      importable: assessLine(l, columnMissing).importable,
-      unresolvable: assessLine(l, columnMissing).reason,
+      importable: assessLine(l).importable,
+      unresolvable: assessLine(l).reason,
       tracked: tracked.get(l.key) ?? null,
     })),
   });

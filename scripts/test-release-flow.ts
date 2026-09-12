@@ -111,9 +111,9 @@ async function main() {
   console.log("\n2. A designer raises a release candidate in Onshape");
 
   const pkg = await client.createReleasePackage("mock-workflow", {
-    changeOrderId: "designer-raised",
     items: [{ documentId: DOC, elementId: PS, partId: "JHD" }],
   });
+  check("Onshape assigned its own changeOrderId", !!pkg.changeOrderId, pkg.changeOrderId);
   check("Onshape created a release package", pkg.state === "PENDING", `state ${pkg.state}`);
   check("Onshape added the drawing itself",
     pkg.items.some((i) => i.elementType === "DRAWING"),
@@ -172,12 +172,37 @@ async function main() {
   part.markModified("attributes");
   await part.save();
 
+  /*
+   * A refusal left over from an earlier attempt.
+   *
+   * `transitionError` was only ever written, never cleared, so a release that
+   * failed once carried the message for good — the page went on reporting
+   * "refused: ..." after a retry had already succeeded, which is how a fixed
+   * problem came to look unfixed. Planted here so the success path has to
+   * clear it.
+   */
+  await Release.updateOne(
+    { _id: takeover.releaseId },
+    { $set: {
+        transitionError: "a refusal from an earlier attempt",
+        transitionErrorAt: new Date("2026-09-01T00:00:00Z"),
+    } }
+  );
+
   const decision = await decideRelease(String(takeover.releaseId), {
     intent: "approve", userId: String(approver._id), email: approver.email,
     note: "Reviewed against drawing rev A.",
   });
 
   check("the decision succeeded", decision.ok, decision.transitionError ?? decision.message);
+
+  const afterDecide: any = await Release.findById(takeover.releaseId).lean();
+  check("a stale refusal is cleared once the transition succeeds",
+    !afterDecide?.transitionError, String(afterDecide?.transitionError));
+  check("and so is its timestamp",
+    !afterDecide?.transitionErrorAt, String(afterDecide?.transitionErrorAt));
+  check("the successful transition is dated",
+    !!afterDecide?.transitionedOnshapeAt, String(afterDecide?.transitionedOnshapeAt));
   check("PLM used the workflow's APPROVE transition",
     (decision.transition ?? "").includes("APPROVE"), decision.transition ?? "none");
   check("the release is Released", decision.state === "Released", decision.state);
@@ -289,6 +314,71 @@ async function main() {
     new Request("https://plm.test/x", { headers: { authorization: "Bearer not-a-real-token" } })
   );
   check("an unknown bearer token is refused", bad === null);
+
+  /* ---------------------- Retrying an outstanding half ------------------- */
+
+  console.log("\n8. A decision whose Onshape half never landed can be retried");
+  {
+    /*
+     * Put Onshape back where it would be had the transition never happened.
+     *
+     * The package really was released earlier in this test, so without this the
+     * only action it offers is OBSOLETE and the retry fails for a legitimate
+     * reason — which tests nothing about the retry. The situation being
+     * reproduced is a package still sitting in PENDING while PLM believes the
+     * release is approved.
+     */
+    await MockReleasePackage.updateOne(
+      { companyId: COMPANY, rpid: pkg.id },
+      { $set: { state: "PENDING" } }
+    );
+
+    // The state PLM was left in for real: approved here, never transitioned
+    // there, and previously unfixable except by editing the database.
+    await Release.updateOne(
+      { _id: takeover.releaseId },
+      { $set: {
+          state: "Approved",
+          transitionedOnshapeAt: null,
+          transitionError: 'The Onshape package offers no approve transition from state "".',
+          transitionErrorAt: new Date(),
+      } }
+    );
+
+    const before: any = await Release.findById(takeover.releaseId).lean();
+    const retry = await decideRelease(String(takeover.releaseId), {
+      intent: "approve", userId: String(approver._id), email: approver.email,
+    });
+    check("the retry is not refused as a re-decision", retry.ok,
+      retry.transitionError ?? retry.message);
+
+    const after: any = await Release.findById(takeover.releaseId).lean();
+    check("the original decision's author is not overwritten",
+      String(after?.decidedByEmail) === String(before?.decidedByEmail),
+      `${before?.decidedByEmail} -> ${after?.decidedByEmail}`);
+    check("nor is its note",
+      String(after?.decisionNote) === String(before?.decisionNote),
+      `${before?.decisionNote} -> ${after?.decisionNote}`);
+    check("nor its timestamp",
+      String(after?.decidedAt) === String(before?.decidedAt));
+    check("and the stale refusal is gone", !after?.transitionError,
+      String(after?.transitionError));
+    check("Onshape was transitioned this time", !!after?.transitionedOnshapeAt,
+      String(after?.transitionedOnshapeAt));
+
+    const pkgAfterRetry = await client.getReleasePackage(pkg.id);
+    check("and the package really did move", pkgAfterRetry.state === "RELEASED",
+      pkgAfterRetry.state);
+
+    // Reversing a decision is a different thing, and still refused.
+    const reverse = await decideRelease(String(takeover.releaseId), {
+      intent: "reject", userId: String(approver._id), email: approver.email,
+      note: "changed my mind",
+    });
+    check("reversing a decided release is still refused", !reverse.ok, reverse.message);
+    check("and the refusal names the state it is in",
+      /already|cannot be decided again|Released/i.test(reverse.message), reverse.message);
+  }
 
   console.log(`\n${passed} passed, ${failed} failed\n`);
   process.exit(failed ? 1 : 0);

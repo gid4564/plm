@@ -3,6 +3,8 @@
 import { useCallback, useEffect, useState } from "react";
 import { Alert, PartThumb, RevChip, Spinner, StatusBadge, relTime } from "@/components/ui";
 import { AttributeInput, type Definition } from "@/components/AttributeInput";
+import { ProductField } from "@/components/ProductField";
+import { PartTasks, TaskCountBadge, type PartTask } from "@/components/PartTasks";
 import { PanelHeader, SignedOut, panelWrap } from "./shared";
 
 type Ctx = {
@@ -18,11 +20,17 @@ export function PanelClient({
   const [part, setPart] = useState<any>(null);
   const [defs, setDefs] = useState<Definition[]>([]);
   const [drawings, setDrawings] = useState<any[]>([]);
+  const [tasks, setTasks] = useState<PartTask[]>([]);
   const [missing, setMissing] = useState<string[]>([]);
   const [loading, setLoading] = useState(signedIn && Boolean(ctx.elementId));
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [syncing, setSyncing] = useState(false);
+  /*
+   * Read from the server rather than defaulted, so the panel opens on the
+   * product this person was last working in — including on a different machine.
+   */
+  const [currentProductId, setCurrentProductId] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [draft, setDraft] = useState<Record<string, unknown>>({});
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
@@ -49,6 +57,7 @@ export function PanelClient({
     setPart(data.part);
     setDefs(data.definitions ?? []);
     setDrawings(data.drawings ?? []);
+    setTasks(data.tasks ?? []);
     setMissing(data.missingForRelease ?? []);
     setDraft({});
     setFieldErrors({});
@@ -73,6 +82,55 @@ export function PanelClient({
   }, [params, signedIn, ctx.elementId, apply]);
 
   useEffect(() => { load(); }, [load]);
+
+  /*
+   * The product the panel is working in.
+   *
+   * Two different meanings, and the difference matters. Before a part is in
+   * PLM there is nothing to move, so choosing here sets the *current* product —
+   * which is what `syncPartFromOnshape` files a newly created part into. Once
+   * the part exists, the same control moves that part, because that is what
+   * somebody looking at a tracked part means by changing its product.
+   */
+  /* The remembered product, so the picker opens on the right one. */
+  useEffect(() => {
+    let alive = true;
+    void (async () => {
+      try {
+        const r = await fetch("/api/products");
+        const j = await r.json();
+        if (alive && r.ok) setCurrentProductId(j.currentProductId ?? null);
+      } catch {
+        // The picker falls back to Unassigned, which is where a part with no
+        // chosen product goes anyway — so this is not worth an error.
+      }
+    })();
+    return () => { alive = false; };
+  }, []);
+
+  async function selectCurrentProduct(productId: string) {
+    const r = await fetch(`/api/products/${productId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "select" }),
+    });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || "Could not select that product");
+    setCurrentProductId(productId);
+  }
+
+  async function moveThisPart(productId: string) {
+    if (!part) return;
+    const r = await fetch(`/api/products/${productId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "assign", partIds: [part.id] }),
+    });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || "Could not change the product");
+    setNotice(j.message ?? "Product changed.");
+    await load();
+  }
 
   async function sync() {
     setSyncing(true);
@@ -165,6 +223,18 @@ export function PanelClient({
             Adding it allocates a PLM number and writes it back onto the Onshape part. PLM is the
             number master.
           </p>
+          {/*
+            Chosen before syncing, not after: this is where the part will be
+            filed, and asking afterwards means every part passes through the
+            wrong product first.
+          */}
+          <ProductField
+            label="File into product"
+            compact
+            value={currentProductId}
+            emptyLabel="Unassigned"
+            onChange={(id) => selectCurrentProduct(id)}
+          />
           <button className="btn btn-primary" onClick={sync} disabled={syncing}>
             {syncing ? <Spinner /> : "Sync to PLM"}
           </button>
@@ -191,6 +261,18 @@ export function PanelClient({
               Not ready to release — still needs {missing.join(", ")}.
             </Alert>
           )}
+
+          {/*
+            Now it moves the part, rather than setting where the next one goes.
+            Same control, different verb — which is why ProductField takes the
+            action from its host instead of deciding.
+          */}
+          <ProductField
+            label="Product"
+            compact
+            value={part.productId ?? null}
+            onChange={(id) => moveThisPart(id)}
+          />
 
           {part.writeBackBlocked && (
             <Alert kind="info">Nothing is written to Onshape for this part. {part.writeBackBlocked}</Alert>
@@ -227,6 +309,29 @@ export function PanelClient({
               <button className="btn" onClick={() => { setDraft({}); setFieldErrors({}); }}>
                 Discard
               </button>
+            </div>
+          )}
+
+          {/*
+            * Open tasks, inside Onshape's own panel.
+            *
+            * This is the most valuable place for it in the whole application:
+            * the person seeing it is in the CAD, about to edit, and this is
+            * where "somebody has already asked for a change here" stops being
+            * something they find out afterwards.
+            */}
+          {tasks.length > 0 && (
+            <div style={{ borderTop: "1px solid var(--border)", paddingTop: 8 }}>
+              <div
+                style={{
+                  fontSize: 11, color: "var(--text-faint)", marginBottom: 4,
+                  display: "flex", alignItems: "center", gap: 6,
+                }}
+              >
+                Tasks
+                <TaskCountBadge open={tasks.filter((t) => t.open).length} total={tasks.length} />
+              </div>
+              <PartTasks tasks={tasks} />
             </div>
           )}
 

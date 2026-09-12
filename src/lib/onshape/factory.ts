@@ -112,7 +112,8 @@ export async function clientForUser(userId: string): Promise<OnshapeClient> {
   return new LiveOnshapeClient(
     fresh.onshapeAccessToken,
     undefined,
-    () => refreshFor(userId)
+    () => refreshFor(userId),
+    enterprise.onshapeCompanyId
   );
 }
 

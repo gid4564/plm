@@ -88,6 +88,20 @@ function optionCodes(o: EnumOption): string[] {
 }
 
 /**
+ * Does this property's value look like a code that needs naming?
+ *
+ * A non-negative integer with no option list beside it. Used to decide whether
+ * looking up the enterprise schema is worth a call — a property whose value is
+ * already a word needs nothing resolving, whatever its declared type.
+ */
+export function looksCoded(p: { value: unknown; valueType?: string }): boolean {
+  if (p.value == null || p.value === "") return false;
+  if (typeof p.value === "number") return Number.isInteger(p.value);
+  if (typeof p.value !== "string") return false;
+  return /^\d+$/.test(p.value);
+}
+
+/**
  * Turn an enum property's raw value into its human-readable label.
  *
  * Matching is by the option's own code, never by position.

@@ -59,6 +59,9 @@ cp scripts/deploy.sh "$OUT/"
 # credentials are, and the failure it diagnoses happens mid-redirect where
 # there is nothing to inspect.
 cp scripts/check-onshape-oauth.mjs "$OUT/"
+cp scripts/dump-release-package.mjs "$OUT/"
+cp scripts/reset-test-data.mjs "$OUT/"
+cp scripts/probe-task-comment.mjs "$OUT/"
 
 # The manual is read from disk at request time, so it ships as a file rather
 # than being compiled in — it can be corrected on the server without a rebuild.

@@ -4,6 +4,8 @@ import { requireSession } from "@/lib/auth/session";
 import { kindForElementType, normalizeConfiguration, plainAttributes, syncPartFromOnshape } from "@/lib/sync";
 import { clientForUser } from "@/lib/onshape/factory";
 import { listDefinitions, missingForRelease } from "@/lib/attributes";
+import { tasksForPart } from "@/lib/tasks";
+import { currentProductFor } from "@/lib/products";
 import { handler, ok, fail } from "@/lib/api";
 
 /**
@@ -85,6 +87,15 @@ export const GET = handler(async (req: Request) => {
         create: true,
         createdBy: { userId: s.userId, email: s.email },
         kind: kind ?? undefined,
+        /*
+         * Filed into the product this person is working in.
+         *
+         * A deliberate action has somebody present to have an intention, so it is
+         * honoured. An automatic path — a webhook, a release takeover — has
+         * nobody to ask and falls back to Unassigned rather than inheriting
+         * whatever product the integration account last had selected.
+         */
+        productId: (await currentProductFor(s.userId))?.productId ?? null,
       }
     );
 
@@ -105,9 +116,19 @@ export const GET = handler(async (req: Request) => {
   const drawings = await Drawing.find({ partIds: part._id })
     .select("number name revision lifecycleState currentFileId")
     .lean();
+  /*
+   * Tasks, so the panel inside Onshape can say there is work outstanding.
+   *
+   * Worth the query precisely here: somebody in Onshape looking at this part
+   * is the person most likely to be about to change it, and the one most
+   * helped by knowing a task has already asked for something.
+   */
+  const tasks = await tasksForPart(s.enterpriseId, String(part._id));
 
   return ok({
     known: true,
+    tasks,
+    openTaskCount: tasks.filter((t) => t.open).length,
     part: {
       id: String(part._id),
       number: part.number,
@@ -116,6 +137,8 @@ export const GET = handler(async (req: Request) => {
       revision: part.revision || "",
       iteration: part.iteration ?? 1,
       lifecycleState: part.lifecycleState,
+      productId: part.productId ? String(part.productId) : null,
+      productName: part.productName || "",
       onshapeState: part.onshapeState || "",
       attributes,
       documentName: part.documentName,

@@ -238,7 +238,21 @@ Revisions created, drawings watermarked      │
 | R2 | GET | `/workflow/active` | Active workflows; carries `hasInactiveCustomWorkflows` | **[confirmed]** — changelog rel-1.178 |
 | R3 | POST | `/releasepackages/release/{wfid}` | Create a release package. Body: `wfid`, `changeOrderId`, `items[]` (each with `id`, and `revisionId` since rel-1.192), `properties` | **[likely]** — forum + changelog rel-1.192 |
 | R4 | GET | `/releasepackages/{rpid}` | Read the package: items, properties, available workflow actions, and `syncedWithPLM` | **[confirmed]** — changelog rel-1.168 |
-| R5 | POST | `/releasepackages/{rpid}` | Update / transition the package. Action enum includes `REASSIGN_TASK`; `addAllDrawingsActive` was deprecated at rel-1.193 because the server now adds drawings itself | **[confirmed] endpoint, [unknown] approve/reject enum values** |
+| T1 | GET | `/tasks` | `getActionItems` — tasks assigned to a user. **Only a company admin can see tasks they neither created nor were assigned**, which decides what PLM can mirror. `status` is an undocumented integer (Onshape default 2); PLM omits it rather than guess. **`limit` is capped at 100 and enforced** — 200 earns a 400 naming `BTRestTask.getActionItems.limit`, so PLM pages with `offset` rather than asking for more. | **[confirmed]** from OpenAPI |
+| T2 | GET | `/tasks/{tid}` | One task. Carries `comments[]`, `taskItems[]`, `users[]`, and a **`workflowInfo.workflow`** that is the *same* `BTWorkflowSnapshotInfo` a release package has — same `state` object, same `actions[]` with `{type, action, label}`. | **[confirmed]** from OpenAPI |
+| T3 | POST | `/tasks/{tid}/{transition}` | Transition. The value is an action's **`action`** field from that snapshot, in the PATH — the same id-versus-type distinction that made the release transition fail silently. | **[confirmed]** endpoint and shape |
+| T4 | POST | `/tasks/{tid}` | Update. `BTUpdateTaskParams` names the fields **`nameParamValue`** and **`descriptionParamValue`** — not `name`/`description`. The obvious pair would be accepted and ignored. | **[confirmed]** from OpenAPI |
+| ~~T5~~ | POST | `/tasks/{tid}` | **Settled: a comment on a task is a WORKFLOW PROPERTY WRITE, not a `/comments` POST.** Onshape's own UI sends `POST /tasks/{tid}` with `propertyValues: [{propertyId: <Comment>, value: "<text>"}]`, and the task returns with the message appended to its `comments`. The Comment property lives in **`workflowInfo.properties`** — not the top-level `properties` — which is why three attempts at `/comments` failed (500, then 404, then 400 for every objectType) and why a probe of the top-level properties reported no comment field. Its id is the tenant's published task workflow's (`594964df040fc85d2b418145` on one tenant) so PLM matches it by name. Onshape clears the property after appending. Incidentally: the comment Onshape creates carries **`objectType: 10`**, not 14 — so `BTMetadataObjectType`'s ordinals are definitively **not** the comment API's codes. | Read off live network traffic |
+| T7 | DELETE | `/tasks/{tid}` | `deleteTask` — "Delete a task by id." `tid` in the path, no body. Irreversible. **Absent from the anonymous OpenAPI definition and present in the authenticated one**, which is why it reads as unpublished; `BTTaskInfo.deletable` says per task whether it will work, and a live task came back `deletable: false` with `canBeDiscarded: true` — for those the way out is the workflow's `OS_DISCARD` transition, not this. | **[confirmed]** from Glassworks |
+| T7b | — | Deletability, measured | **`DELETE /tasks/{tid}` is close to unusable on a real tenant.** Across the 18 tasks one tenant's PLM held, Onshape reported **`deletable: false` for every single one**, and `canBeDiscarded` for none. 6 of the 18 would not even answer a read (500). Of the 12 readable, only the 2 still open offered any action at all — `OS_DISCARD` (type `DELETE`) — and the 10 closed ones offered nothing. So the way to clear a task is the **workflow's DELETE-type transition**, not the delete endpoint; PLM tries the endpoint where `deletable` is true and falls back to that transition otherwise. A discarded task still exists in Onshape, which is why PLM counts discards separately from deletions. Note also that a discarded task lands in a state named for it, and `columnFor` matched nothing on it and defaulted to "Open" — so a task PLM had just discarded came straight back onto the board as outstanding work. | **[confirmed]** live, 18 of 18 |
+| — | — | The orphan trap | A task that fails to hydrate must be **skipped, not stored from its list summary**. PLM used to fall back on "the summary is better than nothing", and that is what filled the tenant with junk: the stored row had no name, no workflow state (a raw `TASK_OPEN` instead) and no transitions, so it could not be acted on — and since Onshape would not delete it either, it could not be got rid of. Those rows are why the delete appeared broken. |  **[confirmed]** live |
+| T8 | POST | `/tasks/find` | `findTasks` — **the answer to `getActionItems` showing only your own tasks.** On the tenant PLM was built against `getActionItems` returned **8** tasks and this returned **174**. Marked `x-BTVisibility: INTERNAL`, so it is in the authenticated definition only. Three things about it are not guessable and each cost a round to find: (1) **paging is in the BODY** (`from`, `size`) — Onshape's own `next` URL carries `offset`/`limit` and **both are ignored**, so `limit=5` returns 40 rows and `offset=5` returns the same rows as `offset=0`; following that URL silently re-reads page one for ever. (2) The rows are a **search projection, not `BTTaskInfo`**: `taskItems` in place of `items`, `state` as a display string, `properties: null`, and **no `workflowInfo` at all** — so a board built from them would offer transitions the task does not have. PLM takes the ids and hydrates each with T2, keeping one parser. (3) `BTTaskSearchRequestParams.query` is **self-referential in the definition** (`{empty, field, querySupplier: Query}`) and cannot be constructed from it — PLM sends no query at all, and an empty body returns everything. A browser session also needs the CSRF header `X-XSRF-TOKEN-<userId>` matching the same-named cookie (a bare POST is a **401 with an empty body**, which reads exactly like the endpoint refusing internal access — it is not); OAuth callers need nothing extra. | **[confirmed]** live, 174 rows |
+| — | — | What `find` drags in | Of those 174: **143 were `taskType: RELEASE`** — release-package workflows PLM already mirrors as releases with their own page and numbering. Listing them on a task board would bury the 31 real tasks and show one record under two names, so PLM syncs `GENERAL` and `TODO` only (`TASK_TYPES_PULLED`, overridable with `ONSHAPE_TASK_TYPES`). And **7 of the 31 real tasks are orphaned records** — a null name, a null state, and `GET /tasks/{tid}` answers **500** — so anything that trusts the search and then hydrates has to survive them rather than store a nameless, actionless card. | **[confirmed]** live |
+| — | — | How a task points at CAD | **Not through its own `documentId`/`elementId`** — across the 31 real tasks only 4 had a `documentId` and **none** had an `elementId`. The link is in **`taskItems[]`**, each carrying `documentId`, `elementId` and `partId` (Onshape's short part id, e.g. `JiD`); 16 of 31 had items and 14 of those a real `partId`. So "the tasks against this part" is a join on the item triple, and document-and-element alone is not enough: it would attach a task about one part in a Part Studio to every part in it. | **[confirmed]** live |
+| — | — | Other unpublished task endpoints | The authenticated definition also carries **`POST /tasks/{tid}/close`** (`closeTask`, `description` in the query, described as for Onshape Admin use) and **`GET /tasks/object/{id}`** (`getTasksByObjectId` — tasks against a given object). Neither is used: PLM answers "tasks about this part" from its own mirror, since the links arrive resolved with the task and a part page should not wait on a network call to render. | **[confirmed]** present, unused |
+| T6 | POST | `/tasks/{tid}` | **A task's properties live in TWO places and must both be read.** `properties` holds the metadata schema's (Name, Description, Category, State, Due date, Completed date, Priority); **`workflowInfo.properties`** holds the workflow's (Name, Description, **Comment**, **Assigned to** as `TASK_APPROVERS`, valueType `USER`). PLM merges them by id, workflow last. A task's due date, priority and task state are PROPERTIES, not fields — A live task carries 8: Name, Description, Category, State (read-only ENUM), Due date, Completed date (read-only), Priority, Task State. Each has a `propertyId`, a `valueType`, `enumValues` where it is an enum, and its own `editable` flag — `State` is the workflow's and Onshape owns it. Written back through `BTUpdateTaskParams.propertyValues` as `[{propertyId, value}]`. This is why PLM's first task UI had no due date at all. | **[confirmed]** from a live task |
+| T9 | — | A task has TWO notions of progress | **Onshape's stock task workflow has no in-progress state and no transition that starts work.** An open task offers exactly `COMPLETE(APPROVE)` and `OS_DISCARD(DELETE)`; the states are `OPEN` and `COMPLETE`. Progress lives in the **"Task State" property** instead — an editable ENUM whose live options are `0=New, 1=Assigned, 2=In Work, 3=Completed, 5=Closed, 6=Canceled` (note the **gap at 4**: a published list, not a dense range). So a board's "In Progress" column is a **property write**, not a transition, and a column read from the workflow state alone can never show it. PLM asked for a "start" transition and reported, accurately and uselessly, that the task offered none. Two consequences: the column must be derived from **both** (workflow decides finished/not, the property promotes an unfinished task to In Progress) or a moved card springs back to Open on the next refresh; and the enum must be matched **by label in preference order**, because a single alternation tests the tenant's options in *their* order — asking for "assigned" against `(New, Assigned, …)` returns **New**, silently un-assigning the task. | **[confirmed]** from a live task |
+| R5 | POST | `/releasepackages/{rpid}` | Transition the package: the workflow action is the **`wfaction` query parameter** — `RELEASE` to approve, `REJECT` to reject; also `SUBMIT`, `OBSOLETE`, `DISCARD`, `CREATE_AND_RELEASE`, `CREATE_AND_OBSOLETE`, and workflow-defined values for a custom workflow. The separate **`action`** query parameter means something else entirely (`UPDATE \| ADD_ITEMS \| REMOVE_ITEMS \| SAVE_DRAFT`, default `UPDATE`), and sending the workflow action there earns a 200 and an empty update. Body is required and is `BTUpdateReleasePackageParams`: `itemIds`, `items`, `properties` (an array of `{propertyId, value}`) — **no comment field**. | **[confirmed]** from Onshape's published OpenAPI (`cad.onshape.com/api/openapi`, `updateReleasePackage`) |
 | R6 | GET | `/workflow/obj/{objectId}` | Lightweight state check — "a lightweight alternative to get status on a release package" | **[confirmed]** — changelog rel-1.200 |
 | R7 | GET | `/revisions/...` | Revision history for an item | **[confirmed]** |
 
@@ -325,14 +339,89 @@ Two carry-overs from MOS that matter here:
 
 | # | Unknown | Why it matters | How to settle it |
 |---|---|---|---|
-| **U1** | The discriminator in an `onshape.workflow.transition` payload that says *release package* rather than *revision*. Onshape's webhook docs show no example payload for this event and document no discriminating field. | PLM routes the whole release takeover off this event. | Log one real transition. MOS already logs every payload's keys before routing for exactly this reason |
-| **U2** | The action enum values on `POST /releasepackages/{rpid}` for approve and reject. Only `REASSIGN_TASK` is confirmed, from changelog rel-1.169. | This is the call that completes the release. | `GET /releasepackages/{rpid}` returns the available workflow actions — read them off a live package |
-| ~~U3~~ | ~~Whether a non-human integration account can perform an `APPROVE` transition~~ | **Settled.** An Onshape **service user** performs the approval. | **Resolved by decision, not investigation.** The enterprise nominates an Onshape service user, and that user is named as an approver in the release workflow JSON. `decideRelease` records the decision against the PLM person who made it and performs the Onshape transition as the service account — see the two-actor note in `lib/release.ts`. **Setup requirement:** the service user must be a designated approver on the workflow, or the transition is refused with a message saying so. |
-| **U4** | Whether `syncedWithPLM` on a release package is writable by a third-party app or reserved for the Arena connection. | If writable, it is the correct way to mark packages PLM owns. | Inspect and attempt a write on a live package |
+| **U1** | The discriminator in an `onshape.workflow.transition` payload that says *release package* rather than *revision*. Onshape's webhook docs show no example payload for this event and document no discriminating field. | PLM routes the whole release takeover off this event. **A hypothesis that this had caused a live failure was tested and disproved:** the id PLM stored (`5643bba910b9535588b6772b`) is a genuine, fully populated release package, so `releasePackageIdFrom`'s fallback to `objectId` had not misfired. U1 remains open but is not known to have broken anything. | Log one real transition. `dump-release-package.mjs` cross-checks a stored id against `/workflow/obj/{id}`, which answers only for a workflow object |
+| ~~U2~~ | ~~The action enum values on `POST /releasepackages/{rpid}` for approve and reject, and which field of the GET response carries them~~ | **Settled** from a live enterprise package, 2026-09-10. | **The actions are at `workflow.actions`** — not `actions`, `workflowActions` or `availableActions`, which is why PLM read none and refused a release. Each action carries a `type` **and a separate `action` id, and they differ**: approve is `{type: "APPROVE", action: "RELEASE", label: "Release"}`, reject is `{type: "REJECT", action: "REJECT"}`, and a live package also offers `{type: "DELETE", action: "DELETE", alwaysAllow: true}`. **So the value to POST for an approval is `RELEASE`.** Also confirmed on the same payload: `workflow.state` is an **object** (`{name: "PENDING", displayName: "Pending", approverSourceProperty}`) — reading it as a string is what produced state `\"\"`; `workflowId` is an **object** `{companyId, workflowId, versionId}`, so `String()` of it yields `"[object Object]"`; `properties` is an **array** of `{propertyId, value, name, valueType}`, not a record; and `syncedWithPLM` is a per-**item** field, with `workflow.usesExternalPlm` the package-level equivalent. Pinned as a fixture in `scripts/test-release-package-parse.ts` |
+| ~~U3~~ | ~~Whether a non-human integration account can perform an `APPROVE` transition~~ | **Settled.** An Onshape **service user** performs the approval. | **Resolved by decision, not investigation.** The enterprise nominates an Onshape service user, and that user is named as an approver in the release workflow JSON. `decideRelease` records the decision against the PLM person who made it and performs the Onshape transition as the service account — see the two-actor note in `lib/release.ts`. **Setup requirement:** the service user must be a designated approver on the workflow, or the transition is refused. PLM reports this as the *likely* cause only when the package reports a state and offers no transitions — a package reporting no state at all was not read properly, and saying "configure an approver" there sent a user to reconfigure a workflow that may have been correct. See `explainMissingTransition`. |
+| **U4** | Whether `syncedWithPLM` is writable by a third-party app or reserved for the Arena connection. **Partly answered:** it is not a package-level field at all — it sits on each *item* (`false` on a live package), and the package-level marker is `workflow.usesExternalPlm` (also `false`). Reading the top level, as PLM did, could only ever yield false. | If writable, it is the correct way to mark packages PLM owns. | Attempt a write on a live package item; the read shape is now [confirmed] |
 | **U5** | Whether the released drawing must be exported against the new `versionId` or whether the revision id is addressable directly. | Determines the post-release PDF re-pull. | `GET /revisions/...` on a released drawing |
 | **U6** | Exact request body of `POST /releasepackages/release/{wfid}` beyond `wfid`, `changeOrderId`, `items[]`, `properties`. Onshape's own forum answer says "This section of the API does not seem well documented." | Only needed if PLM ever *originates* a release rather than reacting to one. | Mirror the shape of a package created through the UI |
 
-U3 is settled by decision. None of the rest block progress: the mock client
+### Tasks
+
+**There is no task-specific webhook event.** Onshape's published event list has
+no `onshape.task.*` at all. A task is a workflowable object, so its transitions
+arrive on **`onshape.workflow.transition`** — the same event as a release
+package and a revision, with the same missing discriminator (U1). PLM's
+receiver therefore tries the id as a release package, then asks Onshape whether
+it is a task, rather than assuming which it holds.
+
+Comments written in Onshape arrive on **`onshape.comment.create`** /
+`.update`, which fire for comments on anything. The receiver checks whether the
+commented object is a task PLM mirrors and ignores the rest without logging one
+line per comment in the tenant.
+
+Because the task's workflow snapshot is byte-identical to a release package's,
+the parsing lives in one place — `lib/onshape/workflow-snapshot.ts`. The
+release-package version of that took four wrong hypotheses and a read of the
+OpenAPI definition to get right; a second copy for tasks would have been a
+second chance to get it wrong differently.
+
+### Gateway errors are not API errors
+
+`502`, `503` and `504` with an HTML body come from a proxy in front of Onshape,
+not from its API. Nothing about the request produces them and the same call
+usually succeeds seconds later. This cost two rounds of changes to a request
+body that was already correct, because the failing call was the only one being
+watched — the giveaway was an unrelated `GET /releasepackages/...` returning the
+same 502 HTML in the same minute.
+
+PLM retries a **GET** through a gateway error (400ms, 1.2s, 3s) and does **not**
+retry anything else: a POST that may already have taken effect must not be
+repeated, since a duplicated comment or a double-applied transition is worse
+than an error. The message names it a gateway and drops the HTML rather than
+pasting markup into something a person reads. A 200 carrying an HTML body is
+treated the same way, instead of surfacing as "unexpected token <".
+
+### The authenticated OpenAPI definition carries more than the anonymous one
+
+`https://<tenant>.onshape.com/api/openapi` returns **more paths when fetched
+with a session** than anonymously. Anonymously the Task section has three
+endpoints; authenticated it has nine — including the delete, the search and the
+per-object listing above. Anything that looks unpublished is worth re-checking
+from an authenticated context before being treated as absent, and Glassworks
+(`/glassworks/explorer`) renders exactly that authenticated set.
+
+### Onshape publishes its OpenAPI definition
+
+`https://cad.onshape.com/api/openapi` returns the full API definition (~1.9MB
+JSON), unauthenticated. It is the authority for parameter names, request
+schemas and enum values, and it settled in one read what four hypotheses had
+failed to: the transition action is a query parameter, not a body field.
+
+It should be consulted **before** reasoning about a thin-looking endpoint. Three
+things it corrected here, each of which had produced a silent failure rather
+than an error:
+
+- **`wfaction` vs `action`** — see R5 above. A workflow action in the body is
+  accepted and ignored.
+- **`changeOrderId` is read-only.** It appears on `BTReleasePackageInfo` but not
+  on `BTReleasePackageParams`, so PLM's release number never reached Onshape.
+  The comment claiming a package "can be traced back here" by it described a
+  mechanism that did not exist; the package id always did that work.
+- **`addAllDrawingsActive` is read-only too**, and the create request accepts
+  nothing but `items`. Onshape adds active drawings to a candidate raised
+  through its own dialog, but *not* to one created through the API — so a
+  release raised from PLM contained no drawing, and the missing drawing
+  association on the part page was the visible symptom.
+
+It also confirms `elementType` is an `integer` on
+`BTReleasePackageItemInfo`/`Params`, `BTNextPartNumberParam`, `BTRevisionInfo`
+and others — but documents **no enum values** for it anywhere. Codes 1 and 2
+therefore remain inferred, and `classify` is right to mark them unconfident.
+
+U1, U2 and U3 are settled — U1 from a live webhook payload, U2 from a live
+package and the OpenAPI definition, U3 by
+decision. None of the rest block progress: the mock client
 implements the flow end to end, and each remaining unknown is one live call away
 from being pinned down.
 

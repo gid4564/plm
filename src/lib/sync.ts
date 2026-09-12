@@ -1,4 +1,6 @@
 import { connectDb } from "@/lib/db";
+import { resolveProductById, resolveUnassignedProduct } from "@/lib/products";
+import { classify } from "@/lib/onshape/element-type";
 import {
   ActivityLog, AttributeDefinition, Enterprise, Part, PartIteration, PartThumbnail, SelfWrite,
 } from "@/lib/models";
@@ -178,8 +180,34 @@ export function kindForElementType(elementType: string): "part" | "assembly" | n
   switch (String(elementType ?? "").toUpperCase()) {
     case "PARTSTUDIO": return "part";
     case "ASSEMBLY": return "assembly";
-    default: return null;
+    case "DRAWING": return null;
   }
+
+  /*
+   * Anything else goes through the classifier before being refused.
+   *
+   * The elements endpoint reports a word, so the cases above normally settle
+   * it. But the same enum arrives as a *number* elsewhere in this API — a
+   * release package item sends `0` for a Part Studio — and now that the
+   * drawing refusal above this function is unconditional, a numeric value
+   * reaching here would refuse a perfectly good part. `classify` already knows
+   * the code table, so the two places cannot disagree.
+   */
+  const c = classify({ elementType });
+  /*
+   * Only a confident classification is accepted here.
+   *
+   * classify's job elsewhere is to always produce an answer — the numbering
+   * extension has to allocate *something*. This function's job is the
+   * opposite: it decides whether to sync at all, so an unrecognised element
+   * (a blob, a feature studio, a tab type added after this was written) must be
+   * refused rather than guessed into a part. Without this, making the drawing
+   * refusal unconditional would have let every unknown tab type through as one.
+   */
+  if (!c.confident) return null;
+  if (c.type === "PART") return "part";
+  if (c.type === "ASSEMBLY") return "assembly";
+  return null;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -226,6 +254,17 @@ export async function syncPartFromOnshape(
     create?: boolean;
     /** Lifecycle state for a newly created object. Ignored if it already exists. */
     initialState?: string;
+    /**
+     * The product a newly created part is filed into.
+     *
+     * Ignored for a part that already exists: a sync mirrors CAD, and moving
+     * somebody's part between products because a webhook fired is not
+     * mirroring. Left unset, a new part goes to "Unassigned" — an automatic
+     * path has nobody to ask, and a part quietly belonging to whichever
+     * product the integration account happened to have selected would be worse
+     * than one visibly belonging to none.
+     */
+    productId?: string | null;
     /** Who is bringing the part in. Omitted for automatic paths. */
     createdBy?: { userId: string; email: string };
     /**
@@ -324,16 +363,50 @@ export async function syncPartFromOnshape(
    * already tracked against its own Part Studio.
    */
   let kind: "part" | "assembly" = opts.kind ?? existing?.kind ?? "part";
-  if (!opts.kind && client.getElementInfo) {
+
+  /*
+   * The element check runs even when the caller states the kind.
+   *
+   * It used to be skipped entirely whenever `opts.kind` was given — and the
+   * release takeover always gives it, computed from the package item's
+   * elementType. When that elementType turned out to be a *number*, every item
+   * was labelled "part", including drawings, and passing that label switched
+   * off the very guard that would have caught it. A drawing therefore had a PLM
+   * part created for it and appeared in the parts list.
+   *
+   * A caller may reasonably assert part versus assembly — it sometimes knows
+   * better than a lookup, and for an assembly with no partId there is little to
+   * infer from. Nothing, though, should be able to assert that a drawing is a
+   * part. So the refusal is unconditional and the inference is what defers.
+   */
+  if (client.getElementInfo) {
     const el = await client.getElementInfo(readCoords(coordsForRead));
     if (el?.elementType) {
       const resolved = kindForElementType(el.elementType);
-      if (!resolved) {
+
+      /*
+       * Refusing to sync and inferring a kind are two different questions.
+       *
+       * A *confident* non-syncable answer — a drawing — is refused however the
+       * call arrived, including when the caller asserted a kind: that is the
+       * hole the release takeover fell through. Mere ignorance is different. An
+       * unrecognised tab type is refused when PLM was relying on the lookup to
+       * decide, because guessing it into a part is how a drawing became one;
+       * but it does not override a caller that already knows what it has, which
+       * is the case for an assembly the elements endpoint describes only by a
+       * code this code table is not yet sure of.
+       */
+      const confidentlyNotSyncable = !resolved && classify({ elementType: el.elementType }).confident;
+      if (!resolved && (confidentlyNotSyncable || !opts.kind)) {
         await ActivityLog.create({
           enterpriseId, direction: "onshape->plm", action: "skipped", trigger, ok: true,
           message:
-            `Refusing to sync "${el.name}": it is ${el.elementType}. Parts and assemblies ` +
-            `are synced here; drawings arrive with a release package.`,
+            `Refusing to sync "${el.name}": Onshape reports it as ${el.elementType}. Parts ` +
+            `and assemblies are synced here; drawings arrive with a release package.` +
+            (opts.kind
+              ? ` The caller asked for a ${opts.kind}, and this refusal overrides that ` +
+                `deliberately — Onshape is the authority on what the element is.`
+              : ""),
         });
         return nothing("skipped-wrong-element");
       }
@@ -344,7 +417,10 @@ export async function syncPartFromOnshape(
           `or import the assembly's structure.`
         );
       }
-      kind = resolved;
+      // The caller's assertion wins for part-versus-assembly only. `resolved`
+      // can still be null here — an unrecognised type the caller vouched for —
+      // in which case its own assertion stands.
+      if (!opts.kind && resolved) kind = resolved;
     }
   }
 
@@ -398,6 +474,17 @@ export async function syncPartFromOnshape(
 
     const inbound = mapInbound(defs, meta.properties ?? [], seeded, state);
 
+    /*
+     * Every part belongs to a product, so this is resolved before the part
+     * exists rather than patched on afterwards — a part that is briefly in no
+     * product is a part that a concurrent page load can render with a blank
+     * grouping, and a count that is briefly wrong.
+     */
+    const filedInto = opts.productId
+      ? (await resolveProductById(enterpriseId, opts.productId)) ??
+        (await resolveUnassignedProduct(enterpriseId))
+      : await resolveUnassignedProduct(enterpriseId);
+
     part = new Part({
       ...identity,
       kind,
@@ -420,6 +507,8 @@ export async function syncPartFromOnshape(
       createdByUserId: opts.createdBy?.userId ?? null,
       createdByEmail: opts.createdBy?.email ?? null,
       releaseId: opts.releaseId ?? null,
+      productId: filedInto.productId,
+      productName: filedInto.productName,
     });
 
     for (const [k, [from, to]] of Object.entries(inbound.changed)) changes[k] = { from, to };

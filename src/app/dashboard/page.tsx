@@ -37,10 +37,12 @@ export default async function DashboardPage({
         states={[...LIFECYCLE_STATES]}
         myEmail={session.email}
         canDecide={session.role === "approver" || session.role === "admin"}
+        isAdmin={session.role === "admin"}
         underReview={underReview}
         initialState={one("state")}
         initialKind={one("kind")}
         initialRelease={one("release")}
+        initialProduct={one("product")}
       />
     </Shell>
   );

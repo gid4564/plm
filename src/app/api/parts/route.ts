@@ -3,6 +3,7 @@ import { connectDb } from "@/lib/db";
 import { BomLink, Part } from "@/lib/models";
 import { requireSession } from "@/lib/auth/session";
 import { handler, ok, fail } from "@/lib/api";
+import { taskCountsForParts } from "@/lib/tasks";
 import { decodeCursor, encodeCursor } from "@/lib/pagination";
 import { plainAttributes } from "@/lib/sync";
 
@@ -38,6 +39,24 @@ export const GET = handler(async (req: Request) => {
   if (state && state !== "all") filter.lifecycleState = state;
   if (kind && kind !== "all") filter.kind = kind;
   if (releaseId && releaseId !== "all") filter.releaseId = releaseId;
+
+  /*
+   * `unfiled` is its own filter value, not a product id: parts predating the
+   * product field have productId null, and there is no id to match them on.
+   */
+  const product = url.searchParams.get("product")?.trim();
+  if (product === "unfiled") {
+    /*
+     * `$and`, not `$or`, because a search term further down also sets `$or` —
+     * two `$or` keys on one object would silently replace each other, and the
+     * loser's condition would just not apply.
+     */
+    const and = Array.isArray(filter.$and) ? (filter.$and as unknown[]) : [];
+    filter.$and = [...and, { $or: [{ productId: null }, { productId: { $exists: false } }] }];
+  } else if (product && product !== "all") {
+    // Mongoose casts this to an ObjectId for a plain find().
+    filter.productId = product;
+  }
 
   // "mine" is who brought the part in, not who last edited it.
   if (owner === "mine") filter.createdByUserId = s.userId;
@@ -106,6 +125,18 @@ export const GET = handler(async (req: Request) => {
   const childrenBy = new Map(childCounts.map((r: any) => [String(r._id), r.n]));
   const parentsBy = new Map(parentCounts.map((r: any) => [String(r._id), r.n]));
 
+  /*
+   * Open Onshape tasks against the parts on this page.
+   *
+   * Same discipline as the structure counts: one query for the page, not one
+   * per row. A part with work outstanding against it in Onshape is the single
+   * most useful thing a list can say that the part itself does not.
+   */
+  const taskCounts = await taskCountsForParts(
+    s.enterpriseId,
+    ids.map((i: any) => String(i))
+  );
+
   // Lifecycle facet, computed over the whole enterprise rather than the current
   // filter, so choosing a state does not immediately remove every other option.
   const states = await Part.aggregate([
@@ -132,12 +163,16 @@ export const GET = handler(async (req: Request) => {
         // The two attributes a list is worth showing without opening a part.
         material: attrs.material ?? "",
         classification: attrs.classification ?? "",
+        productId: p.productId ? String(p.productId) : null,
+        productName: p.productName || "",
         documentName: p.documentName,
         elementName: p.elementName,
         createdByEmail: p.createdByEmail ?? null,
         releaseId: p.releaseId ? String(p.releaseId) : null,
         childCount: childrenBy.get(String(p._id)) ?? 0,
         usedInCount: parentsBy.get(String(p._id)) ?? 0,
+        openTaskCount: taskCounts.get(String(p._id))?.open ?? 0,
+        taskCount: taskCounts.get(String(p._id))?.total ?? 0,
         pushPending: p.pushPending,
         writeBackBlocked: p.writeBackBlocked ?? null,
         lastPushError: p.lastPushError,

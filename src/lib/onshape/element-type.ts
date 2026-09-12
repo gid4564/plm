@@ -81,9 +81,18 @@ export function classify(item: Record<string, unknown>): Classification {
     return { type: "PART", from: `partId "${partId}"`, confident: true };
   }
 
-  // Mime types read like application/vnd.onshape.ins-assembly, so a substring
-  // match identifies them rather than an exact table.
-  const mime = norm(item.mimeType);
+  /*
+   * `dataType` as well as `mimeType`.
+   *
+   * A task item carries `dataType: "onshape/assembly"` and leaves `mimeType`
+   * null — so reading only mimeType fell through to the numeric code table for
+   * every task item, taking an unconfident answer where a confident one was
+   * sitting right there.
+   *
+   * Mime types read like application/vnd.onshape.ins-assembly, so a substring
+   * match identifies them rather than an exact table.
+   */
+  const mime = norm(item.mimeType) || norm((item as { dataType?: unknown }).dataType);
   if (mime) {
     for (const [key, type] of Object.entries(ELEMENT_TYPE_WORDS)) {
       if (mime.includes(key)) return { type, from: "mimeType", confident: true };
@@ -93,14 +102,38 @@ export function classify(item: Record<string, unknown>): Classification {
   const resource = ELEMENT_TYPE_WORDS[norm(item.resourceType)];
   if (resource) return { type: resource, from: "resourceType word", confident: true };
 
-  const code = Number(item.elementType);
+  /*
+   * A number, and only a number.
+   *
+   * `Number("")` is 0, and `Number(null)` is 0 — so an item with no
+   * elementType at all used to be classified *confidently* as a Part Studio,
+   * on the strength of a code it never sent. An empty value is absence of
+   * evidence, and has to fall through to the unconfident default below.
+   */
+  const rawType = item.elementType;
+  const isNumeric =
+    typeof rawType === "number" ||
+    (typeof rawType === "string" && rawType.trim() !== "" && /^-?\d+$/.test(rawType.trim()));
+  const code = isNumeric ? Number(rawType) : NaN;
   if (Number.isInteger(code) && code in ELEMENT_TYPE_CODES) {
     const type = ELEMENT_TYPE_CODES[code];
     return {
       type,
       from: `elementType code ${code}`,
-      // Only 0 is observed; the rest are inferred from the documented ordering.
-      confident: code === 0,
+      /*
+       * All three are now observed on live items, each confirmed by a second
+       * signal on the same item:
+       *
+       *   0  a release-package item with `mimeType: "onshape/partstudio"`
+       *   1  a task item with `dataType: "onshape/assembly"`
+       *   2  a release-package item with `mimeType: "onshape-app/drawing"`
+       *
+       * Onshape's OpenAPI declares elementType an integer everywhere it
+       * appears and documents no enum values for it, so this table is only
+       * ever as good as what has actually been seen — which is why each entry
+       * records where it was seen.
+       */
+      confident: code === 0 || code === 1 || code === 2,
     };
   }
 

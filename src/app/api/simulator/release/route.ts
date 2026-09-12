@@ -50,11 +50,9 @@ export const POST = handler(async (req: Request) => {
     || "mock-workflow";
 
   const pkg = await client.createReleasePackage(wfid, {
-    // A designer raising a candidate in Onshape has no PLM release number to
-    // quote, so this is left as Onshape's own marker. PLM allocates its number
-    // when it adopts the package — which is what distinguishes the takeover
-    // path from a release raised in PLM.
-    changeOrderId: `simulator-${Date.now().toString(36)}`,
+    // Onshape assigns the changeOrderId itself; a caller cannot supply one.
+    // PLM allocates its own number when it adopts the package, which is what
+    // distinguishes the takeover path from a release raised in PLM.
     items: parts.map((p) => ({
       documentId: p.documentId,
       elementId: p.elementId,

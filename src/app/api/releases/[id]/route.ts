@@ -1,7 +1,10 @@
 import { connectDb } from "@/lib/db";
 import { ActivityLog, Drawing, DrawingFile, Part, Release } from "@/lib/models";
 import { requireSession } from "@/lib/auth/session";
-import { refreshReleasedDrawings, validateRelease } from "@/lib/release";
+import {
+  cancelDrawingRefresh, drawingRefreshSchedule, refreshReleasedDrawings,
+  scheduleDrawingRefresh, validateRelease,
+} from "@/lib/release";
 import { handler, ok, fail } from "@/lib/api";
 
 type Ctx = { params: Promise<{ id: string }> };
@@ -77,6 +80,7 @@ export const GET = handler(async (_req: Request, ctx: Ctx) => {
       onshapeTransitionAction: release.onshapeTransitionAction ?? null,
       transitionedOnshapeAt: release.transitionedOnshapeAt,
       transitionError: release.transitionError ?? null,
+      transitionErrorAt: release.transitionErrorAt ?? null,
       submittedByEmail: release.submittedByEmail ?? null,
       submittedAt: release.submittedAt,
       decidedByEmail: release.decidedByEmail ?? null,
@@ -90,6 +94,11 @@ export const GET = handler(async (_req: Request, ctx: Ctx) => {
     },
     /** Recomputed rather than read off the release: attributes may have been filled in since. */
     validationFailures: await validateRelease(id),
+    /*
+     * How long the automatic sheet-collection attempts cover, so the page can
+     * say so instead of guessing at the copy. Configurable per deployment.
+     */
+    drawingRefreshWindowMs: drawingRefreshSchedule().reduce((a, b) => a + b, 0),
     parts: (release.items ?? [])
       .filter((i: any) => i.kind === "part")
       .map((i: any) => {
@@ -171,7 +180,20 @@ export const POST = handler(async (req: Request, ctx: Ctx) => {
     if (!release.drawingRefreshPending) {
       return ok({ refresh: null, message: "No drawing sheets are outstanding for this release." });
     }
-    return ok({ refresh: await refreshReleasedDrawings(id, { trigger: "manual" }) });
+    /*
+     * A manual collect stands in for the background chain, and takes it over.
+     *
+     * Cancelling first stops a pending retry firing on top of this one and
+     * doing the same work twice; scheduling afterwards means pressing the
+     * button on a release Onshape is still working on leaves the retries
+     * running rather than being a one-shot.
+     */
+    cancelDrawingRefresh(id);
+    const refresh = await refreshReleasedDrawings(id, { trigger: "manual" });
+    const retry = refresh.stillPending
+      ? scheduleDrawingRefresh(id, { trigger: "manual" })
+      : null;
+    return ok({ refresh, ...(retry ? { retry } : {}) });
   }
 
   return fail(`Unknown action "${action}". Use "refresh-drawings".`, 422);

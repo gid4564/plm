@@ -27,7 +27,13 @@ export type BomLine = {
   project: string;
   /** 0 for a top-level row; deeper values only appear in an indented BOM. */
   indentLevel: number;
-  /** Subassembly rows cannot become manufacturing items — only parts can. */
+  /**
+   * A subassembly row rather than a part row.
+   *
+   * Not currently brought into PLM by an import — see the note on
+   * `assessLine` in lib/bom-import.ts. PLM does track assemblies, so this is a
+   * limitation of the importer rather than of the model.
+   */
   isAssembly: boolean;
   /**
    * Where the item is *defined*, not where it is used.
@@ -50,6 +56,14 @@ export type BomTable = {
   headers: string[];
   /** Which payload layout was recognised. Surfaced for diagnostics. */
   shape: string;
+  /**
+   * Whether the rows carry structure.
+   *
+   * Reported rather than left to the caller to remember: an indented table's
+   * rows are positions, a flat table's rows are parts, and every consumer of
+   * `lines` needs to know which it is holding.
+   */
+  indented: boolean;
 };
 
 /**
@@ -125,7 +139,7 @@ function toQuantity(v: unknown): number {
  *
  * Returns a reason string instead of coordinates when the row describes
  * something PLM cannot track — most often a subassembly, which has no part
- * to attach a manufacturing order to.
+ * to track in PLM.
  */
 function resolveSource(row: Record<string, any>): {
   source: PartCoords | null;
@@ -149,13 +163,18 @@ function resolveSource(row: Record<string, any>): {
   if (!documentId || !elementId) {
     return { source: null, wvm: null, isAssembly, reason: "Row has no document or tab reference." };
   }
-  if (!partId) {
-    return {
-      source: null, wvm: null, isAssembly,
-      reason: isAssembly
-        ? "Subassembly — manufacturing orders are created for its parts, not for the subassembly itself."
-        : "Row has no part id.",
-    };
+
+  /*
+   * A subassembly is addressable — as an element, not as a part within one.
+   *
+   * It used to be returned with no source and a reason, which made it
+   * unimportable: in MOS only parts could become manufacturing items. PLM
+   * tracks assemblies (`kind: "assembly"`, partId empty) and every part-scoped
+   * Onshape URL now has an element-scoped form, so there is nothing left
+   * standing in the way of treating the row as what it is.
+   */
+  if (!partId && !isAssembly) {
+    return { source: null, wvm: null, isAssembly, reason: "Row has no part id." };
   }
 
   const wvmTypeRaw = String(src.wvmType ?? src.wvm ?? "").toLowerCase();
@@ -178,7 +197,16 @@ function resolveSource(row: Record<string, any>): {
       versionId: wvm === "v" ? wvmId || null : null,
     },
     wvm,
-    isAssembly: false,
+    /*
+     * The computed value, not a constant.
+     *
+     * This said `false` because an assembly row could never reach this point —
+     * it was always refused above. Now that a subassembly resolves to a real
+     * source, hardcoding false would lose the one flag that decides whether it
+     * is brought in as an assembly or as a part, and a subassembly would be
+     * created as a part with no partId.
+     */
+    isAssembly,
     reason: null,
   };
 }
@@ -190,7 +218,12 @@ function resolveSource(row: Record<string, any>): {
  * "unrecognised" is a diagnosable result, whereas an exception halfway through
  * parsing tells the user nothing about what arrived.
  */
-export function parseBom(payload: any): BomTable {
+export function parseBom(
+  payload: any,
+  opts: { indented?: boolean } = {}
+): BomTable {
+  const indented = Boolean(opts.indented);
+
   let rawHeaders: any[] = [];
   let rawRows: any[] = [];
   let shape = "unrecognised";
@@ -227,9 +260,13 @@ export function parseBom(payload: any): BomTable {
     const { source, wvm, isAssembly, reason } = resolveSource(row);
 
     const line: BomLine = {
-      key: source
-        ? `${source.documentId}:${source.elementId}:${source.partId}:${source.configuration}`
-        : `row-${index}`,
+      key: !source
+        ? `row-${index}`
+        : indented
+          // Unique per position: the same part in two subassemblies is two
+          // rows, and the UI keys its checkboxes and its selection on this.
+          ? `${index}:${source.documentId}:${source.elementId}:${source.partId}:${source.configuration}`
+          : `${source.documentId}:${source.elementId}:${source.partId}:${source.configuration}`,
       quantity: toQuantity(readField(row, "quantity", headers)),
       partNumber: toDisplayString(readField(row, "partNumber", headers)),
       name: toDisplayString(readField(row, "name", headers)),
@@ -246,9 +283,23 @@ export function parseBom(payload: any): BomTable {
       unresolvable: reason,
     };
 
-    // A part used in several subassemblies comes back as several rows. The
-    // manufacturing question is how many to make in total, so identical parts
-    // are collapsed and their quantities added.
+    /*
+     * Collapsing depends on what the caller asked Onshape for.
+     *
+     * A FLAT BOM answers "how many does the product need in total", so a part
+     * appearing in three subassemblies is one row with the quantities added.
+     *
+     * An INDENTED BOM answers "what contains what", and there each appearance
+     * is a distinct position: the same bolt under two different subassemblies
+     * is two edges with their own quantities. Collapsing those would merge two
+     * positions into one and lose the structure the indent was requested for —
+     * which is why the key carries the row index as well when indented.
+     */
+    if (indented) {
+      lines.push(line);
+      return;
+    }
+
     const existing = source ? seen.get(line.key) : undefined;
     if (existing) {
       existing.quantity += line.quantity;
@@ -259,7 +310,7 @@ export function parseBom(payload: any): BomTable {
     lines.push(line);
   });
 
-  return { lines, headers: headers.names, shape };
+  return { lines, headers: headers.names, shape, indented };
 }
 
 /* -------------------------------------------------------------------------- */

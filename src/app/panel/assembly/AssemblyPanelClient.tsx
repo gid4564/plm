@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Alert, Spinner } from "@/components/ui";
+import { ProductField } from "@/components/ProductField";
 import { PanelHeader, SignedOut, panelWrap } from "../shared";
 
 type Ctx = { documentId: string; elementId: string; workspaceId: string; versionId: string };
@@ -18,7 +19,6 @@ type Bom = {
   assembly: { documentName: string; elementName: string };
   maxImport: number;
   shape: string;
-  partNumberColumnMissing: boolean;
   lines: Line[];
 };
 
@@ -30,6 +30,9 @@ type ImportLine = {
 
 type ImportResult = {
   created: number; existing: number; failed: number; warned: number; skipped: number;
+  removedLinks: number;
+  product: { id: string | null; name: string; source: "assembly" | "current" | "unassigned" };
+  elsewhere: { partId: string; number: string | null; productName: string }[];
   lines: ImportLine[];
 };
 
@@ -44,6 +47,7 @@ export function AssemblyPanelClient({
   const [multiLevel, setMultiLevel] = useState(true);
   const [reading, setReading] = useState(false);
   const [importing, setImporting] = useState(false);
+  const [currentProductId, setCurrentProductId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<ImportResult | null>(null);
 
@@ -102,6 +106,39 @@ export function AssemblyPanelClient({
       setReading(false);
     }
   }, [params, multiLevel]);
+
+  /*
+   * The product this import will be filed into.
+   *
+   * The picker sets the *current* product rather than moving anything: none of
+   * these parts exists in PLM yet, so there is nothing to move — and the
+   * import reads the same setting server-side when it creates them.
+   */
+  /* The remembered product, so the picker opens on the right one. */
+  useEffect(() => {
+    let alive = true;
+    void (async () => {
+      try {
+        const r = await fetch("/api/products");
+        const j = await r.json();
+        if (alive && r.ok) setCurrentProductId(j.currentProductId ?? null);
+      } catch {
+        // Falls back to Unassigned, which is where an unchosen part goes anyway.
+      }
+    })();
+    return () => { alive = false; };
+  }, []);
+
+  async function selectCurrentProduct(productId: string) {
+    const r = await fetch(`/api/products/${productId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "select" }),
+    });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || "Could not select that product");
+    setCurrentProductId(productId);
+  }
 
   async function runImport() {
     if (!bom || selected.size === 0) return;
@@ -174,8 +211,28 @@ export function AssemblyPanelClient({
             {result.created} created
             {result.existing > 0 && `, ${result.existing} already tracked`}
           </strong>
+          {/*
+            The product is stated even in the panel's compact summary: filing
+            one assembly's parts across two products is tedious to unpick, and
+            the import chooses on the user's behalf.
+          */}
+          {result.product && (
+            <div>
+              Filed into <strong>{result.product.name}</strong>
+              {result.product.source === "assembly" && " (this assembly's product)"}
+            </div>
+          )}
           {result.warned > 0 && <div>{result.warned} without a write-back to Onshape.</div>}
           {result.skipped > 0 && <div>{result.skipped} skipped as duplicates.</div>}
+          {result.removedLinks > 0 && (
+            <div>{result.removedLinks} no longer in the assembly — the parts themselves are kept.</div>
+          )}
+          {result.elsewhere?.length > 0 && (
+            <div>
+              {result.elsewhere.length} part(s) here are filed under another product, and were
+              left as they are.
+            </div>
+          )}
           {result.failed > 0 && (
             <div style={{ marginTop: 4 }}>
               {result.lines
@@ -202,8 +259,8 @@ export function AssemblyPanelClient({
               {alreadyHere ? `${alreadyHere} part${alreadyHere === 1 ? "" : "s"} in PLM` : "Not imported yet"}
             </div>
             <div style={{ fontSize: 11.5, color: "var(--text-muted)", lineHeight: 1.5 }}>
-              Reading the bill of materials lists every part in this assembly so you can raise a
-              manufacturing order for each, with quantities from the model.
+              Reading the bill of materials lists every part in this assembly so you can add the
+              ones you want to PLM, with the structure and quantities taken from the model.
             </div>
           </div>
 
@@ -242,13 +299,6 @@ export function AssemblyPanelClient({
               {untracked.length} not yet in PLM · {multiLevel ? "all levels" : "top level"}
             </div>
           </div>
-
-          {bom.partNumberColumnMissing && bom.lines.length > 0 && (
-            <Alert kind="warn">
-              No row here has a part number — most likely the column was not recognised. Parts are
-              checked against Onshape as they import instead.
-            </Alert>
-          )}
 
           {bom.lines.length === 0 && (
             <Alert kind="warn">
@@ -339,13 +389,33 @@ export function AssemblyPanelClient({
                 })}
               </div>
 
+              {/*
+                Chosen before importing: everything in one import is filed
+                together, so asking afterwards would mean moving a whole
+                assembly by hand.
+              */}
+              <ProductField
+                label="File into product"
+                compact
+                value={currentProductId}
+                emptyLabel="Unassigned"
+                onChange={(pid) => selectCurrentProduct(pid)}
+              />
               <button
                 className="btn btn-primary"
                 onClick={runImport}
                 disabled={importing || selected.size === 0}
               >
                 {importing && <Spinner />}
-                {importing ? `Importing ${selected.size}…` : `Create ${selected.size} order${selected.size === 1 ? "" : "s"}`}
+                {/*
+                  "items", not "orders": PLM tracks parts and assemblies, and a
+                  BOM import brings in both. "Order" is MOS's word — MOS raises
+                  a manufacturing order per part — and it came along with the
+                  code this panel was adapted from.
+                */}
+                {importing
+                  ? `Adding ${selected.size}…`
+                  : `Add ${selected.size} item${selected.size === 1 ? "" : "s"} to PLM`}
               </button>
             </>
           )}

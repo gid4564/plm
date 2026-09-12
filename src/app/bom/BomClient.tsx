@@ -1,527 +1,1023 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Alert, Spinner, StatusBadge } from "@/components/ui";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { Alert, PartThumb, RevChip, Spinner, StatusBadge } from "@/components/ui";
+import { TaskCountBadge } from "@/components/PartTasks";
+import { AttributeInput, type Definition } from "@/components/AttributeInput";
+import { PartPanel } from "./PartPanel";
 
-type Tracked = { partId: string; number: string | null; revision: string; lifecycleState: string };
-
-type Line = {
+type Node = {
   key: string;
-  quantity: number;
-  partNumber: string;
+  partId: string;
+  number: string | null;
   name: string;
   description: string;
   material: string;
+  kind: "part" | "assembly";
+  lifecycleState: string;
   revision: string;
-  state: string;
-  indentLevel: number;
-  importable: boolean;
-  unresolvable: string | null;
-  tracked: Tracked | null;
+  iteration: number;
+  productName: string;
+  findNumber: string;
+  quantity: number;
+  totalQuantity: number;
+  level: number;
+  massKg: number | null;
+  effectiveFrom: string | null;
+  effectiveTo: string | null;
+  linkId: string | null;
+  linkEffectiveFrom: string | null;
+  linkEffectiveTo: string | null;
+  children: Node[];
+  missingForRelease: string[];
+  alsoUsedElsewhere: boolean;
+  cycle: boolean;
+  unreachable: boolean;
+  openTaskCount: number;
+  taskCount: number;
 };
+
+type Row = Omit<Node, "children" | "key" | "quantity"> & { usedIn: number };
 
 type Bom = {
-  assembly: {
-    documentId: string; elementId: string; documentName: string; elementName: string;
-    elementType: string | null; workspaceId: string | null; versionId: string | null;
+  product: { id: string; name: string } | null;
+  asOf: string | null;
+  roots: Node[];
+  flat: Row[];
+  totals: {
+    distinctParts: number; totalPieces: number; assemblies: number;
+    released: number; inWork: number; underReview: number;
+    massKg: number | null; missingMass: number; needingAttributes: number;
+    withOpenTasks: number; maxDepth: number;
   };
-  multiLevel: boolean;
-  maxImport: number;
-  shape: string;
-  headers: string[];
-  importable: number;
-  partNumberColumnMissing: boolean;
-  lines: Line[];
+  excludedByDate: { partId: string; number: string | null; name: string; reason: string }[];
+  cycles: { partId: string; number: string | null; path: string[] }[];
+  excludedLinks: {
+    linkId: string; parentId: string; parentNumber: string | null;
+    childId: string; childNumber: string | null; childName: string; reason: string;
+  }[];
+  unreachable: { partId: string; number: string | null; name: string }[];
 };
 
-type ImportLine = {
-  key: string; name: string; partNumber: string; quantity: number;
-  outcome: "created" | "existing" | "failed" | "skipped";
-  number: string | null; partId: string | null; message: string;
-  warning: string | null;
-};
+type Product = { id: string; name: string; total: number };
 
-type ImportResult = {
-  created: number; existing: number; failed: number; warned: number; skipped: number;
-  lines: ImportLine[];
-};
-
-type Initial = { documentId: string; elementId: string; workspaceId: string; versionId: string };
-
-type SimulatorDoc = { documentId: string; documentName: string; elementId: string };
+const today = () => new Date().toISOString().slice(0, 10);
 
 export function BomClient({
-  initial, mock = false, simulator = [],
+  initialProduct, initialView,
 }: {
-  initial: Initial;
-  /** True when this PLM is running against the built-in simulator. */
-  mock?: boolean;
-  /** Documents the simulator holds, offered because real links cannot resolve. */
-  simulator?: SimulatorDoc[];
+  initialProduct: string | null;
+  initialView: string;
 }) {
-  const [url, setUrl] = useState("");
-  const [multiLevel, setMultiLevel] = useState(true);
-  const [updateQuantities, setUpdateQuantities] = useState(false);
-
-  const [bom, setBom] = useState<Bom | null>(null);
-  const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [loading, setLoading] = useState(false);
-  const [importing, setImporting] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [result, setResult] = useState<ImportResult | null>(null);
-
-  const load = useCallback(
-    async (params: URLSearchParams) => {
-      setLoading(true);
-      setError(null);
-      try {
-        params.set("multiLevel", multiLevel ? "1" : "0");
-        const res = await fetch(`/api/bom?${params}`);
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error || "Could not read the BOM");
-
-        setBom(data);
-        // Preselect what there is actually work to do on: everything importable
-        // that PLM does not already track.
-        setSelected(
-          new Set(
-            (data.lines as Line[])
-              .filter((l) => l.importable && !l.tracked)
-              .slice(0, data.maxImport)
-              .map((l) => l.key)
-          )
-        );
-      } catch (err: any) {
-        setBom(null);
-        setError(String(err.message ?? err));
-      } finally {
-        setLoading(false);
-      }
-    },
-    [multiLevel]
+  const [products, setProducts] = useState<Product[]>([]);
+  const [product, setProduct] = useState<string | null>(initialProduct);
+  const [view, setView] = useState<"structured" | "flat">(
+    initialView === "flat" ? "flat" : "structured"
   );
 
-  /* Context handed over by the Onshape panel loads without being asked for. */
-  const autoLoaded = useRef(false);
+  /*
+   * Effectivity is off by default.
+   *
+   * A BOM filtered to today looks the same as an unfiltered one until somebody
+   * sets an end date, and then silently differs — so the unfiltered view is the
+   * honest default, and turning the filter on is a visible act.
+   */
+  const [dateMode, setDateMode] = useState<"all" | "today" | "on">("all");
+  const [onDate, setOnDate] = useState(today());
+
+  const [bom, setBom] = useState<Bom | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [q, setQ] = useState("");
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  const [openPart, setOpenPart] = useState<string | null>(null);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  /* Narrow to the parts that are short of something, which is the work. */
+  const [needsOnly, setNeedsOnly] = useState(false);
+  const [tasksOnly, setTasksOnly] = useState(false);
+  const [bulkKey, setBulkKey] = useState("");
+  const [bulkValue, setBulkValue] = useState<unknown>("");
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const [bulkResult, setBulkResult] = useState<string | null>(null);
+  const [defs, setDefs] = useState<Definition[]>([]);
+
+  const asOfParam = dateMode === "all" ? "all" : dateMode === "today" ? "today" : onDate;
+
+  /* Products, and a sensible starting selection. */
   useEffect(() => {
-    if (autoLoaded.current) return;
-    if (!initial.documentId || !initial.elementId) return;
-    autoLoaded.current = true;
+    void (async () => {
+      try {
+        const r = await fetch("/api/products");
+        const j = await r.json();
+        if (!r.ok) throw new Error(j.error || "Could not load products");
+        const list: Product[] = j.products ?? [];
+        setProducts(list);
+        if (!initialProduct) {
+          /*
+           * The remembered product, else the largest one with anything in it.
+           * Opening on an empty product would make the page look broken on a
+           * first visit.
+           */
+          const remembered = list.find((p) => p.id === j.currentProductId && p.total > 0);
+          const biggest = [...list].sort((a, b) => b.total - a.total)[0];
+          setProduct(remembered?.id ?? (biggest?.total ? biggest.id : list[0]?.id ?? null));
+        }
+      } catch (e: any) {
+        setError(String(e?.message ?? e));
+      }
+    })();
+  }, [initialProduct]);
 
-    const p = new URLSearchParams({ documentId: initial.documentId, elementId: initial.elementId });
-    if (initial.workspaceId) p.set("workspaceId", initial.workspaceId);
-    if (initial.versionId) p.set("versionId", initial.versionId);
-    load(p);
-  }, [initial, load]);
+  const load = useCallback(async () => {
+    if (!product) { setBom(null); return; }
+    setLoading(true);
+    setError(null);
+    try {
+      const r = await fetch(`/api/products/${product}/bom?asOf=${encodeURIComponent(asOfParam)}`);
+      const j = await r.json();
+      if (!r.ok) throw new Error(j.error || "Could not load the BOM");
+      setBom(j);
+    } catch (e: any) {
+      setError(String(e?.message ?? e));
+    } finally {
+      setLoading(false);
+    }
+  }, [product, asOfParam]);
 
-  /** Re-read the same assembly — used after an import to refresh tracked state. */
-  const reload = useCallback(() => {
-    if (!bom) return;
-    const p = new URLSearchParams({
-      documentId: bom.assembly.documentId,
-      elementId: bom.assembly.elementId,
-    });
-    if (bom.assembly.workspaceId) p.set("workspaceId", bom.assembly.workspaceId);
-    if (bom.assembly.versionId) p.set("versionId", bom.assembly.versionId);
-    load(p);
-  }, [bom, load]);
+  useEffect(() => { void load(); }, [load]);
 
-  function loadSimulator(doc: SimulatorDoc) {
-    setResult(null);
-    setUrl("");
-    load(new URLSearchParams({
-      documentId: doc.documentId,
-      elementId: doc.elementId,
-      workspaceId: "w1",
-    }));
-  }
+  const needle = q.trim().toLowerCase();
+  const matches = useCallback(
+    (n: {
+      number: string | null; name: string; description: string; material: string;
+      missingForRelease?: string[]; openTaskCount?: number;
+    }) => {
+      if (needsOnly && !(n.missingForRelease?.length)) return false;
+      if (tasksOnly && !(n.openTaskCount ?? 0)) return false;
+      if (!needle) return true;
+      return [n.number ?? "", n.name, n.description, n.material]
+        .some((v) => v.toLowerCase().includes(needle));
+    },
+    [needle, needsOnly, tasksOnly]
+  );
 
-  function loadFromUrl(e: React.FormEvent) {
-    e.preventDefault();
-    if (!url.trim()) return;
-    // A different assembly means the previous import summary no longer applies.
-    setResult(null);
-    load(new URLSearchParams({ url: url.trim() }));
-  }
+  /*
+   * In the structured view a search keeps a node whose descendant matches —
+   * otherwise searching for a screw hides the assembly it is in, and the
+   * result is a list of orphans with no context.
+   */
+  const visibleRoots = useMemo(() => {
+    if (!bom) return [];
+    /*
+     * Short-circuit only when nothing is filtering.
+     *
+     * This tested the search box alone, so the "needs attributes" toggle did
+     * nothing at all in the structured view unless something was also typed —
+     * the count said 12 and the tree showed everything.
+     */
+    if (!needle && !needsOnly && !tasksOnly) return bom.roots;
+    const keep = (n: Node): Node | null => {
+      const kids = n.children.map(keep).filter(Boolean) as Node[];
+      if (matches(n) || kids.length) return { ...n, children: kids };
+      return null;
+    };
+    return bom.roots.map(keep).filter(Boolean) as Node[];
+  }, [bom, needle, needsOnly, tasksOnly, matches]);
 
-  const importable = useMemo(() => (bom?.lines ?? []).filter((l) => l.importable), [bom]);
-  const atCap = bom ? selected.size >= bom.maxImport : false;
+  const flatRows = useMemo(
+    () => (bom ? bom.flat.filter(matches) : []),
+    [bom, matches]
+  );
 
-  function toggle(key: string) {
+  function toggleSelect(partId: string) {
     setSelected((prev) => {
       const next = new Set(prev);
-      if (next.has(key)) next.delete(key);
-      else next.add(key);
+      if (next.has(partId)) next.delete(partId); else next.add(partId);
       return next;
     });
   }
 
-  function selectAll(which: "all" | "none" | "untracked") {
-    if (!bom) return;
-    if (which === "none") return setSelected(new Set());
-    const pool = which === "all" ? importable : importable.filter((l) => !l.tracked);
-    setSelected(new Set(pool.slice(0, bom.maxImport).map((l) => l.key)));
+  function toggle(key: string) {
+    setCollapsed((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key); else next.add(key);
+      return next;
+    });
   }
 
-  async function runImport() {
-    if (!bom || selected.size === 0) return;
-    setImporting(true);
-    setError(null);
-    setResult(null);
+  const allKeys = useMemo(() => {
+    const out: string[] = [];
+    const walk = (ns: Node[]) => ns.forEach((n) => { if (n.children.length) { out.push(n.key); walk(n.children); } });
+    walk(bom?.roots ?? []);
+    return out;
+  }, [bom]);
+
+  /*
+   * The parts the panel steps through, in the order they are on screen.
+   *
+   * Taken from the current view rather than the raw BOM so that ↓ follows what
+   * the reader can see — filtered, searched, and in the same order. A step that
+   * jumped to a row hidden by the filter would be disorienting.
+   */
+  const walkOrder = useMemo(() => {
+    if (view === "flat") return flatRows.map((r) => r.partId);
+    const out: string[] = [];
+    const seen = new Set<string>();
+    const walk = (ns: Node[]) => {
+      for (const n of ns) {
+        // One entry per part: stepping should visit a shared part once.
+        if (!seen.has(n.partId)) { seen.add(n.partId); out.push(n.partId); }
+        if (!collapsed.has(n.key)) walk(n.children);
+      }
+    };
+    walk(visibleRoots);
+    return out;
+  }, [view, flatRows, visibleRoots, collapsed]);
+
+  const stepTo = useCallback((delta: number) => {
+    if (!openPart) return;
+    const i = walkOrder.indexOf(openPart);
+    if (i < 0) return;
+    const next = walkOrder[i + delta];
+    if (next) setOpenPart(next);
+  }, [openPart, walkOrder]);
+
+  /*
+   * The metamodel, for the bulk editor's field list.
+   *
+   * /api/attributes returns both object types and no per-part `editable` flag —
+   * it cannot have one, since editability depends on the part's state and this
+   * form has no part. Filtered to PART here, and marked editable so the input
+   * renders: whether a value may actually be written is decided per part on
+   * the server, which is the only place that can answer it.
+   */
+  useEffect(() => {
+    void (async () => {
+      try {
+        const r = await fetch("/api/attributes");
+        const j = await r.json();
+        if (!r.ok) return;
+        const parts = (j.definitions ?? [])
+          .filter((d: any) => d.objectType === "PART")
+          // Onshape owns some fields outright; offering to type over them in
+          // bulk would be offering to have the next sync undo the work.
+          .filter((d: any) => d.syncDirection !== "from-onshape")
+          .map((d: any): Definition => ({
+            key: d.key, label: d.label, description: d.description ?? "",
+            dataType: d.dataType, enumValues: d.enumValues ?? [], unit: d.unit ?? "",
+            group: d.group ?? "", order: d.order ?? 100,
+            required: Boolean(d.required),
+            requiredForRelease: Boolean(d.requiredForRelease),
+            owner: d.owner ?? "plm", syncDirection: d.syncDirection,
+            authority: d.authority, onshapePropertyName: d.onshapePropertyName ?? "",
+            mapped: Boolean(d.onshapePropertyId),
+            editable: true, lockReason: null,
+          }));
+        setDefs(parts);
+      } catch {
+        // The bulk editor simply stays unavailable; the BOM is unaffected.
+      }
+    })();
+  }, []);
+
+  const selectedIds = [...selected];
+  const bulkDef = defs.find((d) => d.key === bulkKey);
+
+  async function applyBulk() {
+    if (!bulkKey || selectedIds.length === 0) return;
+    setBulkBusy(true);
+    setBulkResult(null);
     try {
-      const res = await fetch("/api/bom/import", {
+      const r = await fetch("/api/parts/bulk-attributes", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          documentId: bom.assembly.documentId,
-          elementId: bom.assembly.elementId,
-          workspaceId: bom.assembly.workspaceId,
-          versionId: bom.assembly.versionId,
-          multiLevel: bom.multiLevel,
-          keys: [...selected],
-          updateQuantities,
-        }),
+        body: JSON.stringify({ partIds: selectedIds, attributes: { [bulkKey]: bulkValue } }),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Import failed");
-
-      setResult(data);
-      reload();
-    } catch (err: any) {
-      setError(String(err.message ?? err));
+      const j = await r.json();
+      if (!r.ok) throw new Error(j.error || "Could not apply");
+      setBulkResult(j.message ?? "Applied.");
+      await load();
+    } catch (e: any) {
+      setBulkResult(String(e?.message ?? e));
     } finally {
-      setImporting(false);
+      setBulkBusy(false);
     }
   }
 
+  const t = bom?.totals;
+
   return (
-    <div style={{ display: "grid", gap: 16 }}>
-      <div>
-        <h1 style={{ fontSize: 20, margin: "0 0 3px", letterSpacing: "-.02em" }}>Import from assembly</h1>
-        <p style={{ color: "var(--text-muted)", fontSize: 13, margin: 0, lineHeight: 1.55 }}>
-          Read an assembly&apos;s bill of materials from Onshape and raise a manufacturing order for
-          each part, with quantities taken from the model.
-        </p>
+    <div style={{ display: "grid", gap: 14 }}>
+      <div style={{ display: "flex", alignItems: "baseline", gap: 12, flexWrap: "wrap" }}>
+        <h1 style={{ margin: 0, fontSize: 19 }}>Bill of materials</h1>
+        {bom?.product && (
+          <span style={{ color: "var(--text-muted)", fontSize: 13 }}>{bom.product.name}</span>
+        )}
+        <div style={{ flex: 1 }} />
+        {product && (
+          <a
+            className="btn btn-sm"
+            href={`/api/products/${product}/bom?asOf=${encodeURIComponent(asOfParam)}&format=csv`}
+          >
+            Export CSV
+          </a>
+        )}
       </div>
 
-      <form className="card" onSubmit={loadFromUrl} style={{ padding: 14, display: "grid", gap: 11 }}>
-        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "flex-end" }}>
-          <div style={{ flex: 1, minWidth: 280 }}>
-            <label className="label">Onshape assembly link</label>
-            <input
-              className="input"
-              value={url}
-              onChange={(e) => setUrl(e.target.value)}
-              placeholder="https://cad.onshape.com/documents/…/w/…/e/…"
-            />
-          </div>
-          <button className="btn btn-primary" type="submit" disabled={loading || !url.trim()}>
-            {loading && <Spinner />} Read BOM
-          </button>
+      {/* ------------------------------- Controls ------------------------------ */}
+      <div className="card" style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "flex-end" }}>
+        <div style={{ minWidth: 210 }}>
+          <label className="label">Product</label>
+          <select
+            className="select"
+            style={{ width: "100%" }}
+            value={product ?? ""}
+            onChange={(e) => { setProduct(e.target.value || null); setCollapsed(new Set()); }}
+          >
+            {products.length === 0 && <option value="">No products yet</option>}
+            {products.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name}{p.total ? ` — ${p.total} item${p.total === 1 ? "" : "s"}` : " — empty"}
+              </option>
+            ))}
+          </select>
         </div>
 
-        <label style={{ display: "flex", gap: 8, alignItems: "flex-start", fontSize: 13, cursor: "pointer" }}>
+        <div>
+          <label className="label">View</label>
+          <div style={{ display: "flex", gap: 4 }}>
+            {(["structured", "flat"] as const).map((v) => (
+              <button
+                key={v}
+                className="btn btn-sm"
+                onClick={() => setView(v)}
+                style={{
+                  borderColor: view === v ? "var(--accent)" : undefined,
+                  color: view === v ? "var(--accent)" : undefined,
+                  fontWeight: view === v ? 600 : undefined,
+                }}
+              >
+                {v === "structured" ? "Structured" : "Flattened"}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div>
+          <label className="label">Effective</label>
+          <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
+            {([["all", "All dates"], ["today", "Today"], ["on", "On date"]] as const).map(([m, label]) => (
+              <button
+                key={m}
+                className="btn btn-sm"
+                onClick={() => setDateMode(m)}
+                style={{
+                  borderColor: dateMode === m ? "var(--accent)" : undefined,
+                  color: dateMode === m ? "var(--accent)" : undefined,
+                  fontWeight: dateMode === m ? 600 : undefined,
+                }}
+              >
+                {label}
+              </button>
+            ))}
+            {dateMode === "on" && (
+              <input
+                className="input"
+                type="date"
+                value={onDate}
+                onChange={(e) => setOnDate(e.target.value)}
+                style={{ width: 150 }}
+              />
+            )}
+          </div>
+        </div>
+
+        <div style={{ flex: 1, minWidth: 170 }}>
+          <label className="label">Find</label>
           <input
-            type="checkbox"
-            checked={multiLevel}
-            onChange={(e) => setMultiLevel(e.target.checked)}
-            style={{ marginTop: 2 }}
+            className="input"
+            style={{ width: "100%" }}
+            placeholder="Number, name, material…"
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
           />
-          <span>
-            Include subassemblies
-            <span style={{ color: "var(--text-faint)" }}>
-              {" "}— every part in the whole structure, with quantities added up. Turn this off to
-              list only what sits directly in this assembly.
-            </span>
-          </span>
-        </label>
+        </div>
 
-        <p style={{ fontSize: 11.5, color: "var(--text-faint)", margin: 0, lineHeight: 1.5 }}>
-          Open the assembly in Onshape and copy the address from the browser bar.
-        </p>
-      </form>
+        {t && t.needingAttributes > 0 && (
+          <div>
+            <label className="label">Release readiness</label>
+            <button
+              className="btn btn-sm"
+              onClick={() => setNeedsOnly((v) => !v)}
+              style={{
+                borderColor: needsOnly ? "var(--warn)" : undefined,
+                color: needsOnly ? "var(--warn)" : undefined,
+                fontWeight: needsOnly ? 600 : undefined,
+              }}
+              title="Show only parts still missing an attribute they need to be released"
+            >
+              {needsOnly ? "Showing " : "Needs attributes: "}{t.needingAttributes}
+            </button>
+          </div>
+        )}
 
-      {mock && (
-        <Alert kind="warn">
-          <strong>This PLM is running against the built-in simulator.</strong> Nothing is
-          connected to Onshape, so a link to a real Onshape document cannot be read here —
-          it will come back empty. Use one of the simulator documents below, or run PLM
-          against a live Onshape enterprise.
-          {simulator.length > 0 && (
-            <div style={{ display: "flex", gap: 7, flexWrap: "wrap", marginTop: 9 }}>
-              {simulator.map((d) => (
-                <button
-                  key={d.documentId}
-                  className="btn btn-sm"
-                  type="button"
-                  onClick={() => loadSimulator(d)}
-                  disabled={loading}
-                >
-                  {d.documentName}
-                </button>
-              ))}
-            </div>
-          )}
-        </Alert>
-      )}
+        {/*
+          * A filter, not just a number: on a product-sized BOM the parts with
+          * work outstanding against them are the ones worth reviewing first,
+          * and finding them by scanning every row defeats the point.
+          */}
+        {t && t.withOpenTasks > 0 && (
+          <div>
+            <label className="label">Onshape tasks</label>
+            <button
+              className="btn btn-sm"
+              onClick={() => setTasksOnly((v) => !v)}
+              style={{
+                borderColor: tasksOnly ? "var(--warn)" : undefined,
+                color: tasksOnly ? "var(--warn)" : undefined,
+                fontWeight: tasksOnly ? 600 : undefined,
+              }}
+              title="Show only parts with an open Onshape task against them"
+            >
+              {tasksOnly ? "Showing " : "Open tasks: "}{t.withOpenTasks}
+            </button>
+          </div>
+        )}
+
+        {view === "structured" && allKeys.length > 0 && (
+          <div style={{ display: "flex", gap: 4 }}>
+            <button className="btn btn-sm" onClick={() => setCollapsed(new Set())}>Expand all</button>
+            <button className="btn btn-sm" onClick={() => setCollapsed(new Set(allKeys))}>Collapse all</button>
+          </div>
+        )}
+      </div>
 
       {error && <Alert kind="error" onDismiss={() => setError(null)}>{error}</Alert>}
 
-      {result && <ImportSummary result={result} />}
+      {/* ------------------------------ Bulk edit ------------------------------ */}
+      {selectedIds.length > 0 && (
+        <div className="card" style={{ display: "grid", gap: 8 }}>
+          <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+            <strong style={{ fontSize: 13 }}>{selectedIds.length} selected</strong>
+            <span style={{ fontSize: 12.5, color: "var(--text-faint)" }}>
+              Set one attribute on all of them. Each part is still checked on its own terms — a
+              field locked by a part&rsquo;s state is refused for that part, not for the set.
+            </span>
+            <div style={{ flex: 1 }} />
+            <button className="btn btn-sm" onClick={() => setSelected(new Set())}>Clear</button>
+          </div>
 
-      {loading && !bom && (
-        <div className="card" style={{ padding: 44, textAlign: "center", color: "var(--text-muted)" }}>
-          <Spinner size={18} />
-          <div style={{ fontSize: 13, marginTop: 8 }}>Reading the BOM from Onshape…</div>
+          <div style={{ display: "flex", gap: 8, alignItems: "flex-end", flexWrap: "wrap" }}>
+            <div style={{ minWidth: 200 }}>
+              <label className="label">Attribute</label>
+              <select
+                className="select"
+                style={{ width: "100%" }}
+                value={bulkKey}
+                onChange={(e) => { setBulkKey(e.target.value); setBulkValue(""); }}
+              >
+                <option value="">Choose one…</option>
+                {/*
+                  Release-required fields first and marked, since filling those
+                  across many parts is what this is for.
+                */}
+                {[...defs]
+                  .sort((a, b) =>
+                    Number(b.requiredForRelease) - Number(a.requiredForRelease) ||
+                    a.label.localeCompare(b.label))
+                  .map((d) => (
+                    <option key={d.key} value={d.key}>
+                      {d.label}{d.requiredForRelease ? " — needed to release" : ""}
+                    </option>
+                  ))}
+              </select>
+            </div>
+
+            {bulkDef && (
+              <div style={{ minWidth: 220, flex: 1 }}>
+                <AttributeInput
+                  /*
+                   * Forced editable for the bulk form: this control is not a
+                   * part, so there is no state to judge it against. Whether the
+                   * value may be written is decided per part on the server,
+                   * which is the only place that can answer it.
+                   */
+                  def={{ ...bulkDef, editable: true, lockReason: null }}
+                  value={bulkValue}
+                  onChange={setBulkValue}
+                />
+              </div>
+            )}
+
+            <button
+              className="btn btn-primary btn-sm"
+              onClick={applyBulk}
+              disabled={!bulkKey || bulkBusy}
+            >
+              {bulkBusy ? <Spinner size={12} /> : `Apply to ${selectedIds.length}`}
+            </button>
+          </div>
+
+          {bulkResult && <Alert kind="info" onDismiss={() => setBulkResult(null)}>{bulkResult}</Alert>}
         </div>
       )}
 
-      {bom && (
-        <>
-          <div className="card" style={{ padding: 14, display: "flex", gap: 14, flexWrap: "wrap", alignItems: "flex-end" }}>
-            <div style={{ flex: 1, minWidth: 220 }}>
-              <div style={{ fontSize: 15, fontWeight: 650, letterSpacing: "-.01em" }}>
-                {bom.assembly.elementName || "Assembly"}
-              </div>
-              <div style={{ color: "var(--text-muted)", fontSize: 12.5, marginTop: 2 }}>
-                {bom.assembly.documentName} · {bom.lines.length} row{bom.lines.length === 1 ? "" : "s"}
-                {importable.length !== bom.lines.length && ` · ${importable.length} can be ordered`}
-                {bom.multiLevel ? " · all levels" : " · top level only"}
-              </div>
-            </div>
-
-            <div style={{ display: "flex", gap: 6 }}>
-              <button className="btn btn-sm" onClick={() => selectAll("untracked")} type="button">Select new</button>
-              <button className="btn btn-sm" onClick={() => selectAll("all")} type="button">Select all</button>
-              <button className="btn btn-sm" onClick={() => selectAll("none")} type="button">Clear</button>
-              <button className="btn btn-sm" onClick={reload} type="button" disabled={loading}>
-                {loading && <Spinner />} Refresh
-              </button>
-            </div>
-          </div>
-
-          {bom.partNumberColumnMissing && bom.lines.length > 0 && (
-            <Alert kind="warn">
-              No row in this bill of materials has a part number. That usually means PLM did
-              not recognise the part-number column rather than that every part is unnumbered, so
-              nothing has been held back here — each part is checked against Onshape as it is
-              imported instead, and any without a number are reported then.
-            </Alert>
-          )}
-
-          {bom.lines.length === 0 && (
-            <Alert kind="warn">
-              {bom.shape === "unrecognised" ? (
-                <>
-                  Onshape answered, but not in a shape PLM recognises, so no rows could be
-                  read. This is worth reporting — the server log records the field names Onshape
-                  actually sent.
-                </>
-              ) : (
-                <>Onshape returned no BOM rows. Check that the assembly contains instances.</>
-              )}
-            </Alert>
-          )}
-
-          {bom.lines.length > 0 && (
-            <div
-              className="card"
-              style={{
-                // Stated rather than assumed: the table fills the card and
-                // overflow clips its corners to the border radius, so the
-                // default card padding would inset it and undo that.
-                padding: 0,
-                overflow: "hidden",
-              }}
-            >
-              <div style={{ overflowX: "auto" }}>
-                <table className="table">
-                  <thead>
-                    <tr>
-                      <th style={{ width: 36 }}></th>
-                      <th style={{ width: 60 }}>Qty</th>
-                      <th>Part No.</th>
-                      <th>Name</th>
-                      <th>Material</th>
-                      <th style={{ width: 58 }}>Rev</th>
-                      <th>In PLM</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {bom.lines.map((l, i) => {
-                      const checked = selected.has(l.key);
-                      const blocked = !l.importable;
-                      return (
-                        <tr key={`${l.key}-${i}`} style={blocked ? { opacity: 0.55 } : undefined}>
-                          <td style={{ paddingRight: 0 }}>
-                            <input
-                              type="checkbox"
-                              checked={checked}
-                              disabled={blocked || (!checked && atCap)}
-                              onChange={() => toggle(l.key)}
-                              aria-label={`Select ${l.name || l.partNumber}`}
-                            />
-                          </td>
-                          <td className="mono" style={{ fontWeight: 600 }}>{l.quantity}</td>
-                          <td className="mono">{l.partNumber || <Dash />}</td>
-                          <td>
-                            <div style={{ paddingLeft: l.indentLevel * 14 }}>
-                              {l.name || <Dash />}
-                              {blocked && l.unresolvable && (
-                                <div style={{ fontSize: 11, color: "var(--text-faint)", lineHeight: 1.45, marginTop: 2 }}>
-                                  {l.unresolvable}
-                                </div>
-                              )}
-                            </div>
-                          </td>
-                          <td style={{ color: "var(--text-muted)" }}>{l.material || <Dash />}</td>
-                          <td className="mono">{l.revision || <Dash />}</td>
-                          <td>
-                            {l.tracked ? (
-                              <div style={{ display: "flex", gap: 7, alignItems: "center", flexWrap: "wrap" }}>
-                                <Link className="link mono" href={`/parts/${l.tracked.partId}`}>
-                                  {l.tracked.number ?? "in PLM"}
-                                </Link>
-                                {l.tracked.revision && (
-                                  <span className="badge">{l.tracked.revision}</span>
-                                )}
-                                <StatusBadge status={l.tracked.lifecycleState} />
-                              </div>
-                            ) : (
-                              <span style={{ color: "var(--text-faint)", fontSize: 12 }}>—</span>
-                            )}
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          )}
-
-          {importable.length > 0 && (
-            <div className="card" style={{ padding: 14, display: "grid", gap: 11 }}>
-              <p style={{ fontSize: 12, color: "var(--text-muted)", margin: 0, lineHeight: 1.5 }}>
-                The assembly itself comes into PLM too, as an assembly object, and each row below
-                becomes a component of it with the quantity the model reports. That structure is
-                what makes &ldquo;where is this used&rdquo; answerable from the other end.
-              </p>
-
-              <label style={{ display: "flex", gap: 8, alignItems: "flex-start", fontSize: 13, cursor: "pointer" }}>
-                <input
-                  type="checkbox"
-                  checked={updateQuantities}
-                  onChange={(e) => setUpdateQuantities(e.target.checked)}
-                  style={{ marginTop: 2 }}
-                />
-                <span>
-                  Update quantities on parts already tracked
-                  <span style={{ color: "var(--text-faint)" }}>
-                    {" "}— off by default, because a quantity in PLM may have been set
-                    deliberately and would be overwritten.
-                  </span>
-                </span>
-              </label>
-
-              <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
-                <button
-                  className="btn btn-primary"
-                  onClick={runImport}
-                  disabled={importing || selected.size === 0}
-                >
-                  {importing && <Spinner />}
-                  {importing
-                    ? `Importing ${selected.size} part${selected.size === 1 ? "" : "s"}…`
-                    : `Create manufacturing orders (${selected.size})`}
-                </button>
-
-                <span style={{ fontSize: 12, color: "var(--text-faint)", lineHeight: 1.5 }}>
-                  {atCap
-                    ? `${bom.maxImport} parts is the most one import will take — run it again for the rest.`
-                    : "Each part costs a couple of Onshape calls, so a long list takes a moment."}
-                </span>
-              </div>
-            </div>
-          )}
-        </>
+      {/* -------------------------------- Totals ------------------------------- */}
+      {t && (
+        <div className="card" style={{ display: "flex", gap: 18, flexWrap: "wrap", fontSize: 12.5 }}>
+          <Stat label="Distinct parts" value={t.distinctParts} />
+          <Stat label="Total pieces" value={t.totalPieces} />
+          <Stat label="Assemblies" value={t.assemblies} />
+          <Stat label="Levels" value={t.maxDepth + 1} />
+          <Stat label="Released" value={t.released} />
+          <Stat label="In work" value={t.inWork} />
+          {t.underReview > 0 && <Stat label="In review" value={t.underReview} />}
+          <Stat
+            label="Rolled-up mass"
+            value={t.massKg != null ? `${t.massKg.toFixed(3)} kg` : "—"}
+            hint={
+              t.massKg == null
+                ? `${t.missingMass} part(s) have no mass, so a total would understate it. ` +
+                  `Measure them on their part pages.`
+                : "Summed from the leaf parts and their quantities."
+            }
+          />
+        </div>
       )}
+
+      {bom && bom.excludedByDate.length > 0 && (
+        <Alert kind="info">
+          {bom.excludedByDate.length} part(s) are hidden by the date filter:{" "}
+          {bom.excludedByDate.slice(0, 6).map((x, i) => (
+            <span key={x.partId}>
+              {i > 0 && ", "}
+              <button
+                onClick={() => setOpenPart(x.partId)}
+                style={{ background: "none", border: "none", padding: 0, font: "inherit", color: "var(--accent)", cursor: "pointer" }}
+              >
+                {x.number ?? x.name}
+              </button>
+              {" "}({x.reason})
+            </span>
+          ))}
+          {bom.excludedByDate.length > 6 && `, and ${bom.excludedByDate.length - 6} more`}.
+          {" "}Anything beneath them is hidden too — an assembly that is not valid to build is not
+          a route to its components on that date.
+        </Alert>
+      )}
+
+      {bom && bom.excludedLinks.length > 0 && (
+        <Alert kind="info">
+          {bom.excludedLinks.length} component position(s) are not in use on this date:{" "}
+          {bom.excludedLinks.slice(0, 5).map((x, i) => (
+            <span key={x.linkId}>
+              {i > 0 && ", "}
+              <button
+                onClick={() => setOpenPart(x.childId)}
+                style={{ background: "none", border: "none", padding: 0, font: "inherit", color: "var(--accent)", cursor: "pointer" }}
+              >
+                {x.childNumber ?? x.childName}
+              </button>
+              {" in "}{x.parentNumber ?? "an assembly"} ({x.reason})
+            </span>
+          ))}
+          {bom.excludedLinks.length > 5 && `, and ${bom.excludedLinks.length - 5} more`}.
+          {" "}These parts are not retired — this assembly simply does not use them on that date.
+          Each may still appear elsewhere in the BOM.
+        </Alert>
+      )}
+
+      {bom && bom.unreachable.length > 0 && (
+        <Alert kind="info">
+          {bom.unreachable.length} part(s) are shown at the top because nothing in this product
+          contains them:{" "}
+          {bom.unreachable.slice(0, 6).map((x, i) => (
+            <span key={x.partId}>
+              {i > 0 && ", "}
+              <button
+                onClick={() => setOpenPart(x.partId)}
+                style={{ background: "none", border: "none", padding: 0, font: "inherit", color: "var(--accent)", cursor: "pointer" }}
+              >
+                {x.number ?? x.name}
+              </button>
+            </span>
+          ))}
+          {bom.unreachable.length > 6 && `, and ${bom.unreachable.length - 6} more`}.
+          {" "}Usually that means the assembly holding them is filed under a different product.
+          {bom.cycles.length > 0 && " Here it is the structure fault below."}
+        </Alert>
+      )}
+
+      {bom && bom.cycles.length > 0 && (
+        <Alert kind="warn">
+          {bom.cycles.length} part(s) contain themselves, directly or through a chain:{" "}
+          {bom.cycles.map((c) => c.number ?? c.partId).join(", ")}. The walk stops there rather
+          than looping. This is a structure fault — re-import the assembly, or check for a
+          duplicate that was merged onto itself.
+        </Alert>
+      )}
+
+      {/* --------------------------------- Views ------------------------------- */}
+      {loading && !bom ? (
+        <div className="card" style={{ padding: 40, textAlign: "center" }}><Spinner size={20} /></div>
+      ) : !product ? (
+        <div className="card" style={{ padding: 32, textAlign: "center", color: "var(--text-muted)" }}>
+          Create a product on the Parts page first, then its BOM appears here.
+        </div>
+      ) : !bom || (view === "structured" ? visibleRoots.length === 0 : flatRows.length === 0) ? (
+        <div className="card" style={{ padding: 32, textAlign: "center" }}>
+          <p style={{ margin: 0, color: "var(--text-muted)" }}>
+            {needle
+              ? `Nothing in this BOM matches “${q}”.`
+              : bom?.excludedByDate.length
+                ? "Everything in this product is filtered out by the date above."
+                : "This product has no parts yet."}
+          </p>
+        </div>
+      ) : view === "structured" ? (
+        <div className="card" style={{ padding: 0, overflowX: "auto" }}>
+          <table className="table">
+            <Head
+              structured
+              allShown={walkOrder}
+              selected={selected}
+              onSelectAll={(on) => setSelected(on ? new Set(walkOrder) : new Set())}
+            />
+            <tbody>
+              {visibleRoots.map((n) => (
+                <TreeRows
+                  key={n.key}
+                  node={n}
+                  collapsed={collapsed}
+                  onToggle={toggle}
+                  onOpen={setOpenPart}
+                  onChanged={load}
+                  selected={selected}
+                  onSelect={toggleSelect}
+                />
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <div className="card" style={{ padding: 0, overflowX: "auto" }}>
+          <table className="table">
+            <Head
+              allShown={flatRows.map((r) => r.partId)}
+              selected={selected}
+              onSelectAll={(on) =>
+                setSelected(on ? new Set(flatRows.map((r) => r.partId)) : new Set())}
+            />
+            <tbody>
+              {flatRows.map((r) => (
+                <tr key={r.partId}>
+                  <td style={{ width: 28 }}>
+                    <input
+                      type="checkbox"
+                      aria-label={`Select ${r.number ?? r.name}`}
+                      checked={selected.has(r.partId)}
+                      onChange={() => toggleSelect(r.partId)}
+                    />
+                  </td>
+                  <td style={{ width: 46 }}><PartThumb partId={r.partId} size={34} alt="" /></td>
+                  <td><NumberCell row={r} onOpen={setOpenPart} /></td>
+                  <td style={{ fontSize: 12.5 }}>{r.name}</td>
+                  <td style={{ fontSize: 12.5, color: "var(--text-muted)" }}>{r.description || "—"}</td>
+                  <td style={{ fontSize: 12.5 }}>{r.material || "—"}</td>
+                  <td><StatusBadge status={r.lifecycleState} /></td>
+                  <td style={{ fontSize: 12.5, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>
+                    {r.totalQuantity}
+                  </td>
+                  <td style={{ fontSize: 12, color: "var(--text-faint)", textAlign: "right" }}>
+                    {r.usedIn > 1 ? `${r.usedIn} places` : "—"}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      <PartPanel
+        partId={openPart}
+        onClose={() => setOpenPart(null)}
+        onSaved={load}
+        onStep={stepTo}
+        position={
+          openPart && walkOrder.includes(openPart)
+            ? { index: walkOrder.indexOf(openPart), total: walkOrder.length }
+            : undefined
+        }
+      />
     </div>
   );
 }
 
-function Dash() {
-  return <span style={{ color: "var(--text-faint)" }}>—</span>;
+function Head({
+  structured, allShown, selected, onSelectAll,
+}: {
+  structured?: boolean;
+  allShown: string[];
+  selected: Set<string>;
+  onSelectAll: (on: boolean) => void;
+}) {
+  return (
+    <thead>
+      <tr>
+        <th style={{ width: 28 }}>
+          <input
+            type="checkbox"
+            aria-label="Select every part shown"
+            checked={allShown.length > 0 && allShown.every((id) => selected.has(id))}
+            onChange={(e) => onSelectAll(e.target.checked)}
+            disabled={allShown.length === 0}
+          />
+        </th>
+        <th style={{ width: 46 }} />
+        <th>Part number</th>
+        <th>Name</th>
+        <th>Description</th>
+        <th>Material</th>
+        <th style={{ width: 120 }}>State</th>
+        <th style={{ width: 70, textAlign: "right" }}>{structured ? "Qty" : "Total qty"}</th>
+        <th style={{ width: 90, textAlign: "right" }}>{structured ? "Total" : "Used in"}</th>
+        {/*
+          Only in the structured view: effectivity here belongs to the edge —
+          this component in this assembly — and the flattened view has collapsed
+          the edges away, so there is nothing for the column to describe.
+        */}
+        {structured && <th style={{ width: 190 }}>In this assembly</th>}
+      </tr>
+    </thead>
+  );
 }
 
-function ImportSummary({ result }: { result: ImportResult }) {
-  const failures = result.lines.filter((l) => l.outcome === "failed");
-  const warned = result.lines.filter((l) => l.outcome !== "failed" && l.warning);
-  const skipped = result.lines.filter((l) => l.outcome === "skipped");
+/** One node and its descendants, as table rows so the columns stay aligned. */
+function TreeRows({
+  node, collapsed, onToggle, onOpen, onChanged, selected, onSelect,
+}: {
+  node: Node;
+  collapsed: Set<string>;
+  onToggle: (key: string) => void;
+  onOpen: (partId: string) => void;
+  onChanged: () => void;
+  selected: Set<string>;
+  onSelect: (partId: string) => void;
+}) {
+  const isCollapsed = collapsed.has(node.key);
+  const hasKids = node.children.length > 0;
 
   return (
-    <div className="card" style={{ padding: 14, display: "grid", gap: 10 }}>
-      <div style={{ display: "flex", gap: 18, flexWrap: "wrap", alignItems: "baseline" }}>
-        <strong style={{ fontSize: 14 }}>Import finished</strong>
-        <span style={{ fontSize: 13, color: "var(--ok)" }}>{result.created} created</span>
-        <span style={{ fontSize: 13, color: "var(--text-muted)" }}>{result.existing} already tracked</span>
-        {result.warned > 0 && (
-          <span style={{ fontSize: 13, color: "var(--warn)" }}>
-            {result.warned} without a write-back
-          </span>
-        )}
-        {result.skipped > 0 && (
-          <span style={{ fontSize: 13, color: "var(--warn)" }}>{result.skipped} skipped</span>
-        )}
-        {result.failed > 0 && (
-          <span style={{ fontSize: 13, color: "var(--danger)" }}>{result.failed} failed</span>
-        )}
-        <Link className="link" href="/dashboard" style={{ fontSize: 13, marginLeft: "auto" }}>
-          Open the manufacturing list →
-        </Link>
-      </div>
-
-      {warned.length > 0 && (
-        <div style={{ display: "grid", gap: 5, borderTop: "1px solid var(--border)", paddingTop: 9 }}>
-          <div style={{ fontSize: 12, color: "var(--text-muted)", lineHeight: 1.5 }}>
-            These parts are tracked and can be worked on as normal — the only thing missing is
-            the PLM number on the part in Onshape. That happens when a part comes from a library,
-            from standard content, or from another document this account cannot write to. Where
-            the part itself could not be read at all, its details were taken from the assembly&apos;s
-            bill of materials instead.
+    <>
+      <tr>
+        <td style={{ width: 28 }}>
+          <input
+            type="checkbox"
+            aria-label={`Select ${node.number ?? node.name}`}
+            checked={selected.has(node.partId)}
+            onChange={() => onSelect(node.partId)}
+          />
+        </td>
+        <td style={{ width: 46 }}><PartThumb partId={node.partId} size={34} alt="" /></td>
+        <td>
+          <div style={{ display: "flex", alignItems: "center", gap: 4, paddingLeft: node.level * 18 }}>
+            {hasKids ? (
+              <button
+                onClick={() => onToggle(node.key)}
+                aria-label={isCollapsed ? "Expand" : "Collapse"}
+                style={{
+                  background: "none", border: "none", cursor: "pointer", padding: "0 3px",
+                  color: "var(--text-faint)", fontSize: 10, width: 16,
+                }}
+              >
+                {isCollapsed ? "▶" : "▼"}
+              </button>
+            ) : (
+              <span style={{ width: 16, display: "inline-block" }} />
+            )}
+            <NumberCell row={node} onOpen={onOpen} />
           </div>
-          {warned.map((w) => (
-            <div key={w.key} style={{ fontSize: 12, lineHeight: 1.5 }}>
-              <span style={{ fontWeight: 600 }}>{w.name || w.partNumber || w.key}</span>
-              {w.number && <span className="mono" style={{ color: "var(--text-faint)" }}> {w.number}</span>}
-              <span style={{ color: "var(--warn)" }}> — {w.warning}</span>
-            </div>
-          ))}
-        </div>
-      )}
+        </td>
+        <td style={{ fontSize: 12.5 }}>{node.name}</td>
+        <td style={{ fontSize: 12.5, color: "var(--text-muted)" }}>{node.description || "—"}</td>
+        <td style={{ fontSize: 12.5 }}>{node.material || "—"}</td>
+        <td><StatusBadge status={node.lifecycleState} /></td>
+        <td style={{ fontSize: 12.5, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>
+          {node.quantity}
+        </td>
+        <td style={{ fontSize: 12, textAlign: "right", fontVariantNumeric: "tabular-nums", color: "var(--text-faint)" }}>
+          {node.totalQuantity}
+        </td>
+        <td>
+          {node.linkId ? (
+            <LinkWindow
+              linkId={node.linkId}
+              from={node.linkEffectiveFrom}
+              to={node.linkEffectiveTo}
+              onSaved={onChanged}
+            />
+          ) : (
+            <span style={{ fontSize: 11.5, color: "var(--text-faint)" }}>top level</span>
+          )}
+        </td>
+      </tr>
+      {!isCollapsed && node.children.map((c) => (
+        <TreeRows
+          key={c.key} node={c} collapsed={collapsed} onToggle={onToggle}
+          onOpen={onOpen} onChanged={onChanged} selected={selected} onSelect={onSelect}
+        />
+      ))}
+    </>
+  );
+}
 
-      {skipped.length > 0 && (
-        <div style={{ display: "grid", gap: 5, borderTop: "1px solid var(--border)", paddingTop: 9 }}>
-          {skipped.map((k) => (
-            <div key={k.key} style={{ fontSize: 12, lineHeight: 1.5 }}>
-              <span style={{ fontWeight: 600 }}>{k.name || k.partNumber || k.key}</span>
-              <span style={{ color: "var(--warn)" }}> — {k.message}</span>
-            </div>
-          ))}
-        </div>
+/** The part number, as the control that opens the panel. */
+function NumberCell({
+  row, onOpen,
+}: {
+  row: {
+    partId: string; number: string | null; name: string; kind: string;
+    revision: string; iteration: number;
+    alsoUsedElsewhere?: boolean; cycle?: boolean; unreachable?: boolean; productName?: string;
+    missingForRelease?: string[];
+    openTaskCount?: number; taskCount?: number;
+  };
+  onOpen: (partId: string) => void;
+}) {
+  return (
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+      <button
+        onClick={() => onOpen(row.partId)}
+        className="mono"
+        title="Show this part's details"
+        style={{
+          background: "none", border: "none", padding: 0, cursor: "pointer",
+          color: "var(--accent)", font: "inherit", fontSize: 12.5,
+        }}
+      >
+        {row.number ?? row.name ?? "—"}
+      </button>
+      <RevChip revision={row.revision} iteration={row.iteration} />
+      {row.kind === "assembly" && <span className="badge">asm</span>}
+      {row.alsoUsedElsewhere && (
+        <span className="badge" title="This part appears in more than one place in this BOM">
+          shared
+        </span>
       )}
+      {/*
+        * Open tasks. Placed before "needs N" because an outstanding change
+        * request is a reason not to release the part at all, where a missing
+        * attribute is a reason it cannot be released yet.
+        */}
+      <TaskCountBadge
+        open={row.openTaskCount ?? 0}
+        total={row.taskCount}
+        withLabel
+        onClick={() => onOpen(row.partId)}
+      />
+      {!!row.missingForRelease?.length && (
+        /*
+         * "N fields missing", not "needs N".
+         *
+         * This badge counts ATTRIBUTES a part still lacks before it can be
+         * released. Sitting in the number cell a few columns from Qty and
+         * Total, "needs 2" read as a quantity — the one thing on a BOM row a
+         * bare number is assumed to be. Naming the unit is what stops that.
+         */
+        <span
+          className="badge"
+          title={`Missing before release: ${row.missingForRelease.join(", ")}`}
+          style={{ background: "var(--warn-soft)", color: "var(--warn)", borderColor: "var(--warn)" }}
+        >
+          {row.missingForRelease.length} field{row.missingForRelease.length === 1 ? "" : "s"} missing
+        </span>
+      )}
+      {row.unreachable && (
+        <span className="badge" title="Nothing in this product contains it — shown at the top so it is not lost">
+          top level
+        </span>
+      )}
+      {row.cycle && (
+        <span className="badge" style={{ color: "var(--warn)" }} title="Contains itself — the walk stops here">
+          cycle
+        </span>
+      )}
+    </span>
+  );
+}
 
-      {failures.length > 0 && (
-        <div style={{ display: "grid", gap: 5, borderTop: "1px solid var(--border)", paddingTop: 9 }}>
-          {failures.map((f) => (
-            <div key={f.key} style={{ fontSize: 12, lineHeight: 1.5 }}>
-              <span style={{ fontWeight: 600 }}>{f.name || f.partNumber || f.key}</span>
-              <span style={{ color: "var(--danger)" }}> — {f.message}</span>
-            </div>
-          ))}
-        </div>
-      )}
+/**
+ * The effectivity window of one component in one assembly.
+ *
+ * Editable in place, because this is a property of a position in a structure
+ * and there is nowhere else it naturally belongs — not the part (it is not
+ * about the part) and not a separate page (you set it while reading the BOM
+ * that made you want to).
+ */
+function LinkWindow({
+  linkId, from, to, onSaved,
+}: {
+  linkId: string;
+  from: string | null;
+  to: string | null;
+  onSaved: () => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [f, setF] = useState(from?.slice(0, 10) ?? "");
+  const [t, setT] = useState(to?.slice(0, 10) ?? "");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    setF(from?.slice(0, 10) ?? "");
+    setT(to?.slice(0, 10) ?? "");
+  }, [from, to]);
+
+  async function save() {
+    setBusy(true);
+    setErr(null);
+    try {
+      const r = await fetch(`/api/bom-links/${linkId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        // Empty string clears the end, which is how "and it still is" is said.
+        body: JSON.stringify({ effectiveFrom: f || null, effectiveTo: t || null }),
+      });
+      const j = await r.json();
+      if (!r.ok) throw new Error(j.error || "Could not save");
+      setEditing(false);
+      onSaved();
+    } catch (e: any) {
+      setErr(String(e?.message ?? e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (!editing) {
+    const label =
+      !from && !to
+        ? "always"
+        : `${from ? from.slice(0, 10) : "always"} → ${to ? to.slice(0, 10) : "current"}`;
+    return (
+      <button
+        onClick={() => setEditing(true)}
+        title="Set when this assembly uses this component"
+        style={{
+          background: "none", border: "1px solid transparent", borderRadius: 6,
+          padding: "2px 5px", cursor: "pointer", font: "inherit", fontSize: 11.5,
+          color: to ? "var(--warn)" : "var(--text-faint)",
+        }}
+      >
+        {label}
+      </button>
+    );
+  }
+
+  return (
+    <div style={{ display: "grid", gap: 4 }}>
+      <div style={{ display: "flex", gap: 3, alignItems: "center" }}>
+        <input
+          className="input" type="date" value={f} onChange={(e) => setF(e.target.value)}
+          style={{ width: 124, fontSize: 11.5, padding: "2px 4px" }}
+          aria-label="Effective from"
+        />
+        <span style={{ fontSize: 11, color: "var(--text-faint)" }}>→</span>
+        <input
+          className="input" type="date" value={t} onChange={(e) => setT(e.target.value)}
+          style={{ width: 124, fontSize: 11.5, padding: "2px 4px" }}
+          aria-label="Effective to"
+        />
+      </div>
+      <div style={{ display: "flex", gap: 4 }}>
+        <button className="btn btn-sm btn-primary" onClick={save} disabled={busy}>
+          {busy ? <Spinner size={11} /> : "Save"}
+        </button>
+        <button className="btn btn-sm" onClick={() => setEditing(false)} disabled={busy}>
+          Cancel
+        </button>
+        {(f || t) && (
+          <button
+            className="btn btn-sm"
+            onClick={() => { setF(""); setT(""); }}
+            disabled={busy}
+            title="Always in use"
+          >
+            Clear
+          </button>
+        )}
+      </div>
+      {err && <div style={{ fontSize: 11, color: "var(--danger)" }}>{err}</div>}
+    </div>
+  );
+}
+
+function Stat({ label, value, hint }: { label: string; value: React.ReactNode; hint?: string }) {
+  return (
+    <div title={hint}>
+      <div style={{ color: "var(--text-faint)", fontSize: 11 }}>{label}</div>
+      <div style={{ fontSize: 14, fontVariantNumeric: "tabular-nums" }}>{value}</div>
     </div>
   );
 }

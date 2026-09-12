@@ -710,7 +710,9 @@ export function SettingsClient(p: Props) {
                 run("seed", async () => {
                   const j = await post("/api/simulator/seed");
                   setNotice(
-                    `Seeded ${j.parts} part(s), ${j.drawings} drawing(s) and ${j.properties} property definition(s).`
+                    `Seeded ${j.parts} part(s), ${j.assemblies} assembly/assemblies, ` +
+                    `${j.drawings} drawing(s), ${j.tasks} task(s) and ` +
+                    `${j.properties} property definition(s).`
                   );
                 })
               }

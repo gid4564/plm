@@ -11,7 +11,24 @@ const EVENTS = [
   // Bring a newly released part in. Which of these a tenant emits depends on
   // its release workflow, so subscribe to both rather than guess.
   "onshape.revision.created",
+  /*
+   * Also the event a TASK transition arrives on.
+   *
+   * Onshape publishes no task-specific webhook. A task is a workflowable
+   * object, so its transitions come through here alongside release packages
+   * and revisions, with nothing in the payload saying which kind of object
+   * moved — the receiver tries each in turn.
+   */
   "onshape.workflow.transition",
+  /*
+   * Comments, so a comment written in Onshape reaches the task board.
+   *
+   * Fired for comments on anything, most of which PLM does not mirror; the
+   * receiver checks whether the commented object is a task it holds and
+   * ignores the rest without a log entry per comment.
+   */
+  "onshape.comment.create",
+  "onshape.comment.update",
 ];
 
 export const GET = handler(async () => {

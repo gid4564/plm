@@ -25,6 +25,8 @@ type Data = {
     lifecycleState: string; currentFileId: string | null; files: Sheet[];
   }[];
   logs: any[];
+  /** Total span of the automatic sheet-collection attempts, in milliseconds. */
+  drawingRefreshWindowMs?: number;
 };
 
 export function ReleaseDetail({
@@ -63,15 +65,33 @@ export function ReleaseDetail({
   const r = data.release;
   const open = r.state === "Under Review";
 
+  /*
+   * Decided here, but Onshape never moved.
+   *
+   * PLM saves the decision before attempting the transition, so an Onshape
+   * refusal leaves the two systems disagreeing. The error message told people
+   * to "decide again", and then the state guard refused them — the release
+   * could only be finished by editing the database. This is the way out.
+   */
+  const needsRetry =
+    !open &&
+    (r.state === "Approved" || r.state === "Rejected") &&
+    !!r.onshapeReleasePackageId &&
+    !r.transitionedOnshapeAt;
+  const retryIntent: "approve" | "reject" = r.state === "Rejected" ? "reject" : "approve";
+
   async function decide(intent: "approve" | "reject") {
-    if (intent === "reject" && !note.trim()) {
+    if (intent === "reject" && !note.trim() && !needsRetry) {
       setError("Say why it was rejected — the designer reads this to know what to change, and it is the only place the reason is recorded.");
       return;
     }
     if (!confirm(
-      intent === "approve"
-        ? `Approve ${r.number}? PLM will perform the approve transition on the Onshape release package, which creates the revisions.`
-        : `Reject ${r.number}? Its parts go back to In Work in both systems.`
+      needsRetry
+        ? `Retry the Onshape transition for ${r.number}? The ${r.state.toLowerCase()} ` +
+          `decision already recorded in PLM stays as it is — only the Onshape half runs again.`
+        : intent === "approve"
+          ? `Approve ${r.number}? PLM will perform the approve transition on the Onshape release package, which creates the revisions.`
+          : `Reject ${r.number}? Its parts go back to In Work in both systems.`
     )) return;
 
     setBusy(intent);
@@ -90,7 +110,8 @@ export function ReleaseDetail({
         // rather than an error, because saying "approval failed" would be false.
         setError(
           `Recorded in PLM as ${j.state}, but Onshape refused the transition: ` +
-          `${j.transitionError} — fix the cause and decide again.`
+          `${j.transitionError} — fix the cause, then retry the Onshape half from the ` +
+          `panel below. The decision itself does not need making again.`
         );
       } else if (!res.ok) {
         throw new Error(j.error || j.message || "That did not work");
@@ -111,6 +132,20 @@ export function ReleaseDetail({
     }
   }
 
+  /*
+   * How long the automatic attempts cover, in words.
+   *
+   * Taken from the server's own schedule rather than written into the copy, so
+   * a tenant that needed PLM_DRAWING_REFRESH_RETRIES_MS raised does not end up
+   * with a message contradicting what it actually does.
+   */
+  const retryWindowLabel = (() => {
+    const total = Number(data?.drawingRefreshWindowMs ?? 0);
+    if (!total) return "a few minutes";
+    const mins = Math.round(total / 60000);
+    return mins >= 2 ? `${mins} minutes` : `${Math.round(total / 1000)} seconds`;
+  })();
+
   async function refreshDrawings() {
     setBusy("drawings");
     try {
@@ -121,7 +156,12 @@ export function ReleaseDetail({
       });
       const j = await res.json();
       if (!res.ok) throw new Error(j.error || "That did not work");
-      setNotice(j.refresh?.message ?? j.message ?? "Nothing outstanding.");
+      setNotice(
+        (j.refresh?.message ?? j.message ?? "Nothing outstanding.") +
+        // Say that it will keep going, so pressing the button repeatedly is
+        // visibly unnecessary.
+        (j.retry?.scheduled ? ` PLM ${j.retry.reason}.` : "")
+      );
       await load();
     } catch (e: any) {
       setError(String(e?.message ?? e));
@@ -213,6 +253,41 @@ export function ReleaseDetail({
         </div>
       )}
 
+      {needsRetry && (
+        <div className="card">
+          <h2 style={{ margin: "0 0 8px", fontSize: 15 }}>Onshape was not transitioned</h2>
+          <Alert kind="warn">
+            This release is {r.state.toLowerCase()} in PLM, but the matching transition on the
+            Onshape release package did not happen
+            {r.transitionError ? ", so the two systems disagree" : ""}. The decision itself stands
+            and is not being revisited — retrying sends only the Onshape half again.
+          </Alert>
+          {r.transitionError && (
+            <div style={{ color: "var(--danger)", fontSize: 12, margin: "8px 0" }}>
+              Onshape said
+              {r.transitionErrorAt
+                ? ` on ${new Date(r.transitionErrorAt).toLocaleString()}`
+                : " (time not recorded — this predates PLM dating its refusals)"}
+              : {r.transitionError}
+            </div>
+          )}
+          {canDecide ? (
+            <button
+              className="btn btn-primary"
+              onClick={() => decide(retryIntent)}
+              disabled={busy != null}
+            >
+              {busy === retryIntent ? <Spinner /> : `Retry the Onshape ${retryIntent}`}
+            </button>
+          ) : (
+            <Alert kind="info">
+              You are signed in as {myEmail}, who cannot decide releases, so this retry needs an
+              approver or an admin.
+            </Alert>
+          )}
+        </div>
+      )}
+
       {r.decidedByEmail && (
         <div className="card">
           <h2 style={{ margin: "0 0 8px", fontSize: 15 }}>Decision</h2>
@@ -223,7 +298,15 @@ export function ReleaseDetail({
             k="Onshape transition"
             v={
               r.transitionError
-                ? <span style={{ color: "var(--danger)" }}>refused: {r.transitionError}</span>
+                ? (
+                  <span style={{ color: "var(--danger)" }}>
+                    refused
+                    {r.transitionErrorAt
+                      ? ` on ${new Date(r.transitionErrorAt).toLocaleString()}`
+                      : ""}
+                    : {r.transitionError}
+                  </span>
+                )
                 : r.onshapeTransitionAction
                   ? <span className="mono">{r.onshapeTransitionAction}</span>
                   : "—"
@@ -254,8 +337,11 @@ export function ReleaseDetail({
 
           {r.drawingRefreshPending && (
             <Alert kind="warn">
-              The released sheets have not all been collected yet. PLM does this when Onshape
-              announces the new revisions; if that event was missed, collect them here.
+              The released sheets have not all been collected yet. Onshape announces the new
+              revisions before it has finished applying them to the drawings, so the first
+              attempt is often too early — PLM keeps checking on its own for about
+              {" "}{retryWindowLabel}, and the sheets appear when they are ready. Collect them
+              here if you would rather not wait, or if the automatic attempts have run out.
             </Alert>
           )}
 
@@ -372,8 +458,17 @@ export function ReleaseDetail({
           mono
         />
         <p style={{ fontSize: 11.5, color: "var(--text-faint)", margin: "8px 0 0" }}>
-          The change order id is how a package is traced back to PLM from the Onshape side. For a
-          release raised in PLM it is this release&rsquo;s own number.
+          {/*
+            This used to claim the change order id was "how a package is traced
+            back to PLM", and that for a PLM-raised release it held this
+            release's number. Neither was true: the field is read-only on
+            Onshape's API — it is on the release-package response but not on the
+            create request — so PLM's number was discarded on arrival. The
+            package id above is what actually links the two.
+          */}
+          Onshape&rsquo;s own id for the release package. It cannot be set by an API client, so it
+          is Onshape&rsquo;s value rather than PLM&rsquo;s — the package id above is what links this
+          release to it.
         </p>
       </div>
 

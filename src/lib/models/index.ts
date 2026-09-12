@@ -100,6 +100,17 @@ const UserSchema = new Schema(
      */
     role: { type: String, enum: ["admin", "approver", "user"], default: "user" },
 
+    /*
+     * The product this person is currently working in.
+     *
+     * Stored on the user rather than in the browser because it is not only a
+     * view preference: a part synced from the panel is filed into it, so it
+     * decides where new work lands. That has to be the same answer on their
+     * laptop as on their desk machine, and has to be readable by the server
+     * doing the filing.
+     */
+    currentProductId: { type: Schema.Types.ObjectId, ref: "Product", default: null },
+
     enterpriseId: { type: Schema.Types.ObjectId, ref: "Enterprise", required: true, index: true },
 
     // Onshape OAuth linkage — PLM as OAuth *client*, for its own outbound reads
@@ -295,6 +306,198 @@ AttributeDefinitionSchema.index({ enterpriseId: 1, objectType: 1, key: 1 }, { un
 /* Part — the PLM record for one Onshape part or assembly.                     */
 /* -------------------------------------------------------------------------- */
 
+/* -------------------------------------------------------------------------- */
+/* Task — an Onshape task, mirrored and worked on in PLM.                     */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * One comment on a task.
+ *
+ * Embedded rather than its own collection: comments are read only with their
+ * task, there are few of them, and a thread that arrives in one document
+ * cannot be half-loaded.
+ *
+ * `onshapeCommentId` is what makes the sync idempotent — Onshape returns the
+ * whole thread on every read, so a comment already held must be recognised
+ * rather than appended again. A comment written in PLM has no id until Onshape
+ * accepts it, which is also how an unsent one is identified.
+ */
+const TaskCommentSchema = new Schema(
+  {
+    onshapeCommentId: { type: String, default: null, index: true },
+    message: { type: String, required: true },
+    authorEmail: { type: String, default: "" },
+    authorName: { type: String, default: "" },
+    /** Which side it was written on, so the thread can say so. */
+    origin: { type: String, enum: ["onshape", "plm"], default: "onshape" },
+    createdAt: { type: Date, default: Date.now },
+    /** Set when PLM wrote it and Onshape has not accepted it yet. */
+    pushPending: { type: Boolean, default: false },
+    pushError: { type: String, default: null },
+    /**
+     * Set when the comment will never go to Onshape.
+     *
+     * Distinct from `pushPending`: pending means "not yet", this means "not
+     * possible" — the task is attached to no Onshape document, and Onshape's
+     * comments are document-scoped. Marking it keeps the thread honest without
+     * implying a retry will help.
+     */
+    plmOnly: { type: Boolean, default: false },
+  },
+  { _id: true }
+);
+
+const TaskSchema = new Schema(
+  {
+    enterpriseId: { type: Schema.Types.ObjectId, ref: "Enterprise", required: true, index: true },
+
+    /** Onshape's task id — the identity, since PLM never originates a task. */
+    onshapeTaskId: { type: String, required: true, index: true },
+
+    name: { type: String, default: "" },
+    description: { type: String, default: "" },
+
+    /*
+     * Onshape's state, and the transitions it currently offers.
+     *
+     * Held rather than recomputed because the task list shows both, and
+     * re-reading every task from Onshape to draw a board would spend a tenant's
+     * rate limit on a page view. Refreshed whenever a task is read or a
+     * webhook arrives.
+     */
+    state: { type: String, default: "" },
+    status: { type: Number, default: null },
+    taskType: { type: String, default: "" },
+    /*
+     * The transitions Onshape currently offers, as {id, label, type}.
+     *
+     * `type` has to be written as `{ type: String }` here: Mongoose treats a
+     * bare `type` key as the field's own type declaration, so
+     * `{ id: String, label: String, type: String }` is read as "this field is
+     * a String" and the whole subdocument collapses. It fails at cast time with
+     * a message about `[string]` that says nothing about the cause.
+     */
+    availableActions: {
+      type: [{
+        _id: false,
+        id: String,
+        label: String,
+        type: { type: String },
+      }],
+      default: [],
+    },
+
+    /** Where in Onshape it points, when it points anywhere. */
+    documentId: { type: String, default: "" },
+    documentName: { type: String, default: "" },
+    elementId: { type: String, default: "" },
+    workspaceId: { type: String, default: null },
+    versionId: { type: String, default: null },
+    /** The workflowable object the task is about, e.g. a release package. */
+    objectId: { type: String, default: "" },
+
+    creatorEmail: { type: String, default: "" },
+    creatorName: { type: String, default: "" },
+    /** Everyone Onshape lists on the task, by email where it gave one. */
+    assignees: {
+      type: [{ _id: false, onshapeUserId: String, email: String, name: String, acted: Boolean }],
+      default: [],
+    },
+
+    resolvedAt: { type: Date, default: null },
+    resolvedByEmail: { type: String, default: "" },
+
+    /*
+     * PLM parts the task's items resolve to.
+     *
+     * Onshape's taskItems name documents, elements and parts; the ones PLM
+     * already tracks become links, and the rest are kept as labels so the task
+     * still says what it is about.
+     */
+    items: {
+      type: [{
+        _id: false,
+        partId: { type: Schema.Types.ObjectId, ref: "Part", default: null },
+        label: String,
+        documentId: String,
+        elementId: String,
+        onshapePartId: String,
+      }],
+      default: [],
+    },
+
+    /** Onshape's metadata properties, as read — the editable ones are the UI. */
+    properties: {
+      type: [{
+        _id: false,
+        propertyId: String,
+        name: String,
+        value: Schema.Types.Mixed,
+        valueType: { type: String },
+        editable: Boolean,
+        required: Boolean,
+        enumValues: [{ _id: false, value: String, label: String }],
+      }],
+      default: [],
+    },
+    /**
+     * Whether Onshape will accept a comment on this task.
+     *
+     * False for a task attached to no document: Onshape's comments are
+     * document-scoped, so there is nowhere to post one. PLM keeps the thread
+     * locally and says so rather than failing on every comment.
+     */
+    commentable: { type: Boolean, default: false },
+    /** Whether Onshape will delete it outright — its answer, not PLM's. */
+    deletable: { type: Boolean, default: false },
+
+    comments: { type: [TaskCommentSchema], default: [] },
+
+    lastSyncedFromOnshapeAt: { type: Date, default: null },
+    /** Set when a PLM-side action has not reached Onshape yet. */
+    pushPending: { type: Boolean, default: false },
+    lastPushError: { type: String, default: null },
+    /** The whole payload, for diagnosing a field this schema does not cover. */
+    raw: { type: Schema.Types.Mixed, default: {} },
+  },
+  { timestamps: true }
+);
+TaskSchema.index({ enterpriseId: 1, onshapeTaskId: 1 }, { unique: true });
+TaskSchema.index({ enterpriseId: 1, state: 1 });
+
+/* -------------------------------------------------------------------------- */
+/* Product — what a part is part of.                                          */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * A product every part and assembly belongs to.
+ *
+ * PLM's own concept, not Onshape's: Onshape organises by document, which is a
+ * container for CAD, not a statement about what is being built. A product is
+ * the grouping people actually work in — "the pump", "the Mk2 chassis" — and
+ * one part can outlive several of them.
+ */
+const ProductSchema = new Schema(
+  {
+    enterpriseId: { type: Schema.Types.ObjectId, ref: "Enterprise", required: true, index: true },
+    name: { type: String, required: true, trim: true },
+    /*
+     * Case- and whitespace-collapsed form used for matching.
+     *
+     * Without it "Bracket Kit", "bracket kit" and "Bracket  Kit " fork into
+     * three products the first time somebody's capitalisation slips — and a
+     * product list nobody can untangle is worse than no grouping at all.
+     */
+    nameLower: { type: String, required: true, index: true },
+    description: { type: String, default: "" },
+    /** Optional short code for a product, e.g. "PMP" — free text, not issued. */
+    code: { type: String, default: "" },
+    createdByUserId: { type: Schema.Types.ObjectId, ref: "User", default: null },
+  },
+  { timestamps: true }
+);
+ProductSchema.index({ enterpriseId: 1, nameLower: 1 }, { unique: true });
+
 const PartSchema = new Schema(
   {
     enterpriseId: { type: Schema.Types.ObjectId, ref: "Enterprise", required: true, index: true },
@@ -336,6 +539,26 @@ const PartSchema = new Schema(
      * assembly has children.
      */
     kind: { type: String, enum: ["part", "assembly"], default: "part", index: true },
+
+    /*
+     * The product this part belongs to.
+     *
+     * Every part has one. Rather than allow null and special-case "no product"
+     * at every filter, count and picker, an "Unassigned" product is an ordinary
+     * product created on demand — see lib/products.ts. Nullable in the schema
+     * only so rows that predate this field can be read and backfilled; nothing
+     * writes null deliberately.
+     */
+    productId: { type: Schema.Types.ObjectId, ref: "Product", default: null, index: true },
+    /*
+     * Denormalised for display and grouping.
+     *
+     * A parts list shows the product name on every row, and the dashboard's
+     * per-product counts are one aggregation over this collection. Both would
+     * otherwise need a join per page. Renaming a product rewrites this, which
+     * is the cost of the arrangement and is handled in lib/products.ts.
+     */
+    productName: { type: String, default: "" },
 
     /* ------------------------------ PLM identity ---------------------------- */
 
@@ -492,6 +715,27 @@ const BomLinkSchema = new Schema(
     quantity: { type: Number, default: 1 },
     /** Find number / item number as the CAD BOM reported it, when it did. */
     findNumber: { type: String, default: "" },
+
+    /*
+     * Effectivity of this component *in this assembly*, which is a different
+     * question from whether the part itself is current.
+     *
+     * A substitution needs both parts to stay valid: the old bolt is still a
+     * perfectly good part, it is simply no longer what this assembly uses after
+     * a date. Part-level effectivity cannot say that — retiring the part would
+     * remove it from every other assembly too.
+     *
+     * Open at both ends, like the part's own: empty `from` means this component
+     * always has been in the assembly, empty `to` means it still is. Both empty
+     * is the normal case, which is why an empty end must never read as a closed
+     * boundary.
+     *
+     * PLM's own, never Onshape's — a CAD BOM has no notion of a date — so a
+     * re-import must leave these alone. See the `$set` in lib/bom-import.ts,
+     * which names its fields for that reason.
+     */
+    effectiveFrom: { type: Date, default: null },
+    effectiveTo: { type: Date, default: null },
 
     /** Which Onshape assembly tab this edge was read from. Provenance only. */
     sourceDocumentId: { type: String, default: "" },
@@ -694,6 +938,15 @@ const ReleaseSchema = new Schema(
     onshapeTransitionAction: { type: String, default: null },
     transitionedOnshapeAt: { type: Date, default: null },
     transitionError: { type: String, default: null },
+    /*
+     * When the refusal above happened.
+     *
+     * Without it a stored error is indistinguishable from a current one: the
+     * release page rendered "refused: ..." on every load, so an error from a
+     * failed attempt days earlier read as a fresh failure — which is exactly
+     * how a fixed problem came to look unfixed.
+     */
+    transitionErrorAt: { type: Date, default: null },
 
     /**
      * The released drawing sheets still need collecting.
@@ -912,8 +1165,28 @@ const MockOnshapePartSchema = new Schema(
     elementId: { type: String, required: true },
     elementName: { type: String, default: "" },
     elementType: { type: String, default: "PARTSTUDIO" },
-    partId: { type: String, required: true },
+    /*
+     * Empty for an assembly, which is an element rather than a part inside
+     * one — the same rule as the real Part schema.
+     *
+     * `required` would reject that: Mongoose treats an empty string as absent,
+     * so `required: true` here failed validation on every assembly write while
+     * letting the upsert that created it through, because an upsert does not
+     * run document validators. A default of "" says the field is always
+     * present and may legitimately be empty, and keeps it in the identity
+     * index, where an assembly's empty partId distinguishes it from the parts
+     * in the same element.
+     */
+    partId: { type: String, default: "" },
     configuration: { type: String, default: "default" },
+    /**
+     * Marks a seeded assembly that stands in for a subassembly.
+     *
+     * Only the simulator needs this: a real tenant's structure comes from the
+     * assembly's own BOM, where being a subassembly is a matter of where a row
+     * sits rather than a property of the element.
+     */
+    isSubassembly: { type: Boolean, default: false },
     // propertyId -> value, mirroring Onshape's metadata property bag.
     properties: { type: Schema.Types.Mixed, default: {} },
     /** Revisions the mock tenant has created, so a released part reads back correctly. */
@@ -926,12 +1199,136 @@ MockOnshapePartSchema.index(
   { unique: true }
 );
 
+/**
+ * A task in the simulator's Onshape.
+ *
+ * Modelled with a real state and a real transition set rather than stubbed,
+ * because the whole point of the simulator is that the demo works without a
+ * tenant — and a task interface with no workflow to drive is a screenshot.
+ */
+const MockOnshapeTaskSchema = new Schema(
+  {
+    companyId: { type: String, required: true, index: true },
+    taskId: { type: String, required: true, index: true },
+    name: { type: String, default: "" },
+    description: { type: String, default: "" },
+    /** Onshape's own state names for its stock task workflow. */
+    state: { type: String, default: "Open" },
+    status: { type: Number, default: 2 },
+    taskType: { type: String, default: "GENERAL" },
+    /** Onshape reports this per task; false means discard rather than delete. */
+    deletable: { type: Boolean, default: true },
+    /*
+     * Which task workflow this follows.
+     *
+     * "stock" is Onshape's own and is the default because it is what a real
+     * tenant has: OPEN and COMPLETE, joined by COMPLETE(APPROVE), with
+     * OS_DISCARD(DELETE) — and **no transition that starts work**. The
+     * simulator used to offer an invented START from Open, which is why a
+     * board column that cannot work looked like it did.
+     *
+     * "extended" keeps that invented transition, for exercising the intent
+     * matching that distinguishes start from reopen when both are SUBMIT.
+     */
+    workflowStyle: { type: String, default: "stock" },
+    /*
+     * Whether `getActionItems` shows this task, as opposed to only the search.
+     *
+     * The gap is the whole reason `findTasks` exists: Onshape shows the calling
+     * account the tasks it created or was assigned, and nothing else unless it
+     * is a company admin. On the tenant this was built against that was 8 tasks
+     * where the search returned 174. A simulator where every task is visible
+     * both ways cannot exercise the union, so this models it.
+     */
+    visibleAsActionItem: { type: Boolean, default: true },
+    /*
+     * Whether reading this task individually fails.
+     *
+     * Not a hypothetical: 7 of the 31 real tasks on the live tenant were
+     * orphaned records with a null name that answer `GET /tasks/{tid}` with a
+     * 500. They come back from the search, so any code that trusts the search
+     * and then hydrates has to survive them — and must not leave a nameless
+     * blank card on the board.
+     */
+    hydrateFails: { type: Boolean, default: false },
+    documentId: { type: String, default: "" },
+    documentName: { type: String, default: "" },
+    elementId: { type: String, default: "" },
+    objectId: { type: String, default: "" },
+    creatorEmail: { type: String, default: "" },
+    creatorName: { type: String, default: "" },
+    assignees: {
+      type: [{ _id: false, onshapeUserId: String, email: String, name: String, acted: Boolean }],
+      default: [],
+    },
+    resolvedAt: { type: Date, default: null },
+    resolvedByEmail: { type: String, default: "" },
+    items: {
+      type: [{ _id: false, label: String, documentId: String, elementId: String, partId: String }],
+      default: [],
+    },
+    /*
+     * The metadata properties a task carries — where the due date, priority
+     * and task state actually are. Note `type` written as `{ type: String }`:
+     * a bare `type` key is read by Mongoose as the field's own type.
+     */
+    properties: {
+      type: [{
+        _id: false,
+        propertyId: String,
+        name: String,
+        value: Schema.Types.Mixed,
+        valueType: { type: String },
+        editable: Boolean,
+        required: Boolean,
+        enumValues: [{ _id: false, value: String, label: String }],
+      }],
+      default: [],
+    },
+    comments: {
+      type: [{
+        _id: false,
+        id: String,
+        message: String,
+        authorEmail: String,
+        authorName: String,
+        createdAt: Date,
+        /*
+         * A real numeric code, so PLM's "copy the objectType off an existing
+         * comment" path is exercised. The value is arbitrary here — what
+         * matters is that one exists to be copied.
+         */
+        objectType: { type: Number, default: 14 },
+      }],
+      default: [],
+    },
+  },
+  { timestamps: true }
+);
+MockOnshapeTaskSchema.index({ companyId: 1, taskId: 1 }, { unique: true });
+
 const MockPropertyDefSchema = new Schema({
   companyId: { type: String, required: true, index: true },
   propertyId: { type: String, required: true },
   name: { type: String, required: true },
   valueType: { type: String, default: "STRING" },
+  /** Option labels, for an enum whose stored value IS the label. */
   enumValues: { type: [String], default: [] },
+  /*
+   * Options as Onshape actually returns them: a code and a separate label.
+   *
+   * Needed because the simulator stores State as a numeric code — which is
+   * what a real tenant sends — while its option list held only label strings.
+   * The code could then never be matched against the options, so every part
+   * displayed "Unknown (0)" or "Unknown (2)", and the code→label path that
+   * exists for live Onshape was unreachable locally. This is the same gap as
+   * the assembly one: a mock that cannot express the shape that breaks cannot
+   * show whether the handling for it works.
+   */
+  enumOptions: {
+    type: [{ _id: false, value: Schema.Types.Mixed, label: String }],
+    default: [],
+  },
   builtIn: { type: Boolean, default: false },
 });
 
@@ -1013,6 +1410,8 @@ export const Enterprise = models.Enterprise || model("Enterprise", EnterpriseSch
 export const User = models.User || model("User", UserSchema);
 export const AttributeDefinition =
   models.AttributeDefinition || model("AttributeDefinition", AttributeDefinitionSchema);
+export const Product = models.Product || model("Product", ProductSchema);
+export const Task = models.Task || model("Task", TaskSchema);
 export const Part = models.Part || model("Part", PartSchema);
 export const PartIteration = models.PartIteration || model("PartIteration", PartIterationSchema);
 export const BomLink = models.BomLink || model("BomLink", BomLinkSchema);
@@ -1029,5 +1428,7 @@ export const SelfWrite = models.SelfWrite || model("SelfWrite", SelfWriteSchema)
 export const PartThumbnail = models.PartThumbnail || model("PartThumbnail", PartThumbnailSchema);
 export const MockOnshapePart = models.MockOnshapePart || model("MockOnshapePart", MockOnshapePartSchema);
 export const MockPropertyDef = models.MockPropertyDef || model("MockPropertyDef", MockPropertyDefSchema);
+export const MockOnshapeTask =
+  models.MockOnshapeTask || model("MockOnshapeTask", MockOnshapeTaskSchema);
 export const MockReleasePackage = models.MockReleasePackage || model("MockReleasePackage", MockReleasePackageSchema);
 export const MockOnshapeDrawing = models.MockOnshapeDrawing || model("MockOnshapeDrawing", MockOnshapeDrawingSchema);

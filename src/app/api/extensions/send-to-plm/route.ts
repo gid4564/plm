@@ -5,6 +5,7 @@ import { clientForUser } from "@/lib/onshape/factory";
 import { kindForElementType, normalizeConfiguration, syncPartFromOnshape } from "@/lib/sync";
 import { baseUrl } from "@/lib/onshape/oauth";
 import { readExtensionRequest } from "@/lib/onshape/extension-request";
+import { currentProductFor } from "@/lib/products";
 import { handler, ok, fail } from "@/lib/api";
 
 /**
@@ -126,6 +127,15 @@ async function sendToPlm(req: Request): Promise<Response> {
       // The token identifies the person who granted access, which is the best
       // available attribution for a context-menu action.
       createdBy: { userId: identity.userId, email: "" },
+      /*
+       * Filed into the product this person is working in.
+       *
+       * A deliberate action has somebody present to have an intention, so it is
+       * honoured. An automatic path — a webhook, a release takeover — has
+       * nobody to ask and falls back to Unassigned rather than inheriting
+       * whatever product the integration account last had selected.
+       */
+      productId: (await currentProductFor(identity.userId))?.productId ?? null,
     }
   );
 

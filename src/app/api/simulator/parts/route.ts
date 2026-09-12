@@ -56,7 +56,11 @@ export const GET = handler(async () => {
     companyId,
     definitions: defs.map((d: any) => ({
       propertyId: d.propertyId, name: d.name, valueType: d.valueType,
-      enumValues: d.enumValues, builtIn: d.builtIn,
+      enumValues: d.enumValues ?? [],
+      // Code/label pairs, for an enum the simulator stores as a code — which is
+      // State, and is how a real tenant reports it.
+      enumOptions: (d.enumOptions ?? []).map((o: any) => ({ value: o.value, label: o.label })),
+      builtIn: d.builtIn,
     })),
     parts: mockParts.map((p: any) => ({
       id: String(p._id),

@@ -1,10 +1,11 @@
 import { connectDb } from "@/lib/db";
 import {
-  MockOnshapeDrawing, MockOnshapePart, MockPropertyDef, MockReleasePackage,
+  MockOnshapeDrawing, MockOnshapePart, MockPropertyDef, MockReleasePackage, MockOnshapeTask,
 } from "@/lib/models";
 import type {
   OnshapeClient, PartCoords, PartMetadata, PropertyDef, OnshapeUser, WebhookRegistration, ElementInfo, Thumbnail, WebhookSummary, ElementPart, DocumentInfo, AssemblyCoords,
-} from "./types";
+  OnshapeTask, OnshapeComment, CommentContext,
+  FoundTask,} from "./types";
 import type { BomLine, BomTable } from "./bom";
 import type { ExportFormat } from "./export-formats";
 import type {
@@ -13,6 +14,8 @@ import type {
 } from "./types";
 import type { MassProperties } from "./mass-properties";
 import { mapStandardProperties, resolveEnumLabel, toDisplayString, type RawProperty } from "./standard-properties";
+import { classify } from "./element-type";
+import { resolveTaskCommentContext } from "./object-types";
 
 /**
  * Stand-in for Onshape, backed by the same MongoDB PLM uses.
@@ -45,18 +48,61 @@ export class MockOnshapeClient implements OnshapeClient {
       name: d.name,
       valueType: d.valueType,
       enumValues: d.enumValues?.length ? d.enumValues : undefined,
+      enumOptions: d.enumOptions?.length
+        ? d.enumOptions.map((o: any) => ({ value: o.value, label: o.label }))
+        : undefined,
       builtIn: d.builtIn,
     }));
   }
 
+  /*
+   * Identity of one thing in the simulator.
+   *
+   * partId is normalised to a string rather than passed through, because an
+   * assembly arrives with it empty or absent, and Mongoose strips an
+   * `undefined` value from a filter instead of matching on it. That would turn
+   * a lookup for "the assembly element" into "any part in this element", and
+   * quietly return a part's data for an assembly — the mock's exact analogue of
+   * the live bug where an empty partId built `/p/` and Onshape read it as a
+   * wildcard. An empty string matches the assembly row and nothing else.
+   */
   private query(c: PartCoords) {
     return {
       companyId: this.companyId,
       documentId: c.documentId,
       elementId: c.elementId,
-      partId: c.partId,
+      partId: String(c.partId ?? ""),
       configuration: c.configuration || "default",
     };
+  }
+
+  /** True when these coordinates address an element, not a part inside one. */
+  private isElementScoped(c: PartCoords) {
+    return !String(c.partId ?? "").trim();
+  }
+
+  /**
+   * How to refer to a missing thing in an error.
+   *
+   * An assembly has no part id, so the part-shaped message read
+   * "no part at  to measure" — a blank where the identifier should be, which
+   * looks like a truncated string rather than a thing that legitimately has no
+   * part id.
+   */
+  private describe(c: PartCoords) {
+    return this.isElementScoped(c)
+      ? `assembly element ${c.elementId} in document ${c.documentId}`
+      : `part ${c.partId} in ${c.documentId}/${c.elementId}`;
+  }
+
+  /**
+   * The identifier the stand-in geometry and colour derive from.
+   *
+   * An assembly has no part id, and seeding from an empty string gave every
+   * assembly the same hue and the same measurements.
+   */
+  private seedKey(c: PartCoords) {
+    return this.isElementScoped(c) ? String(c.elementId) : String(c.partId);
   }
 
   async getElementInfo(coords: PartCoords): Promise<ElementInfo | null> {
@@ -123,10 +169,12 @@ export class MockOnshapeClient implements OnshapeClient {
 
     const defs = await this.listPropertyDefinitions(this.companyId);
     const nameId = defs.find((d) => d.name.toLowerCase() === "name")?.propertyId;
-    const label = String((part.properties || {})[nameId ?? ""] ?? coords.partId);
+    const label = String(
+      (part.properties || {})[nameId ?? ""] || part.elementName || this.seedKey(coords)
+    );
 
     let h = 0;
-    for (const ch of coords.partId) h = (h * 31 + ch.charCodeAt(0)) % 360;
+    for (const ch of this.seedKey(coords)) h = (h * 31 + ch.charCodeAt(0)) % 360;
 
     const svg =
       `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${size} ${size}">` +
@@ -139,7 +187,9 @@ export class MockOnshapeClient implements OnshapeClient {
       `font-size="${size * 0.3}" font-weight="700" fill="#fff" opacity="0.92">` +
       `${label.slice(0, 2).toUpperCase().replace(/[<>&]/g, "")}</text>` +
       `<text x="50%" y="88%" text-anchor="middle" font-family="ui-monospace,monospace" ` +
-      `font-size="${size * 0.075}" fill="#5c6773">${coords.partId.replace(/[<>&]/g, "")}</text>` +
+      `font-size="${size * 0.075}" fill="#5c6773">${String(
+        this.isElementScoped(coords) ? part.elementName || "assembly" : coords.partId
+      ).replace(/[<>&]/g, "")}</text>` +
       `</svg>`;
 
     return { contentType: "image/svg+xml", data: Buffer.from(svg, "utf8") };
@@ -157,7 +207,11 @@ export class MockOnshapeClient implements OnshapeClient {
    * quantities — against the same interface the live client implements, not to
    * simulate assembly structure.
    */
-  async getAssemblyBom(c: AssemblyCoords, _opts: { multiLevel?: boolean } = {}): Promise<BomTable> {
+  async getAssemblyBom(
+    c: AssemblyCoords,
+    opts: { multiLevel?: boolean; indented?: boolean } = {}
+  ): Promise<BomTable> {
+    const indented = opts.indented !== false;
     await connectDb();
 
     const all: any[] = await MockOnshapePart.find({
@@ -180,8 +234,22 @@ export class MockOnshapeClient implements OnshapeClient {
 
     // Prefer parts from other tabs, so the "assembly" is not a BOM of itself.
     // A single-tab document falls back to everything, which is still useful.
-    const others = all.filter((p) => p.elementId !== c.elementId);
-    const rows = others.length ? others : all;
+    /*
+     * Parts from other tabs, so the "assembly" is not a BOM of itself — and
+     * not the subassembly element either, which is emitted as its own row
+     * below.
+     *
+     * Without that second exclusion the subassembly appeared twice: once as
+     * the parent row and once as an ordinary part. The two shared a key, and
+     * the importer's key→index lookup resolved to the childless copy, so every
+     * child was left unlinked and the import silently flattened. The importer
+     * no longer depends on key uniqueness, but a BOM listing an assembly as
+     * one of its own parts was never a faithful simulation.
+     */
+    const others = all.filter(
+      (p) => p.elementId !== c.elementId && !p.isSubassembly
+    );
+    const rows = others.length ? others : all.filter((p) => p.elementId !== c.elementId);
 
     const defs = await this.listPropertyDefinitions(this.companyId);
     const idFor = (name: string) =>
@@ -191,6 +259,22 @@ export class MockOnshapeClient implements OnshapeClient {
     const descId = idFor("description");
     const matId = idFor("material");
     const revId = idFor("revision");
+
+    /*
+     * A subassembly to nest half the parts under, when structure was asked for.
+     *
+     * An indented BOM's whole point is that rows sit under other rows, so a
+     * simulator that only ever produced one level could not exercise the
+     * structured import at all — not the hierarchy reconstruction, not bringing
+     * a subassembly in as a PLM assembly, and not the per-parent reconciliation.
+     */
+    const sub: any = indented
+      ? await MockOnshapePart.findOne({
+          companyId: this.companyId,
+          documentId: c.documentId,
+          isSubassembly: true,
+        }).lean()
+      : null;
 
     const lines: BomLine[] = rows.map((p) => {
       let h = 0;
@@ -208,7 +292,8 @@ export class MockOnshapeClient implements OnshapeClient {
         state: "",
         vendor: "",
         project: "",
-        indentLevel: 0,
+        // The first half go under the subassembly, the rest stay at the top.
+        indentLevel: indented && sub && rows.indexOf(p) < Math.ceil(rows.length / 2) ? 1 : 0,
         isAssembly: false,
         source: {
           documentId: p.documentId,
@@ -223,7 +308,50 @@ export class MockOnshapeClient implements OnshapeClient {
       };
     });
 
-    return { lines, headers: ["Item", "Quantity", "Part number", "Name", "Description", "Material"], shape: "mock" };
+    /*
+     * The subassembly row itself, inserted ahead of its children.
+     *
+     * An indented BOM is a flat list whose order carries the hierarchy: a row's
+     * parent is the nearest row above it one level shallower. So the
+     * subassembly has to come first, or its children would attach to whatever
+     * preceded them.
+     */
+    if (indented && sub) {
+      const subProps = sub.properties || {};
+      lines.unshift({
+        // Index-prefixed, as parseBom keys an indented row.
+        key: `0:${sub.documentId}:${sub.elementId}::default`,
+        quantity: 1,
+        partNumber: toDisplayString(subProps[numId]),
+        name: toDisplayString(subProps[nameId]) || sub.elementName || "Subassembly",
+        description: toDisplayString(subProps[descId]),
+        material: "",
+        revision: "",
+        state: "",
+        vendor: "",
+        project: "",
+        indentLevel: 0,
+        isAssembly: true,
+        source: {
+          documentId: sub.documentId,
+          elementId: sub.elementId,
+          // An assembly is an element, so there is no part within it.
+          partId: "",
+          configuration: "default",
+          workspaceId: sub.workspaceId ?? null,
+          versionId: null,
+        },
+        sourceWvmType: "w",
+        unresolvable: null,
+      });
+    }
+
+    return {
+      lines,
+      headers: ["Item", "Quantity", "Part number", "Name", "Description", "Material"],
+      shape: "mock",
+      indented,
+    };
   }
 
   /**
@@ -240,7 +368,7 @@ export class MockOnshapeClient implements OnshapeClient {
     await connectDb();
 
     const part: any = await MockOnshapePart.findOne(this.query(coords)).lean();
-    if (!part) throw new Error(`Mock Onshape: no part at ${coords.partId} to export`);
+    if (!part) throw new Error(`Mock Onshape: nothing at ${this.describe(coords)} to export`);
 
     if (format.strategy === "translation") {
       await new Promise((r) => setTimeout(r, 900));
@@ -312,27 +440,82 @@ export class MockOnshapeClient implements OnshapeClient {
    * Onshape part with nothing assigned would. Volume and centroid are a
    * deterministic, plausible-sized solid derived from the part id, so the
    * same part always reports the same numbers.
+   *
+   * An assembly is rolled up from the parts in its document rather than
+   * measured as a solid, because that is what a real assembly does: material
+   * is not a property of an assembly, so measuring one the part way would
+   * report no mass for an assembly whose parts are all steel.
    */
   async getMassProperties(coords: PartCoords): Promise<MassProperties> {
     await connectDb();
-    const part: any = await MockOnshapePart.findOne(this.query(coords)).lean();
-    if (!part) throw new Error(`Mock Onshape: no part at ${coords.partId} to measure`);
 
     const defs = await this.listPropertyDefinitions(this.companyId);
     const materialId = defs.find((d) => d.name.toLowerCase() === "material")?.propertyId ?? "";
-    const materialRaw = (part.properties || {})[materialId];
-    const material = toDisplayString(materialRaw);
 
-    // A small, deterministic "size" for this part, so the same part always
-    // measures the same and different parts plausibly differ.
+    if (this.isElementScoped(coords)) {
+      const asm: any = await MockOnshapePart.findOne(this.query(coords)).lean();
+      if (!asm) throw new Error(`Mock Onshape: nothing at ${this.describe(coords)} to measure`);
+
+      const members: any[] = await MockOnshapePart.find({
+        companyId: this.companyId,
+        documentId: coords.documentId,
+        partId: { $nin: [null, ""] },
+      }).lean();
+
+      const measured = members.map((m) =>
+        this.measureSolid(String(m.partId), toDisplayString((m.properties || {})[materialId]))
+      );
+      const volumeM3 = measured.reduce((t, m) => t + m.volumeM3, 0);
+      const surfaceAreaM2 = measured.reduce((t, m) => t + m.surfaceAreaM2, 0);
+      const withMass = measured.filter((m) => m.massKg !== null);
+
+      /*
+       * No mass unless every member has one. A partial sum is worse than no
+       * answer: it reads as the assembly's weight while silently omitting the
+       * components that have no material assigned, and someone would quote it.
+       */
+      const complete = measured.length > 0 && withMass.length === measured.length;
+
+      return {
+        hasMass: complete,
+        massKg: complete ? withMass.reduce((t, m) => t + (m.massKg ?? 0), 0) : null,
+        volumeM3,
+        centroidM: [0, 0, 0],
+        surfaceAreaM2,
+        shape: "mock",
+      };
+    }
+
+    const part: any = await MockOnshapePart.findOne(this.query(coords)).lean();
+    if (!part) throw new Error(`Mock Onshape: nothing at ${this.describe(coords)} to measure`);
+
+    const solid = this.measureSolid(
+      this.seedKey(coords),
+      toDisplayString((part.properties || {})[materialId])
+    );
+    return {
+      hasMass: solid.massKg !== null,
+      massKg: solid.massKg,
+      volumeM3: solid.volumeM3,
+      centroidM: solid.centroidM,
+      surfaceAreaM2: solid.surfaceAreaM2,
+      shape: "mock",
+    };
+  }
+
+  /**
+   * One stand-in solid: a deterministic size from `key`, and a mass only if a
+   * material was assigned.
+   */
+  private measureSolid(key: string, material: string) {
     let seed = 0;
-    for (const ch of String(coords.partId)) seed = (seed * 31 + ch.charCodeAt(0)) % 9973;
+    for (const ch of key) seed = (seed * 31 + ch.charCodeAt(0)) % 9973;
     const sideM = 0.02 + (seed % 100) / 1000; // 20-119mm across, roughly hand-sized
     const volumeM3 = sideM ** 3 * 0.4; // a solid, not a cube — 40% fill
+    const surfaceAreaM2 = sideM * sideM * 3;
+    const centroidM: [number, number, number] = [0, 0, sideM / 2];
 
-    if (!material) {
-      return { hasMass: false, massKg: null, volumeM3, centroidM: [0, 0, sideM / 2], surfaceAreaM2: sideM * sideM * 3, shape: "mock" };
-    }
+    if (!material) return { massKg: null, volumeM3, surfaceAreaM2, centroidM };
 
     // Rough densities (kg/m^3) for the materials the simulator's own seed data
     // uses. Anything unrecognised still gets a plausible mid-range density
@@ -344,20 +527,13 @@ export class MockOnshapeClient implements OnshapeClient {
       /titanium/i.test(material) ? 4500 :
       2700;
 
-    return {
-      hasMass: true,
-      massKg: volumeM3 * density,
-      volumeM3,
-      centroidM: [0, 0, sideM / 2],
-      surfaceAreaM2: sideM * sideM * 3,
-      shape: "mock",
-    };
+    return { massKg: volumeM3 * density, volumeM3, surfaceAreaM2, centroidM };
   }
 
   async getPartMetadata(coords: PartCoords): Promise<PartMetadata> {
     await connectDb();
     const part: any = await MockOnshapePart.findOne(this.query(coords)).lean();
-    if (!part) throw new Error(`Mock Onshape: no part at ${coords.documentId}/${coords.elementId}/${coords.partId}`);
+    if (!part) throw new Error(`Mock Onshape: nothing at ${this.describe(coords)}`);
 
     const defs = await this.listPropertyDefinitions(this.companyId);
     const nameById = new Map(defs.map((d) => [d.propertyId, d.name]));
@@ -371,9 +547,15 @@ export class MockOnshapeClient implements OnshapeClient {
         name: nameById.get(propertyId) ?? "",
         value,
         valueType: d?.valueType,
-        // The simulator stores plain option lists; widen them to the shape the
-        // live API returns so both paths resolve identically.
-        enumValues: d?.enumValues?.length ? d.enumValues.map((v) => ({ value: v, label: v })) : undefined,
+        // Real code/label pairs where the definition has them; otherwise widen
+        // a plain label list to the same shape, so both resolve identically to
+        // the live path.
+        enumValues:
+          d?.enumOptions?.length
+            ? d.enumOptions
+            : d?.enumValues?.length
+              ? d.enumValues.map((v) => ({ value: v, label: v }))
+              : undefined,
       };
     });
 
@@ -409,11 +591,370 @@ export class MockOnshapeClient implements OnshapeClient {
     await connectDb();
     const q = this.query(coords);
     const part: any = await MockOnshapePart.findOne(q);
-    if (!part) throw new Error(`Mock Onshape: cannot write, no part at ${coords.partId}`);
+    if (!part) throw new Error(`Mock Onshape: cannot write, nothing at ${this.describe(coords)}`);
 
     part.properties = { ...(part.properties || {}), ...values };
     part.markModified("properties");
     await part.save();
+  }
+
+  /* ======================================================================== */
+  /* Tasks                                                                     */
+  /* ======================================================================== */
+
+  /**
+   * The transitions a task offers, by state.
+   *
+   * Onshape's stock task workflow, as far as PLM needs it: a task is opened,
+   * worked on, and resolved — with a reopen from the resolved state, because a
+   * task interface that cannot reopen anything is not one anybody would trust.
+   *
+   * The ids are what a transition call sends, and they are deliberately
+   * different from the types — the same distinction that made release packages
+   * fail silently, mirrored here so any client conflating the two breaks
+   * locally rather than against a tenant.
+   */
+  private taskActionsFor(
+    state: string,
+    style: string = "stock"
+  ): { id: string; label: string; type: string }[] {
+    /*
+     * Onshape's stock task workflow has NO transition that starts work.
+     *
+     * An open task on a live tenant offers exactly COMPLETE(APPROVE) and
+     * OS_DISCARD(DELETE). Progress is the "Task State" property's business,
+     * not the workflow's. The simulator used to offer an invented START here,
+     * so PLM's "In Progress" column passed every test and then failed against
+     * every real tenant with "Onshape offers no start transition".
+     */
+    const stock = style !== "extended";
+
+    switch (state.toUpperCase()) {
+      /*
+       * The ids a live tenant's stock task workflow actually offers, read off
+       * a real task: COMPLETE (type APPROVE) and OS_DISCARD (type DELETE).
+       * The invented ones this had before happened to work only because
+       * matching is by type — which is precisely the coincidence that hides a
+       * client conflating id with type.
+       */
+      case "OPEN":
+        return [
+          ...(stock ? [] : [{ id: "START", label: "Start work", type: "SUBMIT" }]),
+          { id: "COMPLETE", label: "Complete", type: "APPROVE" },
+          { id: "OS_DISCARD", label: "Discard", type: "DELETE" },
+        ];
+      case "IN PROGRESS":
+        return [
+          { id: "COMPLETE", label: "Complete", type: "APPROVE" },
+          { id: "REJECT", label: "Reject", type: "REJECT" },
+          { id: "OS_DISCARD", label: "Discard", type: "DELETE" },
+        ];
+      case "RESOLVED":
+      case "REJECTED":
+        /*
+         * A completed task on the live tenant offered NO actions at all — it
+         * could not be reopened, deleted or discarded. The stock workflow here
+         * is the generous version of that; a tenant where nothing is on offer
+         * is modelled by t-closed in the task tests.
+         */
+        return [{ id: "REOPEN", label: "Reopen", type: "SUBMIT" }];
+      default:
+        return [];
+    }
+  }
+
+  private stateAfter(state: string, transition: string): string | null {
+    const t = transition.toUpperCase();
+    if (t === "START") return "In Progress";
+    if (t === "COMPLETE") return "Resolved";
+    if (t === "REJECT") return "Rejected";
+    if (t === "REOPEN") return "Open";
+    /*
+     * A discard is terminal, and the state has to change or the mock lies: a
+     * task still reading "Open" after a successful discard would let PLM
+     * report it gone while the board still showed it as work to do.
+     */
+    if (t === "OS_DISCARD") return "Discarded";
+    return null;
+  }
+
+  private toTask(d: any): OnshapeTask {
+    return {
+      id: String(d.taskId),
+      name: d.name ?? "",
+      description: d.description ?? "",
+      state: d.state ?? "",
+      status: typeof d.status === "number" ? d.status : null,
+      taskType: d.taskType ?? "",
+      documentId: d.documentId ?? "",
+      documentName: d.documentName ?? "",
+      elementId: d.elementId ?? "",
+      workspaceId: null,
+      versionId: null,
+      objectId: d.objectId ?? "",
+      creatorEmail: d.creatorEmail ?? "",
+      creatorName: d.creatorName ?? "",
+      assignees: (d.assignees ?? []).map((a: any) => ({
+        onshapeUserId: a.onshapeUserId ?? "",
+        email: a.email ?? "",
+        name: a.name ?? "",
+        acted: Boolean(a.acted),
+      })),
+      resolvedAt: d.resolvedAt ? new Date(d.resolvedAt).toISOString() : null,
+      resolvedByEmail: d.resolvedByEmail ?? "",
+      items: (d.items ?? []).map((i: any) => ({
+        label: i.label ?? "",
+        documentId: i.documentId ?? "",
+        elementId: i.elementId ?? "",
+        partId: i.partId ?? "",
+        // A real task item carries `dataType` and leaves `mimeType` null.
+        elementType: classify({ ...i, dataType: i.dataType, elementType: i.elementType }).type,
+      })),
+      comments: (d.comments ?? []).map((c: any) => ({
+        id: c.id,
+        message: c.message,
+        authorEmail: c.authorEmail ?? "",
+        authorName: c.authorName ?? "",
+        createdAt: c.createdAt ? new Date(c.createdAt).toISOString() : "",
+        objectType: typeof c.objectType === "number" ? c.objectType : null,
+        objectId: String(d.taskId),
+        /* The anchor, which is what PLM copies onto a new comment. */
+        documentId: d.documentId ?? "",
+        workspaceId: "",
+        versionId: "",
+        elementId: d.elementId ?? "",
+      })),
+      availableActions: this.taskActionsFor(d.state ?? "", d.workflowStyle),
+      properties: (d.properties ?? []).map((pr: any) => ({
+        propertyId: pr.propertyId, name: pr.name, value: pr.value ?? null,
+        valueType: pr.valueType ?? "STRING",
+        editable: Boolean(pr.editable), required: Boolean(pr.required),
+        enumValues: pr.enumValues ?? [],
+      })),
+      /*
+       * Commentable means the workflow declares a Comment property — the same
+       * rule the live client applies, since that is where a comment is written.
+       */
+      /*
+       * The simulator mirrors the distinction a live task showed: deletable
+       * and discardable are different answers, and a task can be the second
+       * without being the first.
+       */
+      deletable: d.deletable !== false,
+      commentable: (d.properties ?? []).some(
+        (pr: any) =>
+          pr.editable && String(pr.valueType).toUpperCase() === "STRING" &&
+          /comment|note|remark/i.test(String(pr.name ?? ""))
+      ),
+      raw: d,
+    };
+  }
+
+  async listTasks(
+    opts: { userId?: string; documentId?: string; status?: number; limit?: number; offset?: number } = {}
+  ): Promise<OnshapeTask[]> {
+    await connectDb();
+    /*
+     * Only the tasks the calling account would actually be shown.
+     *
+     * `getActionItems` is not "every task" — see visibleAsActionItem on the
+     * model. Returning everything here would make the simulator disagree with
+     * every live tenant in exactly the way that hides whether findTasks is
+     * wired up at all.
+     */
+    const q: Record<string, unknown> = { companyId: this.companyId, visibleAsActionItem: { $ne: false } };
+    if (opts.documentId) q.documentId = opts.documentId;
+    const rows: any[] = await MockOnshapeTask.find(q)
+      .sort({ createdAt: -1 })
+      .limit(Math.min(200, opts.limit ?? 100))
+      .skip(opts.offset ?? 0)
+      .lean();
+    return rows.map((r) => this.toTask(r));
+  }
+
+  /**
+   * The internal search: every task, in the search's own shape.
+   *
+   * Deliberately returns rows `listTasks` does not, and deliberately returns
+   * them as `FoundTask` rather than `OnshapeTask` — the live projection has no
+   * workflow snapshot, so promoting it to a task would invent a state and a
+   * set of transitions. Anything that needs those has to call `getTask`.
+   */
+  async findTasks(opts: { from?: number; size?: number } = {}): Promise<FoundTask[]> {
+    await connectDb();
+    const size = Math.min(100, Math.max(1, opts.size ?? 100));
+    const rows: any[] = await MockOnshapeTask.find({ companyId: this.companyId })
+      .sort({ createdAt: -1 })
+      .skip(Math.max(0, opts.from ?? 0))
+      .limit(size)
+      .lean();
+    return rows.map((r) => ({
+      id: String(r.taskId),
+      name: String(r.name ?? ""),
+      taskType: String(r.taskType ?? ""),
+      /* A display string, as the live search gives — not the workflow state. */
+      displayState: String(r.state ?? ""),
+      documentId: String(r.documentId ?? ""),
+    }));
+  }
+
+  async getTask(taskId: string): Promise<OnshapeTask> {
+    await connectDb();
+    const d: any = await MockOnshapeTask.findOne({ companyId: this.companyId, taskId }).lean();
+    if (!d) throw new Error(`Mock Onshape has no task "${taskId}".`);
+    /*
+     * The orphaned-task 500, reproduced. A live tenant had 7 of these: they
+     * list but will not read, and a caller that ignores the failure puts a
+     * nameless card on the board.
+     */
+    if (d.hydrateFails) {
+      throw new Error(
+        `Onshape GET /tasks/${taskId} -> 500: An internal error has occurred; ` +
+        `support code 9e6f7294436fcb752a8a104d`
+      );
+    }
+    return this.toTask(d);
+  }
+
+  async transitionTask(taskId: string, transition: string): Promise<OnshapeTask> {
+    await connectDb();
+    const doc: any = await MockOnshapeTask.findOne({ companyId: this.companyId, taskId });
+    if (!doc) throw new Error(`Mock Onshape has no task "${taskId}".`);
+
+    const offered = this.taskActionsFor(doc.state, doc.workflowStyle);
+    if (!offered.some((a) => a.id === transition)) {
+      /*
+       * The same refusal a real tenant gives, and worth mocking faithfully: a
+       * transition the state does not offer is how a stale board tries to act
+       * on a task somebody else already moved.
+       */
+      throw new Error(
+        `Mock Onshape: "${transition}" is not available from state ${doc.state}. ` +
+        `Available: ${offered.map((a) => a.id).join(", ") || "none"}.`
+      );
+    }
+
+    const next = this.stateAfter(doc.state, transition);
+    if (next) doc.state = next;
+    if (next === "Resolved") {
+      doc.resolvedAt = new Date();
+      doc.resolvedByEmail = this.actingUser?.email ?? "service@mockenterprise.test";
+    } else {
+      doc.resolvedAt = null;
+      doc.resolvedByEmail = "";
+    }
+    await doc.save();
+    return this.toTask(doc.toObject());
+  }
+
+  async updateTask(
+    taskId: string,
+    patch: { name?: string; description?: string; propertyValues?: Record<string, unknown> }
+  ): Promise<OnshapeTask> {
+    await connectDb();
+    const doc: any = await MockOnshapeTask.findOne({ companyId: this.companyId, taskId });
+    if (!doc) throw new Error(`Mock Onshape has no task "${taskId}".`);
+    if (patch.name != null) doc.name = patch.name;
+    if (patch.description != null) doc.description = patch.description;
+    for (const [propertyId, value] of Object.entries(patch.propertyValues ?? {})) {
+      const pr = (doc.properties ?? []).find((x: any) => x.propertyId === propertyId);
+      if (!pr) {
+        throw new Error(`Mock Onshape: this task has no property ${propertyId}.`);
+      }
+      if (!pr.editable) {
+        // The same refusal a real tenant gives for a read-only property.
+        throw new Error(`Mock Onshape: "${pr.name}" is read-only on this task.`);
+      }
+      pr.value = value;
+    }
+    doc.markModified("properties");
+    await doc.save();
+    return this.toTask(doc.toObject());
+  }
+
+  async commentOnTask(
+    taskId: string,
+    message: string,
+    _opts: CommentContext = {}
+  ): Promise<OnshapeComment> {
+    await connectDb();
+    const doc: any = await MockOnshapeTask.findOne({ companyId: this.companyId, taskId });
+    if (!doc) throw new Error(`Mock Onshape has no task "${taskId}".`);
+
+    /*
+     * A comment is a write to the workflow's Comment property.
+     *
+     * That is what Onshape's own UI does — `POST /tasks/{tid}` with
+     * `propertyValues: [{propertyId: <Comment>, value: <text>}]` — and the
+     * task comes back with the message appended to its thread. The simulator
+     * refuses a task whose workflow has no such property, because PLM spent
+     * three rounds posting to `/comments` and a mock that accepted anything
+     * could not have shown that the endpoint was wrong.
+     */
+    const prop = (doc.properties ?? []).find(
+      (pr: any) =>
+        pr.editable && String(pr.valueType).toUpperCase() === "STRING" &&
+        /comment|note|remark/i.test(String(pr.name ?? ""))
+    );
+    if (!prop) {
+      throw new Error(
+        `Mock Onshape: this task's workflow has no Comment property, so there is nowhere ` +
+        `to post a comment. Onshape appends one by writing that property, not through the ` +
+        `comment API.`
+      );
+    }
+
+    const comment = {
+      id: `mock-comment-${Math.random().toString(36).slice(2, 10)}`,
+      message,
+      authorEmail: this.actingUser?.email ?? "service@mockenterprise.test",
+      authorName: this.actingUser?.name ?? "PLM service account",
+      createdAt: new Date(),
+      /*
+       * 10, which is what a live tenant returned on a task comment — not 14.
+       * BTMetadataObjectType's ordinal for TASK is 14, and this is the
+       * evidence that its ordinals are not the comment API's codes.
+       */
+      objectType: 10,
+    };
+    doc.comments.push(comment);
+    /* Onshape leaves the property itself empty after appending the comment. */
+    prop.value = "";
+    doc.markModified("properties");
+    await doc.save();
+
+    return {
+      id: comment.id,
+      message: comment.message,
+      authorEmail: comment.authorEmail,
+      authorName: comment.authorName,
+      createdAt: comment.createdAt.toISOString(),
+      objectType: comment.objectType,
+      objectId: taskId,
+      // Onshape reports the task's own id as the comment's documentId.
+      documentId: taskId,
+      workspaceId: "",
+      versionId: "",
+      elementId: "",
+    };
+  }
+
+  async deleteTask(taskId: string): Promise<void> {
+    await connectDb();
+    const doc: any = await MockOnshapeTask.findOne({ companyId: this.companyId, taskId });
+    if (!doc) throw new Error(`Mock Onshape has no task "${taskId}".`);
+    /*
+     * Refuse what Onshape refuses. A task it reports as `deletable: false`
+     * cannot be deleted, and a simulator that deleted anything would let PLM
+     * offer a button that fails on a real tenant.
+     */
+    if (doc.deletable === false) {
+      throw new Error(
+        `Mock Onshape: task "${taskId}" is not deletable. Onshape reports deletable:false ` +
+        `for such a task — discard it through its workflow instead.`
+      );
+    }
+    await MockOnshapeTask.deleteOne({ companyId: this.companyId, taskId });
   }
 
   async registerWebhook(companyId: string, callbackUrl: string, events: string[]): Promise<WebhookRegistration> {
@@ -450,18 +991,29 @@ export class MockOnshapeClient implements OnshapeClient {
    * are per-workflow identifiers, and code that conflated the two would work
    * here and fail there.
    */
+  /**
+   * The transitions a package offers, by state.
+   *
+   * The ids are Onshape's real ones, read off a live enterprise package: an
+   * APPROVE-type action is posted back as `RELEASE`, not `APPROVE` — the type
+   * and the id differ, and that is worth mirroring exactly, because a client
+   * that conflated them would work against a mock using invented ids and fail
+   * against a tenant. `DELETE` is on a live package too, and is deliberately
+   * included so nothing may quietly resolve "reject" to it.
+   */
   private actionsFor(state: string): WorkflowAction[] {
     switch (state.toUpperCase()) {
       case "PENDING":
         return [
-          { id: "mock-act-approve", label: "Approve", type: "APPROVE" },
-          { id: "mock-act-reject", label: "Reject", type: "REJECT" },
-          { id: "mock-act-reassign", label: "Reassign", type: "REASSIGN_TASK" },
+          { id: "RELEASE", label: "Release", type: "APPROVE" },
+          { id: "REJECT", label: "Reject", type: "REJECT" },
+          { id: "REASSIGN_TASK", label: "Reassign", type: "REASSIGN_TASK" },
+          { id: "DELETE", label: "Delete", type: "DELETE" },
         ];
       case "REJECTED":
-        return [{ id: "mock-act-resubmit", label: "Resubmit", type: "SUBMIT" }];
+        return [{ id: "SUBMIT", label: "Resubmit", type: "SUBMIT" }];
       case "RELEASED":
-        return [{ id: "mock-act-obsolete", label: "Obsolete", type: "OBSOLETE" }];
+        return [{ id: "OBSOLETE", label: "Obsolete", type: "OBSOLETE" }];
       default:
         return [];
     }
@@ -473,7 +1025,9 @@ export class MockOnshapeClient implements OnshapeClient {
       documentId: String(it.documentId ?? ""),
       elementId: String(it.elementId ?? ""),
       partId: String(it.partId ?? ""),
-      elementType: String(it.elementType ?? "").toUpperCase(),
+      // Classified, not stringified — the same treatment the live client needs,
+      // so a mock package's drawing is recognisable as one here too.
+      elementType: classify(it ?? {}).type,
       name: String(it.name ?? ""),
       partNumber: String(it.partNumber ?? ""),
       revisionId: String(it.revisionId ?? ""),
@@ -485,6 +1039,18 @@ export class MockOnshapeClient implements OnshapeClient {
       id: String(d.rpid),
       workflowId: String(d.wfid ?? ""),
       state: String(d.state ?? ""),
+      /*
+       * The simulator transitions synchronously, so it reports no work in
+       * progress. Present so the field exists on both clients, and so a caller
+       * that reads it does not have to special-case the mock.
+       */
+      transitionStatus: [],
+      /*
+       * The simulator lets the caller do anything its workflow offers, and says
+       * so rather than leaving the field empty: an empty approver list with
+       * `allowIfNoApprovers` is itself a meaningful state on a real tenant.
+       */
+      permissions: { approverIds: [], isCreator: false, createdById: "" },
       changeOrderId: String(d.changeOrderId ?? ""),
       items,
       properties: (d.properties ?? {}) as Record<string, unknown>,
@@ -642,10 +1208,19 @@ export class MockOnshapeClient implements OnshapeClient {
       companyId: this.companyId,
       rpid,
       wfid,
-      changeOrderId: input.changeOrderId,
+      /*
+       * Generated here, as Onshape generates it.
+       *
+       * It is a read-only field on the real API — present on the response, not
+       * the request — so a caller cannot choose it. The simulator minting its
+       * own is what makes that true locally too; it previously echoed back
+       * whatever the caller passed, which is precisely why the impossible
+       * round trip went unnoticed.
+       */
+      changeOrderId: `CO-${Math.random().toString(36).slice(2, 8).toUpperCase()}`,
       state: "PENDING",
       items,
-      properties: input.properties ?? {},
+      properties: {},
       createdByEmail: this.actingUser?.email ?? "designer@mockenterprise.test",
     });
 

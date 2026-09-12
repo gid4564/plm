@@ -1,8 +1,10 @@
 import { connectDb } from "@/lib/db";
-import { ActivityLog, Enterprise, Part, Release } from "@/lib/models";
+import { ActivityLog, Enterprise, Part, Release, Task } from "@/lib/models";
 import { clientForEnterprise } from "@/lib/onshape/factory";
 import { consumeSelfWriteMarker, syncPartFromOnshape } from "@/lib/sync";
-import { refreshReleasedDrawings, takeOverReleasePackage } from "@/lib/release";
+import { refreshReleasedDrawings, scheduleDrawingRefresh, takeOverReleasePackage } from "@/lib/release";
+import { upsertTask } from "@/lib/tasks";
+import { objectTypeCode, objectTypeName } from "@/lib/onshape/object-types";
 import { handler, ok } from "@/lib/api";
 import type { PartCoords } from "@/lib/onshape/types";
 
@@ -53,6 +55,58 @@ function releasePackageIdFrom(payload: Record<string, any>): string | null {
   return null;
 }
 
+/**
+ * A task id in a workflow-transition payload.
+ *
+ * The same candidate keys as the release-package version, for the same reason:
+ * the event names no field that says what kind of object transitioned, so the
+ * plausible ids are tried and Onshape is asked which of them it recognises.
+ */
+function taskIdFrom(payload: Record<string, any>): string | null {
+  for (const key of ["taskId", "objectId", "workflowObjectId", "id"]) {
+    const v = payload[key] ?? payload.data?.[key];
+    if (typeof v === "string" && v.trim()) return v.trim();
+    if (v && typeof v === "object" && typeof v.id === "string" && v.id.trim()) return v.id.trim();
+  }
+  return null;
+}
+
+/**
+ * Try an id as a task, returning what happened or null if it is not one.
+ *
+ * Shared by both routes into the task path — the objectType one and the
+ * fallback after a release-package 404 — so the two cannot drift in how they
+ * read a task or what they record.
+ */
+async function tryTask(
+  enterpriseId: string,
+  id: string,
+  event: string
+): Promise<{ task: string; state: string } | null> {
+  try {
+    const { client } = await clientForEnterprise(enterpriseId);
+    const live = await client.getTask(id);
+    if (!live.id) return null;
+    await upsertTask(enterpriseId, live);
+    return { task: live.id, state: live.state };
+  } catch (err: any) {
+    const message = String(err?.message ?? err);
+    /*
+     * A 404 means it is not a task either, which is ordinary — this event also
+     * fires for revisions. Anything else is worth recording: a task PLM cannot
+     * read is usually a visibility problem with the integration account, and
+     * that needs a person.
+     */
+    if (!/\b404\b/.test(message)) {
+      await ActivityLog.create({
+        enterpriseId, direction: "onshape->plm", action: "error", trigger: event, ok: false,
+        message: `Could not read ${id} as a task: ${message.slice(0, 300)}`,
+      });
+    }
+    return null;
+  }
+}
+
 export const POST = handler(async (req: Request) => {
   const payload = (await req.json().catch(() => ({}))) as Record<string, any>;
   const event = String(payload.event ?? "");
@@ -89,7 +143,20 @@ export const POST = handler(async (req: Request) => {
   console.log(
     `[PLM] webhook in: event=${event || "(none)"} ` +
     `doc=${payload.documentId ?? "-"} el=${payload.elementId ?? "-"} ` +
-    `part=${payload.partId ?? "-"} keys=[${Object.keys(payload).join(",")}]`
+    `part=${payload.partId ?? "-"} ` +
+    /*
+     * objectType and transitionName logged by value, not just by name.
+     *
+     * A real payload turned out to carry `objectType` — the discriminator this
+     * receiver had been working around by trying each kind of object in turn
+     * (unknown U1 in the integration spec). The name was all that log line
+     * showed, so the field was there for weeks before anybody noticed it.
+     * Its VALUES are still unknown, and logging them is how they stop being.
+     */
+    `objectType=${payload.objectType ?? "-"}` +
+    `${payload.objectType != null ? `(${objectTypeName(Number(payload.objectType))})` : ""} ` +
+    `transition=${payload.transitionName ?? "-"} ` +
+    `keys=[${Object.keys(payload).join(",")}]`
   );
 
   // Lifecycle handshakes — acknowledge and do nothing.
@@ -101,6 +168,18 @@ export const POST = handler(async (req: Request) => {
     "onshape.workflow.transition",
     "onshape.revision.created",
     "onshape.model.lifecycle.metadata",
+    /*
+     * Comments, which is how a comment written in Onshape reaches a PLM task.
+     *
+     * There is no task-specific webhook event in Onshape's published API. A
+     * task is a workflowable object, so a task transition arrives on
+     * `onshape.workflow.transition` — the same event as a release package,
+     * with the same unknown discriminator (U1). The handler therefore tries a
+     * release package first and falls back to a task, rather than assuming
+     * which it has.
+     */
+    "onshape.comment.create",
+    "onshape.comment.update",
   ]);
 
   if (!HANDLED.has(event)) {
@@ -185,6 +264,50 @@ export const POST = handler(async (req: Request) => {
   if (event === "onshape.workflow.transition") {
     const rpid = releasePackageIdFrom(payload);
 
+    /*
+     * Before giving up on the event, try it as a task.
+     *
+     * A task is a workflowable object, so its transitions arrive on this same
+     * event, and Onshape names no field that says which kind of object moved.
+     * Asking Onshape whether the id is a task is cheap and definitive, and it
+     * is the only way to tell without the discriminator U1 is about.
+     */
+    /*
+     * Route by objectType when the payload names one.
+     *
+     * `objectType` is the discriminator U1 was about, and a real payload
+     * carries it. Where it says TASK, the task path is taken directly instead
+     * of asking Onshape to identify the id by trial — one fewer call, and one
+     * fewer way to act on the wrong kind of object.
+     *
+     * The codes are `BTMetadataObjectType` ordinals as far as anything here can
+     * tell, which is an inference from a declared ordering rather than a
+     * documented mapping. So a mismatch falls through to the old behaviour
+     * rather than refusing the event: being wrong about the code must cost a
+     * wasted lookup, not a dropped transition.
+     */
+    const payloadType =
+      payload.objectType != null && Number.isFinite(Number(payload.objectType))
+        ? Number(payload.objectType)
+        : null;
+    const looksLikeTask = payloadType != null && payloadType === objectTypeCode("TASK");
+
+    if (looksLikeTask) {
+      const taskId = taskIdFrom(payload);
+      if (taskId) {
+        const r = await tryTask(enterpriseId, taskId, event);
+        if (r) return ok({ received: true, handled: true, ...r, routedBy: "objectType" });
+      }
+    }
+
+    if (!rpid) {
+      const maybeTaskId = taskIdFrom(payload);
+      if (maybeTaskId) {
+        const r = await tryTask(enterpriseId, maybeTaskId, event);
+        if (r) return ok({ received: true, handled: true, ...r, routedBy: "probe" });
+      }
+    }
+
     if (!rpid) {
       // Not necessarily wrong — this event also fires for revision
       // transitions, which are not PLM's to act on. Recorded with the keys so
@@ -222,7 +345,15 @@ export const POST = handler(async (req: Request) => {
         // is the earlier of the two signals and costs nothing to act on.
         if (known.drawingRefreshPending) {
           const refresh = await refreshReleasedDrawings(String(known._id), { client, trigger: event });
-          return ok({ received: true, handled: true, release: known.number, refresh });
+          // The earlier of the two signals, and therefore the more likely to be
+          // premature — so it schedules the same retry chain.
+          const retry = refresh.stillPending
+            ? scheduleDrawingRefresh(String(known._id), { trigger: event })
+            : null;
+          return ok({
+            received: true, handled: true, release: known.number, refresh,
+            ...(retry ? { retry } : {}),
+          });
         }
 
         return ok({ received: true, handled: true, release: known.number, onshapeState: pkg.state });
@@ -241,6 +372,34 @@ export const POST = handler(async (req: Request) => {
       return ok({ received: true, handled: result.action === "opened", ...result });
     } catch (err: any) {
       const message = String(err?.message ?? err);
+
+      /*
+       * A 404 here means "not a release package", not "something went wrong".
+       *
+       * This event fires for revisions and tasks as well, and the id is tried
+       * as a release package before anything else. Onshape answering "Not
+       * found." is that attempt being ruled out — which is the mechanism
+       * working, not failing. Logged as an error it filled the server log with
+       * "release takeover failed" for every task transition, and put an error
+       * on the enterprise's activity trail for each one.
+       *
+       * So a 404 is reported as what it is, and the event falls through to the
+       * task path below rather than ending here.
+       */
+      const notFound = /\b404\b/.test(message);
+      if (notFound) {
+        console.log(
+          `[PLM] ${rpid} is not a release package (404) — trying it as a task. ` +
+          `event=${event} objectType=${payload.objectType ?? "-"}`
+        );
+        const asTask = await tryTask(enterpriseId, rpid, event);
+        if (asTask) return ok({ received: true, handled: true, ...asTask, routedBy: "fallback" });
+        return ok({
+          received: true, handled: false,
+          reason: "neither a release package nor a task PLM can read",
+        });
+      }
+
       console.error("[PLM] release takeover failed:", message);
       await ActivityLog.create({
         enterpriseId, direction: "onshape->plm", action: "error", trigger: event, ok: false,
@@ -272,10 +431,25 @@ export const POST = handler(async (req: Request) => {
     if (pending.length) {
       const { client } = await clientForEnterprise(enterpriseId);
       for (const rel of pending) {
-        refreshes.push({
-          release: rel.number,
-          ...(await refreshReleasedDrawings(String(rel._id), { client, trigger: event })),
-        });
+        const result = await refreshReleasedDrawings(String(rel._id), { client, trigger: event });
+
+        /*
+         * Onshape fires this event before it has finished applying the
+         * revision, the watermark and the title-block fields, so the attempt
+         * above is the earliest possible moment and often too early. What
+         * used to happen then was nothing: the release stayed pending for
+         * "the next revision event", and a single-item release produces no
+         * next one — so somebody had to press Collect drawings by hand.
+         *
+         * Scheduled rather than awaited. Onshape re-delivers a webhook that
+         * does not answer promptly, so waiting minutes here would earn a
+         * duplicate delivery per retry.
+         */
+        const retry = result.stillPending
+          ? scheduleDrawingRefresh(String(rel._id), { trigger: event })
+          : null;
+
+        refreshes.push({ release: rel.number, ...result, ...(retry ? { retry } : {}) });
       }
     }
 
@@ -289,6 +463,50 @@ export const POST = handler(async (req: Request) => {
 
   /* ===================================================================== */
   /* A designer edited metadata                                            */
+  /* ===================================================================== */
+  /* A comment was written in Onshape                                       */
+  /* ===================================================================== */
+
+  if (event === "onshape.comment.create" || event === "onshape.comment.update") {
+    /*
+     * The comment's own object is what matters, not the comment.
+     *
+     * Onshape's comment events carry the commented object's id, and PLM only
+     * cares when that object is a task it mirrors. Re-reading the task brings
+     * the whole thread — which is also how the merge stays idempotent, since
+     * Onshape returns every comment on every read.
+     */
+    const objectId = String(
+      payload.objectId ?? payload.data?.objectId ?? payload.taskId ?? ""
+    ).trim();
+
+    if (!objectId) {
+      return ok({ received: true, handled: false, reason: "comment-without-object" });
+    }
+
+    const known: any = await Task.findOne({ enterpriseId, onshapeTaskId: objectId }).lean();
+    if (!known) {
+      // A comment on something else entirely — a part, a drawing, a release.
+      // Not PLM's to act on, and not worth a log entry per comment.
+      return ok({ received: true, handled: false, reason: "not-a-task-plm-mirrors" });
+    }
+
+    try {
+      const { client } = await clientForEnterprise(enterpriseId);
+      const live = await client.getTask(objectId);
+      const r = await upsertTask(enterpriseId, live);
+      return ok({ received: true, handled: true, task: objectId, commentsAdded: r.commentsAdded });
+    } catch (err: any) {
+      await ActivityLog.create({
+        enterpriseId, direction: "onshape->plm", action: "error", trigger: event, ok: false,
+        message:
+          `A comment arrived for task ${objectId}, but PLM could not re-read it: ` +
+          `${String(err?.message ?? err).slice(0, 300)}`,
+      });
+      return ok({ received: true, handled: false, reason: "task-read-failed" });
+    }
+  }
+
   /* ===================================================================== */
 
   const partId = String(

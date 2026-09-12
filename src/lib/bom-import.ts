@@ -1,5 +1,7 @@
 import { connectDb } from "@/lib/db";
-import { ActivityLog, BomLink, Part } from "@/lib/models";
+import { inImportOrder, structureFromIndent } from "@/lib/bom-structure";
+import { currentProductFor } from "@/lib/products";
+import { ActivityLog, BomLink, Part, Product } from "@/lib/models";
 import { clientForUser } from "@/lib/onshape/factory";
 import { syncPartFromOnshape, configurationNormalizer } from "@/lib/sync";
 import type { BomLine, BomTable } from "@/lib/onshape/bom";
@@ -36,6 +38,35 @@ export type BomImportResult = {
   warned: number;
   /** Left out deliberately, with a reason. */
   skipped: number;
+  /**
+   * The product everything in this import was filed into, and why.
+   *
+   * Reported because it is a decision the import makes on the user's behalf,
+   * and the wrong answer splits a product structure in a way that is tedious to
+   * unpick — so it should be visible at the moment it happens rather than
+   * discovered later on the BOM page.
+   */
+  product: {
+    id: string | null;
+    name: string;
+    source: "assembly" | "current" | "unassigned";
+  };
+  /**
+   * Parts under this assembly that sit in a different product.
+   *
+   * Not moved — a part may have been filed elsewhere deliberately, and an
+   * import is the wrong event to override that. Named so somebody can decide,
+   * with the BOM page's bulk move as the remedy.
+   */
+  elsewhere: { partId: string; number: string | null; productName: string }[];
+  /**
+   * Structure edges removed because the assembly no longer has them.
+   *
+   * Reported because it is the one outcome of an import that takes something
+   * away, and somebody watching a BOM shrink deserves to be told rather than
+   * left to notice.
+   */
+  removedLinks: number;
   lines: BomImportLine[];
 };
 
@@ -94,7 +125,7 @@ export async function describeAssembly(
  * MO-number write back into Onshape will fail.
  *
  * That distinction matters: being unable to stamp a number onto somebody else's
- * library part is not a reason to refuse to *manufacture* it. The item is
+ * library part is not a reason to refuse to *track* it. The part is
  * created either way and the failed push is recorded against it, which is
  * exactly how the rest of PLM treats a write it could not complete.
  */
@@ -200,38 +231,37 @@ function metadataFromBomRow(
 }
 
 /**
- * Whether the BOM's part-number column looks unmapped rather than genuinely empty.
+ * Whether a row can be brought into PLM, and why not when it cannot.
  *
- * Parts need a part number before they can be ordered, so rows without one are
- * held back. But that check leans on PLM having found the part-number
- * column in the first place, and column names differ between tenants. If not a
- * single row carries a number, an unmapped column is far likelier than an
- * assembly of entirely unnumbered parts — and blocking the whole import on a
- * parsing miss would be a bad way to find out.
+ * A missing part number is NOT a reason. **PLM is the number master**: it
+ * issues the number and writes it back onto the Onshape part, so an unnumbered
+ * part is the normal case on the way in, not a defect to be sent back.
  *
- * So in that case nothing is pre-filtered, and the decision falls to the
- * server-side check, which reads the real part rather than the table.
+ * That check was inherited from MOS, where a part number was a precondition for
+ * raising a manufacturing order against an existing number. It greyed the row
+ * out with "give the part a number in Onshape and import the assembly again" —
+ * advice that asked the user to do by hand the one job PLM exists to do. A
+ * companion heuristic (`partNumberColumnMissing`) existed purely to soften it
+ * when the column looked unmapped, and went with it.
+ *
+ * What genuinely blocks a row is not being able to identify the part in
+ * Onshape: no document, no tab, or no part id. Those are addresses, not data
+ * PLM can supply.
  */
-export function partNumberColumnMissing(table: BomTable): boolean {
-  const rows = table.lines.filter((l) => l.source && !l.isAssembly);
-  return rows.length > 0 && rows.every((l) => !String(l.partNumber ?? "").trim());
-}
-
-/** Whether a row can be ordered, and why not when it cannot. */
-export function assessLine(
-  line: BomLine,
-  columnMissing: boolean
-): { importable: boolean; reason: string | null } {
-  if (!line.source || line.isAssembly) {
+export function assessLine(line: BomLine): { importable: boolean; reason: string | null } {
+  /*
+   * A subassembly is importable, as an assembly.
+   *
+   * It was refused because MOS could only raise a manufacturing order for a
+   * part. PLM tracks assemblies, and refusing them here is what flattened a
+   * multi-level BOM: the subassembly was skipped and its children were
+   * attached to whatever was above it.
+   *
+   * `source` is the test that remains, and it is the right one — a row PLM
+   * cannot address in Onshape is a row it cannot track, whatever it is.
+   */
+  if (!line.source) {
     return { importable: false, reason: line.unresolvable };
-  }
-  if (!columnMissing && !String(line.partNumber ?? "").trim()) {
-    return {
-      importable: false,
-      reason:
-        "No part number. A manufacturing order cannot be raised without one — " +
-        "give the part a number in Onshape and import the assembly again.",
-    };
   }
   return { importable: true, reason: null };
 }
@@ -263,6 +293,15 @@ export async function upsertBomLink(
   // stale identity collapse could, and the cost of the check is nothing.
   if (parentId === childId) return;
 
+  /*
+   * The fields are named, not spread, and that is load-bearing.
+   *
+   * `effectiveFrom` and `effectiveTo` on the edge are PLM's own — a CAD BOM has
+   * no notion of a date — so a re-import must not touch them. Somebody who set
+   * a component to be superseded next quarter would otherwise lose it the next
+   * time the assembly was re-read, and the BOM would quietly go back to showing
+   * the old component for ever.
+   */
   await BomLink.updateOne(
     { enterpriseId, parentId, childId },
     {
@@ -280,12 +319,11 @@ export async function upsertBomLink(
 
 /** Rows that could become PLM parts, in BOM order. */
 export function importableLines(table: BomTable): BomLine[] {
-  const columnMissing = partNumberColumnMissing(table);
-  return table.lines.filter((l) => assessLine(l, columnMissing).importable);
+  return table.lines.filter((l) => assessLine(l).importable);
 }
 
 /**
- * Enrol selected BOM rows as manufacturing items.
+ * Bring selected BOM rows into PLM as parts, under the assembly's structure.
  *
  * The caller sends only the row keys; the quantities and coordinates are taken
  * from a fresh server-side BOM read. That is the whole point of the feature —
@@ -310,9 +348,53 @@ export async function importBomLines(
      * only overwrites when asked to.
      */
     updateQuantities?: boolean;
+    /**
+     * Whether to remove edges the assembly no longer has.
+     *
+     * Applies only to a full import — a partial selection says nothing about
+     * the rows left unticked. Defaults to on: a BOM that silently overstates
+     * what a product contains is worse than one that drops a row somebody
+     * deleted in CAD.
+     */
+    reconcileStructure?: boolean;
   } = {}
 ): Promise<{ assembly: AssemblyInfo; result: BomImportResult }> {
   await connectDb();
+
+  /*
+   * The product every part in this import is filed into.
+   *
+   * **Inherited from the assembly when PLM already has it**, and only otherwise
+   * from the person importing. That ordering is the point: one assembly's parts
+   * belong together, and an import is not a statement about where they should
+   * live — it is a statement about what contains what.
+   *
+   * Without it, adding a subassembly in Onshape months later and re-importing
+   * filed the new parts into whatever product the importer happened to have
+   * selected at the time, splitting one product structure across two. Nobody
+   * chose that; it was simply the only answer the code had.
+   *
+   * Resolved before anything is created, so the assembly and every part under
+   * it get the same answer — including the subassemblies, which are created by
+   * the same walk.
+   */
+  const existingTop: any = await Part.findOne({
+    enterpriseId: session.enterpriseId,
+    documentId: coords.documentId,
+    elementId: coords.elementId,
+    partId: "",
+  })
+    .select("productId productName")
+    .lean();
+
+  const inheritedProductId = existingTop?.productId ? String(existingTop.productId) : null;
+  const filedInto =
+    inheritedProductId ?? (await currentProductFor(session.userId))?.productId ?? null;
+  const productSource: "assembly" | "current" | "unassigned" = inheritedProductId
+    ? "assembly"
+    : filedInto
+      ? "current"
+      : "unassigned";
 
   const client = await clientForUser(session.userId);
   const [assembly, table] = await Promise.all([
@@ -324,7 +406,7 @@ export async function importBomLines(
   const chosen = importableLines(table).filter((l) => wanted.has(l.key)).slice(0, MAX_IMPORT);
 
   /*
-   * Guard against two BOM rows collapsing onto one manufacturing item.
+   * Guard against two BOM rows collapsing onto one PLM part.
    *
    * PLM keys an item by part *without* its configuration when
    * ignoreConfigurations is on, which is the default and is what stops the same
@@ -356,7 +438,7 @@ export async function importBomLines(
    * The assembly is a PLM object in its own right, and it has to exist before
    * its children can point at it.
    *
-   * This is the substantive difference from a manufacturing-order import, which
+   * This is the substantive difference from a quantity-only import, which
    * only ever wanted the leaves. An assembly here is a released, revisioned
    * thing with a structure beneath it — so it is synced first, as kind
    * "assembly", and every edge below is anchored to it.
@@ -380,6 +462,8 @@ export async function importBomLines(
         create: true,
         kind: "assembly",
         createdBy: { userId: session.userId, email: session.email },
+        // The assembly belongs in the same product as the parts under it.
+        productId: filedInto,
       }
     );
     parentPlmId = parentSync.partId || null;
@@ -396,10 +480,46 @@ export async function importBomLines(
   let warned = 0;
   let skipped = 0;
 
+  /*
+   * The hierarchy, and the bookkeeping the walk needs.
+   *
+   * `structure` is null for a flat table — a caller that asked Onshape for an
+   * unindented BOM gets the old behaviour, every row under the assembly that
+   * was read.
+   *
+   * `plmIdByRow` maps a row's position to the PLM part it became, which is how
+   * a child finds its parent. `childrenSeen` records what each parent was
+   * observed to contain, for the reconciliation afterwards.
+   */
+  const structure = table.indented ? structureFromIndent(table) : null;
+  const plmIdByRow = new Map<number, string>();
+  const childrenSeen = new Map<string, Set<string>>();
+
+  /*
+   * Parents before children, which is a precondition rather than a nicety: a
+   * child's edge cannot be written until its parent exists in PLM. For a flat
+   * table the selection order stands.
+   */
+  /*
+   * The row's index travels with it, rather than being looked up by key.
+   *
+   * A key is not unique in an indented table — the same part in two
+   * subassemblies is deliberately two rows — so a key→index map silently
+   * resolved to whichever row came last. When that row happened to be a
+   * childless copy of a subassembly, every child of the real one was left
+   * unlinked and the import quietly flattened again. Carrying the index
+   * removes the lookup, and with it the assumption.
+   */
+  const ordered: { line: BomLine; index: number | null }[] = structure
+    ? inImportOrder(structure)
+        .filter((r) => chosen.some((c) => c.key === r.line.key))
+        .map((r) => ({ line: r.line, index: r.index }))
+    : chosen.map((line) => ({ line, index: null }));
+
   // Sequential on purpose. Onshape rate-limits per account, and a burst of
   // parallel metadata writes is the fastest way to get the whole import
   // throttled halfway through.
-  for (const line of chosen) {
+  for (const { line, index: rowIndex } of ordered) {
     const base: Omit<BomImportLine, "outcome" | "message" | "number" | "partId" | "warning"> = {
       key: line.key,
       name: line.name,
@@ -436,6 +556,16 @@ export async function importBomLines(
         createdBy: { userId: session.userId, email: session.email },
         writeBackBlocked: writable ? undefined : (reason ?? undefined),
         metadataFallback: metadataFromBomRow(line, partCoords, assembly),
+        /*
+         * A subassembly row is an assembly, and stating it matters: without a
+         * kind, sync infers one from the element, and an assembly row has no
+         * partId for the part-versus-assembly inference to work from.
+         */
+        kind: line.isAssembly ? "assembly" : "part",
+        // Every part in one import lands in one product — resolved once above
+        // rather than per line, so a product created mid-import cannot split
+        // one assembly across two.
+        productId: filedInto,
       });
 
       if (sync.action === "skipped-wrong-element") {
@@ -473,16 +603,47 @@ export async function importBomLines(
        * what an embedded field got wrong. The edge is also what answers
        * "where is this used", read from the other end.
        */
-      if (parentPlmId && sync.partId) {
+      /*
+       * The row's OWN parent, not always the assembly that was read.
+       *
+       * Every imported row used to be linked to the top-level assembly, which
+       * flattened a multi-level BOM: a bolt inside a subassembly became a
+       * direct child of the whole product, and the structured BOM view showed
+       * one level however deep the CAD went.
+       *
+       * `plmIdByRow` is filled as the walk proceeds, and the walk is in import
+       * order — parents before children — so a child's parent is always
+       * already known by the time its edge is written.
+       */
+      const structuredParent =
+        rowIndex != null && structure
+          ? structure.rows[rowIndex].parentIndex
+          : null;
+      const linkParentId =
+        structuredParent != null ? plmIdByRow.get(structuredParent) ?? null : parentPlmId;
+
+      if (linkParentId && sync.partId) {
+        // A part cannot contain itself; the guard in upsertBomLink refuses it,
+        // but reaching it would mean the reconstruction produced a cycle.
+        if (String(linkParentId) === String(sync.partId)) {
+          lines.push({
+            ...base,
+            outcome: "skipped" as const, number: sync.number, partId: sync.partId,
+            message: "Not linked: the structure made this part its own parent.",
+            warning: null,
+          });
+          continue;
+        }
+
         const wasLinked = await BomLink.exists({
           enterpriseId: session.enterpriseId,
-          parentId: parentPlmId,
+          parentId: linkParentId,
           childId: sync.partId,
         });
         if (!wasLinked || opts.updateQuantities) {
           await upsertBomLink(
             session.enterpriseId,
-            parentPlmId,
+            linkParentId,
             sync.partId,
             line.quantity,
             { documentId: assembly.documentId, elementId: assembly.elementId }
@@ -490,7 +651,14 @@ export async function importBomLines(
             // column yet, and BomLink.findNumber stays empty until it does.
           );
         }
+
+        /* What each parent was seen to contain, for the reconciliation below. */
+        const seenFor = childrenSeen.get(String(linkParentId)) ?? new Set<string>();
+        seenFor.add(String(sync.partId));
+        childrenSeen.set(String(linkParentId), seenFor);
       }
+
+      if (rowIndex != null && sync.partId) plmIdByRow.set(rowIndex, sync.partId);
 
       // Explain the block in the part's own terms. Onshape's rejection says
       // nothing about *why* PLM tried, and this is what someone reads on the
@@ -545,7 +713,87 @@ export async function importBomLines(
         : ""),
   });
 
-  return { assembly, result: { created, existing, failed, warned, skipped, lines } };
+  /*
+   * Remove edges the assembly no longer has.
+   *
+   * The other half of keeping a BOM current: an import that only ever adds
+   * leaves a part in PLM's structure long after it was deleted from the CAD,
+   * and the BOM then overstates what the product is built from — quietly, and
+   * in the direction that gets parts ordered.
+   *
+   * The rule is the one already stated for quantities: an assembly's own bill
+   * of materials is the only source of truth for what IT contains. So each
+   * parent observed in this read has its edges reconciled against what was
+   * observed under it, and no other parent is touched.
+   *
+   * Only for a full import. A partial selection says nothing about the rows
+   * left unticked, and treating "not selected" as "no longer there" would
+   * delete structure on the strength of a checkbox.
+   */
+  let removedLinks = 0;
+  const wholeAssembly = chosen.length === importableLines(table).length;
+
+  if (opts.reconcileStructure !== false && wholeAssembly && structure) {
+    /* The assembly itself counts as a parent, even if nothing was left under it. */
+    if (parentPlmId && !childrenSeen.has(String(parentPlmId))) {
+      childrenSeen.set(String(parentPlmId), new Set());
+    }
+
+    for (const [parentId, seenChildren] of childrenSeen) {
+      const stale: any[] = await BomLink.find({
+        enterpriseId: session.enterpriseId,
+        parentId,
+        childId: { $nin: [...seenChildren] },
+      })
+        .select("_id")
+        .lean();
+
+      for (const link of stale) {
+        await BomLink.deleteOne({ _id: link._id });
+        removedLinks++;
+      }
+    }
+  }
+
+  /*
+   * Parts under this assembly filed under something else.
+   *
+   * Read after the import rather than tracked during it, because it has to
+   * include parts that were already there — the ones a previous import filed
+   * into a different product are exactly the case worth surfacing.
+   */
+  const elsewhere: BomImportResult["elsewhere"] = [];
+  if (filedInto) {
+    const touched = [...plmIdByRow.values()];
+    if (parentPlmId) touched.push(parentPlmId);
+    const strays: any[] = await Part.find({
+      enterpriseId: session.enterpriseId,
+      _id: { $in: touched },
+      productId: { $ne: filedInto },
+    })
+      .select("number productName")
+      .lean();
+    for (const x of strays) {
+      elsewhere.push({
+        partId: String(x._id),
+        number: x.number ?? null,
+        productName: x.productName || "no product",
+      });
+    }
+  }
+
+  const productName =
+    existingTop?.productName ||
+    (filedInto ? (await Product.findById(filedInto).select("name").lean() as any)?.name ?? "" : "");
+
+  return {
+    assembly,
+    result: {
+      created, existing, failed, warned, skipped, removedLinks, lines,
+      product: { id: filedInto, name: productName || "Unassigned", source: productSource },
+      elsewhere,
+    },
+  };
 }
 
 export type TrackedRow = {

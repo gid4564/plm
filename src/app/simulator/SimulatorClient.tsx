@@ -3,7 +3,16 @@
 import { useCallback, useEffect, useState } from "react";
 import { Alert, KV, Spinner, StatusBadge, relTime } from "@/components/ui";
 
-type Def = { propertyId: string; name: string; valueType: string; enumValues: string[]; builtIn: boolean };
+type Def = {
+  propertyId: string;
+  name: string;
+  valueType: string;
+  /** Options whose stored value is the label itself. */
+  enumValues: string[];
+  /** Options with a separate code, as Onshape reports State. */
+  enumOptions?: { value: unknown; label: string }[];
+  builtIn: boolean;
+};
 type Plm = { id: string; number: string; revision: string; iteration?: number; lifecycleState: string } | null;
 type Part = {
   id: string; documentId: string; documentName: string; workspaceId: string;
@@ -350,14 +359,30 @@ export function SimulatorClient() {
                           {d.name}
                           {d.builtIn && <span className="badge" style={{ marginLeft: 6 }}>built-in</span>}
                         </label>
-                        {d.valueType === "ENUM" && d.enumValues.length ? (
+                        {d.valueType === "ENUM" && (d.enumOptions?.length || d.enumValues.length) ? (
                           <select
                             className="select"
                             value={value}
                             onChange={(e) => setDraft((p) => ({ ...p, [d.propertyId]: e.target.value }))}
                           >
                             <option value="">—</option>
-                            {d.enumValues.map((v, i) => <option key={v} value={String(i)}>{v}</option>)}
+                            {/*
+                              The option's own code is what gets stored.
+
+                              This used to store the option's *index* — the
+                              position in the list — which is the same
+                              positional assumption the label resolver refuses
+                              to make, and it made the simulator disagree with
+                              itself: pick "Released" and the part stored 2 only
+                              by coincidence of the list order, so a reordered
+                              or extended list silently changed every part's
+                              state.
+                            */}
+                            {d.enumOptions?.length
+                              ? d.enumOptions.map((o) => (
+                                  <option key={String(o.value)} value={String(o.value)}>{o.label}</option>
+                                ))
+                              : d.enumValues.map((v) => <option key={v} value={v}>{v}</option>)}
                           </select>
                         ) : (
                           <input

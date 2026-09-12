@@ -121,6 +121,8 @@ in one command rather than inferred from behaviour.
 | `deploy.sh` | The installer above — rsyncs into place, restarts pm2, verifies the build |
 | `check-onshape-oauth.mjs` | Diagnoses a failing token exchange — see Troubleshooting |
 | `find-duplicates.mjs` | Admin tool, below |
+| `dump-release-package.mjs` | Prints what Onshape returns for a release package — see Troubleshooting |
+| `reset-test-data.mjs` | Clears test data, keeps the setup — below |
 
 The manual is read from disk at request time rather than compiled in, so it can
 be corrected on the server without a rebuild.
@@ -138,6 +140,72 @@ forwards to `127.0.0.1:3005`, with the app served from `/home/gid/apps/plm`.
 
 The app name and port are both distinct from MOS, so the two can run on the same
 box.
+
+### Released sheets that need collecting by hand
+
+Onshape announces new revisions **before** it has finished applying them to the
+drawings — the watermark, the revision and the title-block fields are part of
+completing the release. PLM's first attempt at collecting the released sheets
+rides on that announcement, so it is often too early.
+
+PLM then keeps trying in the background, on a schedule that defaults to about
+18 minutes across five attempts, stopping as soon as the sheets are in. If a
+tenant still needs the Collect drawings button pressed, give it longer in
+`.env.local`:
+
+```
+PLM_DRAWING_REFRESH_RETRIES_MS=30000,120000,300000,900000,1800000
+```
+
+The release page reads this schedule and says how long it will keep trying, so
+the message stays true to the setting. When the attempts run out the release
+stays marked pending — the button still works — and the activity log records
+that the automatic attempts stopped, rather than leaving it looking imminent.
+
+The retries live in the app process, so a `pm2 restart` mid-wait loses the
+pending chain. `drawingRefreshPending` is stored on the release, so nothing is
+lost permanently: the next revision event, or the button, picks it up.
+
+### Clearing test data
+
+Testing against a real Onshape enterprise means syncing the same parts
+repeatedly, and a demo reads better from an empty system. Dropping the database
+would work but takes the tedious parts with it — the login, the Onshape
+connection and its tokens, the OAuth client Onshape's extensions are registered
+against, and the attribute metamodel. This removes the **work** and leaves the
+**setup**.
+
+```bash
+cd /home/gid/apps/plm
+node reset-test-data.mjs                  # dry run — counts what would go
+node reset-test-data.mjs --apply          # parts, drawings, releases, activity
+node reset-test-data.mjs --apply --all    # also numbering, simulator, tokens
+```
+
+| Group | Flag | What goes |
+|---|---|---|
+| The work | *(always)* | parts and assemblies, iterations, BOM links, drawings, drawing PDFs, releases, thumbnails, echo fingerprints, activity log |
+| Numbering | `--numbering` | The sequences, so `PLM-000001` comes back |
+| Simulator | `--simulator` | The mock Onshape tenant's parts, drawings and packages |
+| OAuth sessions | `--oauth-sessions` | Issued auth codes and access tokens — Onshape and any external app must authorise again |
+| Onshape schema cache | `--forget-onshape-schema` | The cached property definitions, so the next sync rediscovers them |
+| Attribute metamodel | `--attributes` | **Not in `--all`** — it is configuration, and reseeding it is a separate step |
+| OAuth clients | `--oauth-clients` | **Not in `--all`** — this is what Onshape's extensions authenticate against, so clearing it means re-registering them in Onshape |
+
+`--enterprise <id|name|companyId>` scopes it to one enterprise. **Users and
+enterprises are never deleted**, only their release-ignored counters reset —
+losing either mid-test costs the login and the Onshape connection.
+
+Before deleting anything it checks the database is PLM's. MOS runs on the same
+box with its own database, whose core collections are `manufacturingitems` and
+`synclogs` and which has no `parts` or `releases`; pointed there, this refuses
+and exits non-zero rather than finding out afterwards.
+
+**It cannot reset Onshape.** A part already released there keeps its revision
+and released state, and the next sync brings that back — as it should. Clearing
+PLM is not an undo for a release. And with `--numbering`, PLM will reissue
+numbers that Onshape parts may still carry: fine on a scratch tenant, confusing
+on a shared one.
 
 ### Finding duplicate parts
 

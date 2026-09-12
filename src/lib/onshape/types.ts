@@ -18,7 +18,14 @@ export type PropertyDef = {
   propertyId: string;
   name: string;
   valueType: string;      // STRING | ENUM | BOOL | INT | DOUBLE | DATE ...
+  /** Options whose stored value is the label itself. */
   enumValues?: string[];
+  /**
+   * Options as Onshape returns them for a coded enum: the value stored on the
+   * part is the `value`, and the `label` is what a person reads. State is the
+   * one that matters — Onshape stores it as an integer.
+   */
+  enumOptions?: { value: unknown; label: string }[];
   builtIn?: boolean;
 };
 
@@ -174,6 +181,32 @@ export type WorkflowAction = {
    * vocabulary.
    */
   type: string;
+  /**
+   * Onshape's own conditions on who may perform this action.
+   *
+   * Needed because Onshape *lists* an action it will not perform for the
+   * calling account, then accepts the POST and ignores it — no error, no state
+   * change. `isApproverAction` with neither override means a designated
+   * approver and nobody else, including the account that raised the package.
+   * A live enterprise's RELEASE carries exactly that, while its REJECT carries
+   * `isCreatorOverride: true` — which is why one would work and the other
+   * silently would not.
+   */
+  isApproverAction?: boolean;
+  allowIfNoApprovers?: boolean;
+  alwaysAllow?: boolean;
+  isAdminOverride?: boolean;
+  isCreatorOverride?: boolean;
+  /**
+   * Package property ids this transition will not proceed without.
+   *
+   * Onshape's release-management guide is explicit that these have to be set in
+   * the request body's `properties` array — the SUBMIT transition on the stock
+   * workflow requires the Approvers property, for instance. An action whose
+   * requirements are unmet is a transition that cannot succeed, and saying so
+   * beats waiting for a state change that will never come.
+   */
+  requiredProperties?: string[];
 };
 
 /** One item inside a release package. */
@@ -209,6 +242,37 @@ export type ReleasePackage = {
   /** Workflow properties, keyed by property id. */
   properties: Record<string, unknown>;
   availableActions: WorkflowAction[];
+  /**
+   * Who Onshape will let act on this package.
+   *
+   * Onshape lists an action it will not perform for the calling account and
+   * then accepts the POST and ignores it, so without this there is no way to
+   * tell "not permitted" from "still working on it".
+   */
+  permissions: {
+    /** Onshape user ids designated as approvers on this package's state. */
+    approverIds: string[];
+    /** Whether the calling account raised the package. */
+    isCreator: boolean;
+    /** The account that raised it, when reported. */
+    createdById: string;
+  };
+  /**
+   * Onshape's account of the transition it is processing, if any.
+   *
+   * A live package carries this, and its presence is why a transition cannot be
+   * assumed to have finished by the time the POST returns: it reports a
+   * `summaryState`, the `lastStage` reached, and an `errorMessage` when a stage
+   * fails. PLM used to ignore it entirely and treat the POST's own response as
+   * the outcome.
+   */
+  transitionStatus: {
+    summaryState: string;
+    lastStage: string;
+    errorMessage: string;
+    sequenceNumber: number | null;
+    lastUpdatedAt: string;
+  }[];
   /** Onshape's own marker that a PLM system is handling this package. */
   syncedWithPLM: boolean;
   /** The complete response, for diagnosing a field this type does not cover. */
@@ -223,11 +287,158 @@ export type ReleaseWorkflow = {
 
 /** What PLM supplies when it raises a release package itself. */
 export type CreateReleasePackageInput = {
-  /** PLM's own release number, so the package can be traced back here. */
-  changeOrderId: string;
-  items: { documentId: string; elementId: string; partId?: string; revisionId?: string }[];
-  /** Workflow properties, keyed by property id. */
-  properties?: Record<string, unknown>;
+  items: {
+    documentId: string;
+    elementId: string;
+    partId?: string;
+    revisionId?: string;
+    versionId?: string;
+    workspaceId?: string;
+    /** Item property values, keyed by property id. */
+    properties?: Record<string, unknown>;
+  }[];
+};
+
+/*
+ * `changeOrderId` deliberately absent.
+ *
+ * It used to be here, described as "PLM's own release number, so the package
+ * can be traced back here" — but it is a **read-only** field: present on the
+ * release package response and not on the create request. PLM was sending it
+ * and Onshape was discarding it, so nothing was ever traceable that way.
+ *
+ * The link between a package and a PLM release is the package id, stored on
+ * the release as `onshapeReleasePackageId` and indexed for the reverse lookup.
+ * That has always been what actually did the work.
+ */
+
+/* -------------------------------------------------------------------------- */
+/* Tasks                                                                       */
+/* -------------------------------------------------------------------------- */
+
+/** One comment as Onshape reports it. */
+export type OnshapeComment = {
+  id: string;
+  message: string;
+  authorEmail: string;
+  authorName: string;
+  createdAt: string;
+  /** Onshape's numeric object-type code, echoed so a reply can be addressed. */
+  objectType: number | null;
+  objectId: string;
+  /*
+   * The document a comment lives in.
+   *
+   * A comment is not a free-standing object: `createComment` is documented as
+   * "Update a document with a new comment", and `getComments` is queried by
+   * `did`. Kept so a new comment can be anchored the same way Onshape anchored
+   * the ones it already has, rather than by guessing which ids matter.
+   */
+  documentId: string;
+  workspaceId: string;
+  versionId: string;
+  elementId: string;
+};
+
+/** Where a comment is anchored, for posting a new one alongside. */
+export type CommentContext = {
+  objectType?: number | null;
+  documentId?: string;
+  workspaceId?: string;
+  versionId?: string;
+  elementId?: string;
+};
+
+/** An Onshape task, as PLM cares about it. */
+/**
+ * One row of `POST /tasks/find` — a search projection, deliberately not an
+ * `OnshapeTask`.
+ *
+ * Only the fields PLM decides with are lifted. `taskType` is the one that
+ * matters most: on a live tenant 143 of 174 rows were `RELEASE`, which are
+ * release packages PLM already mirrors through its release module. Mixing
+ * those into a task board buries the 31 real tasks.
+ */
+export type FoundTask = {
+  id: string;
+  name: string;
+  /** `GENERAL`, `TODO` or `RELEASE`. */
+  taskType: string;
+  /** A display string here, not a workflow state — hence not `state`. */
+  displayState: string;
+  documentId: string;
+};
+
+export type OnshapeTask = {
+  id: string;
+  name: string;
+  description: string;
+  /** Display state where Onshape gives one. */
+  state: string;
+  /** Onshape's numeric status. An undocumented enum — kept, not interpreted. */
+  status: number | null;
+  taskType: string;
+  documentId: string;
+  documentName: string;
+  elementId: string;
+  workspaceId: string | null;
+  versionId: string | null;
+  /** The workflowable object the task concerns, when it concerns one. */
+  objectId: string;
+  creatorEmail: string;
+  creatorName: string;
+  assignees: { onshapeUserId: string; email: string; name: string; acted: boolean }[];
+  resolvedAt: string | null;
+  resolvedByEmail: string;
+  items: {
+    label: string;
+    documentId: string;
+    elementId: string;
+    partId: string;
+    elementType: string;
+  }[];
+  comments: OnshapeComment[];
+  /** Transitions the calling account is offered, from the workflow snapshot. */
+  availableActions: { id: string; label: string; type: string }[];
+  /**
+   * The task's metadata properties — where the interesting fields actually are.
+   *
+   * A task has no top-level due date or priority: they are properties, with
+   * ids, types and their own editability, alongside Name, Description,
+   * Category and the two states. They are written back through `updateTask`'s
+   * `propertyValues`, and they are the difference between a task list and
+   * something anybody would manage work in.
+   */
+  properties: {
+    propertyId: string;
+    name: string;
+    value: unknown;
+    valueType: string;
+    editable: boolean;
+    required: boolean;
+    enumValues: { value: string; label: string }[];
+  }[];
+  /**
+   * Whether a comment can be posted to Onshape for this task.
+   *
+   * Onshape's comments are document-scoped — `GET /comments` is queried by
+   * `did` — and a GENERAL task belongs to no document. For such a task the
+   * comment API answers 404 for a read and 400 for a write, whatever
+   * objectType is offered. So PLM keeps the thread locally and says so rather
+   * than failing on every comment.
+   */
+  commentable: boolean;
+  /**
+   * Whether Onshape will delete this task outright.
+   *
+   * Onshape reports it per task, and it is not the same as being able to
+   * *discard* one: a live task came back `deletable: false` with
+   * `canBeDiscarded: true`, meaning the way to be rid of it is the workflow's
+   * DISCARD transition rather than the delete endpoint. Both are offered, and
+   * which applies is Onshape's call rather than PLM's.
+   */
+  deletable: boolean;
+  raw: Record<string, unknown>;
 };
 
 /** A drawing tab, addressed for a PDF export. */
@@ -332,6 +543,104 @@ export interface OnshapeClient {
 
   /** Raise a release package from PLM, rather than reacting to one. */
   createReleasePackage(wfid: string, input: CreateReleasePackageInput): Promise<ReleasePackage>;
+
+  /* ----------------------------------- Tasks ------------------------------ */
+
+  /**
+   * Tasks visible to the calling account.
+   *
+   * Onshape's own endpoint is `getActionItems` — "tasks assigned to the userId
+   * specified" — and its documentation is explicit that **only a company admin
+   * can see tasks they neither created nor were assigned**. So what PLM can
+   * mirror depends on what its service account is; that is a setup fact, not a
+   * bug, and it is surfaced rather than worked around.
+   */
+  listTasks(opts?: {
+    userId?: string;
+    documentId?: string;
+    status?: number;
+    limit?: number;
+    offset?: number;
+  }): Promise<OnshapeTask[]>;
+
+  /**
+   * Every task in the enterprise, not only the caller's own.
+   *
+   * `POST /tasks/find` — `findTasks`, marked `x-BTVisibility: INTERNAL` and so
+   * absent from the anonymous OpenAPI definition. It exists because
+   * `getActionItems` answers a narrower question than a task board asks: on
+   * the tenant this was built against it returned 8 tasks where `find`
+   * returned 174.
+   *
+   * Three things about it are worth stating, because none are guessable:
+   *
+   *  - Paging is in the BODY (`from`, `size`), not the query. The `next` URL
+   *    Onshape returns carries `offset`/`limit`, and both are IGNORED — a
+   *    `limit=5` came back with 40 rows, and `offset=5` came back with the
+   *    same rows as `offset=0`. Following that URL silently re-reads page one
+   *    for ever.
+   *  - The rows are a SEARCH PROJECTION, not `BTTaskInfo`: `taskItems` in
+   *    place of `items`, `state` as a display string, and no `workflowInfo` at
+   *    all. So the ids are what this is for; the task itself is then read with
+   *    `getTask`, which keeps one parser rather than two.
+   *  - `BTTaskSearchRequestParams.query` is self-referential in the definition
+   *    (`{empty, field, querySupplier: Query}`) and cannot be constructed from
+   *    it. It is left unsent: an empty body returns everything, which is what
+   *    PLM wants anyway.
+   *
+   * Callers get raw rows rather than tasks, since a projection promoted to a
+   * task would claim a state and a set of transitions it does not carry.
+   */
+  findTasks(opts?: { from?: number; size?: number }): Promise<FoundTask[]>;
+
+  getTask(taskId: string): Promise<OnshapeTask>;
+
+  /**
+   * Perform a workflow transition on a task.
+   *
+   * The transition goes in the PATH — `POST /tasks/{tid}/{transition}` — and
+   * the value is an action's `action` field from the task's own workflow
+   * snapshot, not its `type`. The two differ, and that difference cost a day
+   * on release packages.
+   */
+  transitionTask(taskId: string, transition: string): Promise<OnshapeTask>;
+
+  /** Change a task's name or description. */
+  updateTask(
+    taskId: string,
+    patch: {
+      name?: string;
+      description?: string;
+      /** Property id -> value, for the metadata properties a task carries. */
+      propertyValues?: Record<string, unknown>;
+    }
+  ): Promise<OnshapeTask>;
+
+  /**
+   * Comment on a task.
+   *
+   * Comments are not part of the task update body — they have their own
+   * endpoint, and a comment is addressed by the object it is on plus that
+   * object's numeric type code. The code is undocumented, so it is read off an
+   * existing comment where there is one rather than assumed.
+   */
+  commentOnTask(
+    taskId: string,
+    message: string,
+    opts?: CommentContext
+  ): Promise<OnshapeComment>;
+
+  /**
+   * Delete a task in Onshape.
+   *
+   * `DELETE /tasks/{tid}` — `deleteTask`, tid in the path and no body. Absent
+   * from the anonymous OpenAPI definition but present in the authenticated
+   * one, which is why it reads as unpublished.
+   *
+   * Irreversible, and separate from removing PLM's copy: one is Onshape's
+   * record, the other is a row in a mirror.
+   */
+  deleteTask(taskId: string): Promise<void>;
 
   /**
    * Lightweight state check on any workflow object.

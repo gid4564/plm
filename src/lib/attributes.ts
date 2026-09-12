@@ -208,6 +208,28 @@ export function validateAttributes(
     if (isEmpty(values[def.key])) errors[def.key] ??= `${def.label} is required.`;
   }
 
+  /*
+   * An effectivity window has to be a window.
+   *
+   * Checked against the merged result rather than the submitted values,
+   * because either end can be edited on its own: moving "effective from" past
+   * an existing "effective to" is the way this goes wrong in practice, and the
+   * submitted patch alone cannot see it. A part whose window is inverted would
+   * silently vanish from every BOM, at every date, with nothing to explain it.
+   */
+  const from = values.effectiveFrom;
+  const to = values.effectiveTo;
+  if (from instanceof Date && to instanceof Date && to.getTime() < from.getTime()) {
+    const msg =
+      `Effective to (${to.toISOString().slice(0, 10)}) is before effective from ` +
+      `(${from.toISOString().slice(0, 10)}). A part with an inverted window is effective ` +
+      `on no date at all, so it would disappear from every BOM.`;
+    // Reported against whichever end was being changed, so the error lands on
+    // the field the person is looking at.
+    if ("effectiveTo" in proposed) errors.effectiveTo ??= msg;
+    else errors.effectiveFrom ??= msg;
+  }
+
   return { ok: Object.keys(errors).length === 0, values, errors };
 }
 
@@ -220,9 +242,23 @@ export function validateAttributes(
  * showing these to a person.
  */
 export function missingForRelease(defs: AttrDef[], values: Record<string, unknown>): string[] {
-  return defs
-    .filter((d) => d.requiredForRelease && isEmpty(values[d.key]))
-    .map((d) => d.label);
+  return missingForReleaseDefs(defs, values).map((d) => d.label);
+}
+
+/**
+ * The same gaps, as keys.
+ *
+ * A caller that is going to *render the fields* needs to match them against
+ * definitions, and labels are the one part of a definition an admin can change
+ * — so matching on them would break the moment somebody renamed one. Kept
+ * beside the label version so the two can never disagree about what is missing.
+ */
+export function missingForReleaseKeys(defs: AttrDef[], values: Record<string, unknown>): string[] {
+  return missingForReleaseDefs(defs, values).map((d) => d.key);
+}
+
+function missingForReleaseDefs(defs: AttrDef[], values: Record<string, unknown>): AttrDef[] {
+  return defs.filter((d) => d.requiredForRelease && isEmpty(values[d.key]));
 }
 
 const isEmpty = (v: unknown) =>
@@ -402,8 +438,12 @@ const SEED: AttrDef[] = [
   },
   {
     objectType: "PART", key: "mass", label: "Mass", unit: "kg", group: "Physical", order: 50,
-    dataType: "NUMBER", owner: "plm", syncDirection: "none",
-    description: "Read from Onshape's mass properties on demand, not mirrored.",
+    dataType: "NUMBER", owner: "onshape", syncDirection: "from-onshape",
+    description:
+      "Mirrored from Onshape's mass properties when they are read on the part page. " +
+      "Onshape is the authority — it comes from the geometry and the assigned material, " +
+      "so it is not typed here. Empty until the first read, and left empty when Onshape " +
+      "reports no mass, which usually means no material is assigned.",
   },
   {
     objectType: "PART", key: "classification", label: "Make or buy", group: "Sourcing", order: 60,
@@ -439,6 +479,18 @@ const SEED: AttrDef[] = [
   {
     objectType: "PART", key: "effectiveFrom", label: "Effective from", group: "Governance", order: 100,
     dataType: "DATE", owner: "plm", syncDirection: "none",
+    description:
+      "The date this part becomes valid to build. Empty means it always has been. " +
+      "Used by the BOM's date filter.",
+  },
+  {
+    objectType: "PART", key: "effectiveTo", label: "Effective to", group: "Governance", order: 101,
+    dataType: "DATE", owner: "plm", syncDirection: "none",
+    description:
+      "The last date this part is valid to build. Empty means it still is — which is the " +
+      "normal case, so leave it empty rather than guessing a far-future date. Setting it " +
+      "is how a part is superseded without being deleted: the BOM as of a later date stops " +
+      "showing it, while the BOM as of last year still does.",
   },
   {
     objectType: "PART", key: "exportControlled", label: "Export controlled", group: "Governance", order: 110,
