@@ -12,6 +12,7 @@ import {
 import { handler, ok, fail } from "@/lib/api";
 import { onshapeElementUrl } from "@/lib/onshape/oauth";
 import { tasksForPart } from "@/lib/tasks";
+import { geometryForPart } from "@/lib/geometry";
 
 type Ctx = { params: Promise<{ id: string }> };
 
@@ -34,7 +35,8 @@ export const GET = handler(async (_req: Request, ctx: Ctx) => {
   const attributes = plainAttributes(part.attributes);
   const state = String(part.lifecycleState);
 
-  const [children, parents, iterations, drawings, logs, ent, release, tasks] = await Promise.all([
+  const [children, parents, iterations, drawings, logs, ent, release, tasks, geometry] =
+    await Promise.all([
     /*
      * Self-referencing edges are excluded rather than shown.
      *
@@ -58,6 +60,8 @@ export const GET = handler(async (_req: Request, ctx: Ctx) => {
      * query and a part page does not wait on a network call to render.
      */
     tasksForPart(s.enterpriseId, id),
+    /* What 3D has been captured, metadata only — never the mesh itself. */
+    geometryForPart(s.enterpriseId, id),
   ]);
 
   // Resolve the other end of each structure edge in two queries, not one per row.
@@ -181,6 +185,7 @@ export const GET = handler(async (_req: Request, ctx: Ctx) => {
       : null,
     tasks,
     openTaskCount: tasks.filter((t) => t.open).length,
+    geometry,
     onshapeUrl: onshapeElementUrl(part, (ent as any)?.onshapeDomain),
     logs: logs.map((l: any) => ({
       id: String(l._id),

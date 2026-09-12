@@ -544,6 +544,16 @@ export interface OnshapeClient {
   /** Raise a release package from PLM, rather than reacting to one. */
   createReleasePackage(wfid: string, input: CreateReleasePackageInput): Promise<ReleasePackage>;
 
+  /**
+   * Export a part or assembly as glTF (GLB), for the record kept at release.
+   *
+   * A part is synchronous — one GET returns the bytes. An assembly is a
+   * translation job, and comes back through the same poll-and-collect path as
+   * any other translation. Callers do not need to know which; they differ only
+   * in how long they take.
+   */
+  exportGltf(coords: PartCoords, opts?: { isAssembly?: boolean }): Promise<FileExport>;
+
   /* ----------------------------------- Tasks ------------------------------ */
 
   /**

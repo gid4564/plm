@@ -53,6 +53,18 @@ const EnterpriseSchema = new Schema(
      */
     releaseTakeoverEnabled: { type: Boolean, default: false },
 
+    /**
+     * Capture a glTF of every part when a release completes.
+     *
+     * Off by default. It is an extra Onshape call per released item and it
+     * stores a binary per revision, so it is a deliberate choice rather than
+     * something that starts happening to a tenant on upgrade.
+     *
+     * Taken at the version the release produced, so what is stored is the
+     * geometry as released — the point of keeping it at all.
+     */
+    releaseGltfEnabled: { type: Boolean, default: false },
+
     /** Release packages ignored while the switch was off, so the cost of enabling is visible. */
     releasesIgnored: { type: Number, default: 0 },
     lastReleaseIgnoredAt: { type: Date, default: null },
@@ -844,6 +856,54 @@ const DrawingFileSchema = new Schema(
 DrawingFileSchema.index({ enterpriseId: 1, drawingId: 1, version: -1 }, { unique: true });
 
 /* -------------------------------------------------------------------------- */
+/* PartGeometry — the 3D of a part, as it was released.                        */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * A glTF capture of one part at one revision.
+ *
+ * One row per (part, revision), which is what makes it a record rather than a
+ * cache: revision B's geometry does not overwrite revision A's, so what was
+ * approved stays recoverable after the model moves on. That is the same rule
+ * DrawingFile follows for sheets.
+ *
+ * Stored as GLB — the binary glTF container — rather than the JSON form,
+ * because GLB is one self-contained file. The JSON form can reference external
+ * buffers, and half a model in a database is worse than none.
+ */
+const PartGeometrySchema = new Schema(
+  {
+    enterpriseId: { type: Schema.Types.ObjectId, ref: "Enterprise", required: true, index: true },
+    partId: { type: Schema.Types.ObjectId, ref: "Part", required: true, index: true },
+
+    /** The revision this geometry IS. Empty only for an unreleased capture. */
+    revision: { type: String, default: "" },
+
+    contentType: { type: String, default: "model/gltf-binary" },
+    data: { type: Buffer, default: null },
+    size: { type: Number, default: 0 },
+
+    /** The Onshape version it was taken from — the one the release produced. */
+    onshapeVersionId: { type: String, default: null },
+    releaseId: { type: Schema.Types.ObjectId, ref: "Release", default: null, index: true },
+    /** Set for an assembly, which exports through a translation job. */
+    translationId: { type: String, default: null },
+
+    capturedAt: { type: Date, default: null },
+    /**
+     * Why there are no bytes, when there are none.
+     *
+     * Kept rather than discarded: "Onshape refused this" and "nobody has asked
+     * for it yet" look identical on a part page otherwise, and the first is
+     * something somebody should act on.
+     */
+    failureReason: { type: String, default: null },
+  },
+  { timestamps: true }
+);
+PartGeometrySchema.index({ enterpriseId: 1, partId: 1, revision: 1 }, { unique: true });
+
+/* -------------------------------------------------------------------------- */
 /* Release — the PLM release process, and its link to the Onshape package.     */
 /* -------------------------------------------------------------------------- */
 
@@ -1417,6 +1477,8 @@ export const PartIteration = models.PartIteration || model("PartIteration", Part
 export const BomLink = models.BomLink || model("BomLink", BomLinkSchema);
 export const Drawing = models.Drawing || model("Drawing", DrawingSchema);
 export const DrawingFile = models.DrawingFile || model("DrawingFile", DrawingFileSchema);
+export const PartGeometry =
+  models.PartGeometry || model("PartGeometry", PartGeometrySchema);
 export const Release = models.Release || model("Release", ReleaseSchema);
 export const OAuthClient = models.OAuthClient || model("OAuthClient", OAuthClientSchema);
 export const OAuthAuthCode = models.OAuthAuthCode || model("OAuthAuthCode", OAuthAuthCodeSchema);

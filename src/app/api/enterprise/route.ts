@@ -30,6 +30,7 @@ export const GET = handler(async () => {
     onshapeCompanyId: ent.onshapeCompanyId,
     onshapeDomain: ent.onshapeDomain ?? "",
     releaseTakeoverEnabled: Boolean(ent.releaseTakeoverEnabled),
+    releaseGltfEnabled: Boolean(ent.releaseGltfEnabled),
     releasesIgnored: ent.releasesIgnored ?? 0,
     lastReleaseIgnoredAt: ent.lastReleaseIgnoredAt ?? null,
     ignoreConfigurations: ent.ignoreConfigurations !== false,
@@ -89,6 +90,7 @@ const Body = z.object({
    * somebody's explicit decision.
    */
   releaseTakeoverEnabled: z.boolean().optional(),
+  releaseGltfEnabled: z.boolean().optional(),
   ignoreConfigurations: z.boolean().optional(),
   /** Which connected Onshape account PLM acts as for background writes and transitions. */
   integrationUserId: z.string().min(1).optional(),
@@ -129,6 +131,7 @@ export const PATCH = handler(async (req: Request) => {
     });
   }
 
+  if (b.releaseGltfEnabled !== undefined) ent.releaseGltfEnabled = b.releaseGltfEnabled;
   if (b.ignoreConfigurations !== undefined) ent.ignoreConfigurations = b.ignoreConfigurations;
   if (b.onshapeDomain !== undefined) ent.onshapeDomain = b.onshapeDomain.trim();
 
@@ -151,6 +154,7 @@ export const PATCH = handler(async (req: Request) => {
   await ent.save();
   return ok({
     releaseTakeoverEnabled: ent.releaseTakeoverEnabled,
+    releaseGltfEnabled: ent.releaseGltfEnabled,
     ignoreConfigurations: ent.ignoreConfigurations,
     onshapeDomain: ent.onshapeDomain,
     integrationUserId: ent.integrationUserId ? String(ent.integrationUserId) : null,

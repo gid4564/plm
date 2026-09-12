@@ -20,6 +20,11 @@ type Data = {
   logs: any[];
   tasks: PartTask[];
   openTaskCount: number;
+  geometry: {
+    id: string; revision: string; size: number; contentType: string;
+    onshapeVersionId: string | null; releaseId: string | null;
+    capturedAt: string | null; failureReason: string | null;
+  }[];
 };
 
 export function PartDetail({ id, isAdmin }: { id: string; isAdmin: boolean }) {
@@ -366,6 +371,51 @@ export function PartDetail({ id, isAdmin }: { id: string; isAdmin: boolean }) {
               </Link>
             )}
           </div>
+
+          {/* --------------------------------- 3D ------------------------------
+            * Only when there is something to say. A permanently empty "3D
+            * model" card on every part would suggest the feature is broken
+            * rather than switched off.
+            */}
+          {(data.geometry ?? []).length > 0 && (
+            <div className="card">
+              <h2 style={{ margin: "0 0 10px", fontSize: 15 }}>3D model</h2>
+              <p style={{ margin: "0 0 8px", fontSize: 11.5, color: "var(--text-faint)" }}>
+                Captured from the version each release produced — the geometry as released,
+                kept per revision.
+              </p>
+              {(data.geometry ?? []).map((g) => (
+                <div
+                  key={g.id}
+                  style={{
+                    display: "flex", gap: 8, alignItems: "center", padding: "5px 0",
+                    borderTop: "1px solid var(--border)",
+                  }}
+                >
+                  <span className="badge">{g.revision || "no revision"}</span>
+                  {g.failureReason ? (
+                    <span style={{ fontSize: 12, color: "var(--danger)", flex: 1 }}>
+                      {g.failureReason}
+                    </span>
+                  ) : (
+                    <>
+                      <span style={{ fontSize: 12.5, color: "var(--text-muted)", flex: 1 }}>
+                        glTF · {(g.size / 1024).toFixed(0)} KB
+                        {g.capturedAt ? ` · ${relTime(g.capturedAt)}` : ""}
+                      </span>
+                      <a
+                        className="btn btn-sm"
+                        href={`/api/parts/${id}/geometry?revision=${encodeURIComponent(g.revision)}`}
+                        download
+                      >
+                        Download
+                      </a>
+                    </>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
 
           {/* --------------------------------- Tasks ---------------------------
             * Above Drawings on purpose: a drawing is a record of what the part

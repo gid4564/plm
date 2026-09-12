@@ -6,6 +6,7 @@ import { clientForEnterprise, clientForUser } from "@/lib/onshape/factory";
 import { listDefinitions, missingForRelease } from "@/lib/attributes";
 import { nextNumber } from "@/lib/numbering";
 import { plainAttributes, syncPartFromOnshape } from "@/lib/sync";
+import { captureReleasedGeometry, geometryCaptureEnabled } from "@/lib/geometry";
 import { captureDrawingPdf, coordsForStage, upsertDrawingFromPackageItem } from "@/lib/drawings";
 import type { OnshapeClient, ReleasePackage, WorkflowAction } from "@/lib/onshape/types";
 
@@ -875,6 +876,12 @@ export async function decideRelease(
        * it does not compute them. Two systems generating revision identifiers
        * independently is how they come to disagree.
        */
+      /*
+       * Read once, not per item: it is one setting for the enterprise and a
+       * lookup inside the loop would be a query per released part.
+       */
+      const captureGeometry = await geometryCaptureEnabled(enterpriseId);
+
       for (const item of release.items) {
         const match = after.items.find((i) => i.id === item.onshapeItemId);
         if (!match) continue;
@@ -903,6 +910,39 @@ export async function decideRelease(
             createdByEmail: decision.email,
             releaseId: release._id,
           }).catch(() => {});
+
+          /*
+           * The geometry as released, if the enterprise asked for it.
+           *
+           * Here rather than with the drawings, because unlike a drawing sheet
+           * the model needs nothing applied to it — the version Onshape just
+           * produced already IS the released geometry, so there is nothing to
+           * wait for.
+           *
+           * Never allowed to affect the release. captureReleasedGeometry does
+           * not throw, and the flag is read once outside the loop.
+           */
+          if (captureGeometry) {
+            await captureReleasedGeometry(
+              client,
+              enterpriseId,
+              String(part._id),
+              {
+                documentId: part.documentId,
+                elementId: part.elementId,
+                partId: part.partId || "",
+                configuration: part.configuration || "default",
+                /* Pinned to the released version, never the live workspace. */
+                workspaceId: null,
+                versionId: match.versionId || part.versionId || null,
+              },
+              {
+                revision: part.revision || "",
+                releaseId: String(release._id),
+                isAssembly: part.kind === "assembly",
+              }
+            );
+          }
 
           revisions.push({ itemLabel: part.number || part.name, revision: part.revision });
         } else if (item.kind === "drawing" && item.drawingId) {

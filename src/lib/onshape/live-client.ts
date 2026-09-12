@@ -695,9 +695,21 @@ export class LiveOnshapeClient implements OnshapeClient {
   }
 
   /** Fetch bytes rather than JSON. Onshape redirects downloads, so follow them. */
-  private async reqBinary(path: string, isRetry = false): Promise<{ data: Buffer; contentType: string }> {
+  private async reqBinary(
+    path: string,
+    isRetry = false,
+    /**
+     * What to ask Onshape for.
+     *
+     * Defaults to anything. It matters for glTF: that endpoint offers
+     * `model/gltf+json` and `model/gltf-binary` at the SAME quality value, so
+     * `*​/*` leaves the choice to Onshape and the answer is not guaranteed to
+     * be the single-file form PLM stores.
+     */
+    accept = "*/*"
+  ): Promise<{ data: Buffer; contentType: string }> {
     const res = await fetch(`${this.apiUrl}${path}`, {
-      headers: { Authorization: `Bearer ${this.accessToken}`, Accept: "*/*" },
+      headers: { Authorization: `Bearer ${this.accessToken}`, Accept: accept },
       cache: "no-store",
     });
 
@@ -707,7 +719,7 @@ export class LiveOnshapeClient implements OnshapeClient {
       const fresh = await this.onUnauthorized();
       if (fresh) {
         this.accessToken = fresh;
-        return this.reqBinary(path, true);
+        return this.reqBinary(path, true, accept);
       }
     }
 
@@ -718,6 +730,73 @@ export class LiveOnshapeClient implements OnshapeClient {
 
     const buf = Buffer.from(await res.arrayBuffer());
     return { data: buf, contentType: res.headers.get("content-type") || "application/octet-stream" };
+  }
+
+  /**
+   * Export a part or assembly as glTF, for the record kept against a release.
+   *
+   * Two different endpoints, because Onshape treats them differently:
+   *
+   *   A PART is synchronous — `GET .../partid/{pid}/gltf` returns the bytes.
+   *     One call, no job, no polling.
+   *   An ASSEMBLY is a job — `POST .../export/gltf` returns the same
+   *     `BTTranslationRequestInfo` a translation does, so it goes through the
+   *     existing poll-and-collect path rather than a second implementation.
+   *
+   * GLB is requested explicitly. The endpoint offers `model/gltf+json` and
+   * `model/gltf-binary` at equal quality values, so without an Accept header
+   * the choice is Onshape's — and the JSON form may reference external
+   * buffers, which would leave PLM holding part of a model.
+   */
+  async exportGltf(
+    c: PartCoords,
+    opts: { isAssembly?: boolean } = {}
+  ): Promise<FileExport> {
+    const started = Date.now();
+    /*
+     * A released item is pinned to a version, so this normally resolves to
+     * `v/{versionId}` — which is the whole point: the geometry stored is the
+     * geometry as released, not whatever the workspace holds now.
+     */
+    const wv = c.workspaceId ? `w/${c.workspaceId}` : `v/${c.versionId}`;
+
+    if (!opts.isAssembly) {
+      if (!c.partId) {
+        throw new Error(
+          "Onshape's part glTF export needs a part id, and this record has none. " +
+          "An assembly is exported through the assembly endpoint instead."
+        );
+      }
+      const base = process.env.ONSHAPE_PARTS_PATH || "/parts";
+      const q = new URLSearchParams();
+      if (c.configuration && c.configuration !== "default") q.set("configuration", c.configuration);
+      const path =
+        `${base}/d/${c.documentId}/${wv}/e/${c.elementId}` +
+        `/partid/${encodeURIComponent(c.partId)}/gltf${q.toString() ? `?${q}` : ""}`;
+
+      const { data, contentType } = await this.reqBinary(path, false, "model/gltf-binary");
+      return { data, contentType, via: "direct", elapsedMs: Date.now() - started };
+    }
+
+    /*
+     * An assembly. Note the coordinate segment: this endpoint takes {wv} —
+     * workspace or version only, no microversion — which is what a released
+     * item always has anyway.
+     */
+    const base = process.env.ONSHAPE_ASSEMBLY_TRANSLATIONS_PATH || "/assemblies";
+    const submitted = await this.req<Record<string, any>>(
+      `${base}/d/${c.documentId}/${wv}/e/${c.elementId}/export/gltf`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          /* Hidden instances are not part of the released product. */
+          excludeHiddenEntities: true,
+          storeInDocument: false,
+          notifyUser: false,
+        }),
+      }
+    );
+    return this.awaitTranslation(submitted, c.documentId, "glTF export", started);
   }
 
   /**

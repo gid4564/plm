@@ -598,6 +598,54 @@ export class MockOnshapeClient implements OnshapeClient {
     await part.save();
   }
 
+  /**
+   * A glTF export, simulated.
+   *
+   * Returns a real, minimal GLB: a valid 12-byte header plus a JSON chunk. It
+   * matters that it is well-formed rather than random bytes — the size guard,
+   * the content type and anything that later tries to render it all see the
+   * shape they would see from a live tenant.
+   */
+  async exportGltf(
+    c: PartCoords,
+    opts: { isAssembly?: boolean } = {}
+  ): Promise<FileExport> {
+    await connectDb();
+    const started = Date.now();
+
+    if (!opts.isAssembly && !c.partId) {
+      throw new Error(
+        "Onshape's part glTF export needs a part id, and this record has none. " +
+        "An assembly is exported through the assembly endpoint instead."
+      );
+    }
+
+    const json = Buffer.from(JSON.stringify({
+      asset: { version: "2.0", generator: "PLM Onshape simulator" },
+      scenes: [{ nodes: [] }], scene: 0, nodes: [],
+      extras: { documentId: c.documentId, elementId: c.elementId, partId: c.partId ?? "" },
+    }), "utf8");
+    /* A GLB chunk is padded to a 4-byte boundary with spaces. */
+    const pad = (4 - (json.length % 4)) % 4;
+    const chunk = Buffer.concat([json, Buffer.alloc(pad, 0x20)]);
+
+    const header = Buffer.alloc(12);
+    header.write("glTF", 0, "ascii");
+    header.writeUInt32LE(2, 4);
+    header.writeUInt32LE(12 + 8 + chunk.length, 8);
+
+    const chunkHeader = Buffer.alloc(8);
+    chunkHeader.writeUInt32LE(chunk.length, 0);
+    chunkHeader.write("JSON", 4, "ascii");
+
+    return {
+      data: Buffer.concat([header, chunkHeader, chunk]),
+      contentType: "model/gltf-binary",
+      via: opts.isAssembly ? "translation" : "direct",
+      elapsedMs: Date.now() - started,
+    };
+  }
+
   /* ======================================================================== */
   /* Tasks                                                                     */
   /* ======================================================================== */

@@ -326,6 +326,34 @@ export function SettingsClient(p: Props) {
               />
               Take over releases raised in Onshape
             </label>
+
+            <label style={{ display: "flex", gap: 7, alignItems: "flex-start", fontSize: 13 }}>
+              <input
+                type="checkbox"
+                style={{ marginTop: 3 }}
+                checked={Boolean(ent?.releaseGltfEnabled)}
+                onChange={(e) =>
+                  run("gltf", async () => {
+                    await post("/api/enterprise", { releaseGltfEnabled: e.target.checked }, "PATCH");
+                    setNotice(
+                      e.target.checked
+                        ? "PLM will capture the 3D model of each part as it is released."
+                        : "3D capture switched off. Models already captured are kept."
+                    );
+                    await load();
+                  })
+                }
+              />
+              <span>
+                Capture the 3D model (glTF) when a part is released
+                <span style={{ display: "block", color: "var(--text-faint)", fontSize: 11.5, marginTop: 2 }}>
+                  Taken from the version the release produces, so it is the geometry
+                  as released, and kept per revision. Costs one Onshape call per
+                  released item; an assembly goes through a translation job and takes
+                  longer than a part.
+                </span>
+              </span>
+            </label>
           </div>
         )}
 
