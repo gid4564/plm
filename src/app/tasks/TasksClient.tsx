@@ -92,13 +92,10 @@ export function TasksClient() {
    *
    * Remembered per browser: somebody who widens the window to find an old task
    * has said what they want the board to be, and resetting it on every reload
-   * would make them say it again each time.
+   * would make them say it again each time. Null until the effect below has
+   * read it — localStorage does not exist on the server.
    */
-  const [closedWithin, setClosedWithin] = useState<string>(() => {
-    if (typeof window === "undefined") return "60";
-    try { return window.localStorage.getItem("plm.tasks.closedWithin") || "60"; }
-    catch { return "60"; }
-  });
+  const [closedWithin, setClosedWithin] = useState<string | null>(null);
   /*
    * The open task, which a link from a part can set.
    *
@@ -106,13 +103,10 @@ export function TasksClient() {
    * at a board of fifty cards and being left to find the one you clicked would
    * make that link useless. Read once on mount rather than tracked: the board
    * owns this afterwards, and re-reading it would fight the user closing the
-   * panel.
+   * panel. Set by the effect below, never during render: the server has no
+   * window.location, so reading it here renders a panel the server did not.
    */
-  const [open, setOpen] = useState<string | null>(
-    () => (typeof window === "undefined"
-      ? null
-      : new URLSearchParams(window.location.search).get("task")) || null
-  );
+  const [open, setOpen] = useState<string | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [removing, setRemoving] = useState(false);
   /*
@@ -128,6 +122,11 @@ export function TasksClient() {
   const [moving, setMoving] = useState<Record<string, string>>({});
 
   const load = useCallback(async () => {
+    /*
+     * Wait for the stored window to be read, so the board is fetched once with
+     * the right filter rather than twice — first with the default, then again.
+     */
+    if (closedWithin == null) return;
     setLoading(true);
     try {
       const p = new URLSearchParams();
@@ -149,6 +148,22 @@ export function TasksClient() {
       setLoading(false);
     }
   }, [mine, q, closedWithin]);
+
+  /*
+   * Browser-only state, read AFTER mount so the first client render matches
+   * the HTML the server sent. Both of these were read during render, which is
+   * a hydration mismatch — reported in production only as the unreadable
+   * "Minified React error #418", and what made this page error out.
+   */
+  useEffect(() => {
+    let stored: string | null = null;
+    try { stored = window.localStorage.getItem("plm.tasks.closedWithin"); }
+    catch { /* a private window is not a reason to fail */ }
+    setClosedWithin(stored || "60");
+
+    const deepLink = new URLSearchParams(window.location.search).get("task");
+    if (deepLink) setOpen(deepLink);
+  }, []);
 
   useEffect(() => {
     const t = setTimeout(load, q ? 250 : 0);
@@ -457,7 +472,7 @@ export function TasksClient() {
           <label className="label">Closed tasks</label>
           <select
             className="input"
-            value={closedWithin}
+            value={closedWithin ?? "60"}
             onChange={(e) => {
               setClosedWithin(e.target.value);
               try { window.localStorage.setItem("plm.tasks.closedWithin", e.target.value); }

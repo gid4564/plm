@@ -331,7 +331,15 @@ export function PanelClient({
                 Tasks
                 <TaskCountBadge open={tasks.filter((t) => t.open).length} total={tasks.length} />
               </div>
-              <PartTasks tasks={tasks} />
+              {/*
+                * Inline, because this is Onshape's own right panel.
+                *
+                * A link to the task board navigates this iframe away from the
+                * part the user is looking at, into a page built for a full
+                * window with no way back. Expanding in place keeps the CAD on
+                * screen; acting on the task opens PLM in a new tab.
+                */}
+              <PartTasks tasks={tasks} mode="inline" />
             </div>
           )}
 

@@ -115,8 +115,31 @@ export function TaskCountBadge({
  * are history and matter far less than the two things somebody is waiting on,
  * but hiding them entirely would lose the record of what was already asked.
  */
-export function PartTasks({ tasks }: { tasks: PartTask[] }) {
+export function PartTasks({
+  tasks,
+  mode = "link",
+  plmBaseUrl = "",
+}: {
+  tasks: PartTask[];
+  /**
+   * What a task's name does when clicked.
+   *
+   * "link" navigates to the task board, which is right on a full PLM page.
+   * "inline" expands the task where it is — for the Onshape right panel,
+   * which is a narrow third-party iframe: navigating it to the whole board
+   * replaces the panel with a page that does not fit and cannot be come back
+   * from, and the board's own deep link is a poor fit for a 300px column.
+   */
+  mode?: "link" | "inline";
+  /**
+   * Origin for the "open in PLM" link. Empty is right in the panel: it is
+   * served from PLM's own origin, so a relative href with target="_blank"
+   * already opens a new top-level tab rather than filling the iframe.
+   */
+  plmBaseUrl?: string;
+}) {
   const [showClosed, setShowClosed] = React.useState(false);
+  const [expanded, setExpanded] = React.useState<string | null>(null);
 
   const open = tasks.filter((t) => t.open);
   const closed = tasks.filter((t) => !t.open);
@@ -161,13 +184,29 @@ export function PartTasks({ tasks }: { tasks: PartTask[] }) {
         >
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-              <a
-                href={`/tasks?task=${encodeURIComponent(t.id)}`}
-                style={{ fontWeight: 600, fontSize: 13 }}
-                title="Open on the task board"
-              >
-                {t.name}
-              </a>
+              {mode === "link" ? (
+                <a
+                  href={`/tasks?task=${encodeURIComponent(t.id)}`}
+                  style={{ fontWeight: 600, fontSize: 13 }}
+                  title="Open on the task board"
+                >
+                  {t.name}
+                </a>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => setExpanded((cur) => (cur === t.id ? null : t.id))}
+                  aria-expanded={expanded === t.id}
+                  title={expanded === t.id ? "Hide the details" : "Show the details"}
+                  style={{
+                    background: "none", border: "none", padding: 0, cursor: "pointer",
+                    font: "inherit", fontWeight: 600, fontSize: 13, textAlign: "left",
+                    color: "var(--accent)",
+                  }}
+                >
+                  {expanded === t.id ? "▾ " : "▸ "}{t.name}
+                </button>
+              )}
               <span
                 className="badge"
                 style={{
@@ -210,6 +249,10 @@ export function PartTasks({ tasks }: { tasks: PartTask[] }) {
               {t.assignees.length > 0 && <span>{t.assignees.join(", ")}</span>}
               {t.updatedAt && <span>updated {relTime(t.updatedAt)}</span>}
             </div>
+
+            {mode === "inline" && expanded === t.id && (
+              <TaskDetail taskId={t.id} plmBaseUrl={plmBaseUrl} />
+            )}
           </div>
         </div>
       ))}
@@ -226,6 +269,100 @@ export function PartTasks({ tasks }: { tasks: PartTask[] }) {
             : `Show ${closed.length} closed task${closed.length === 1 ? "" : "s"}`}
         </button>
       )}
+    </div>
+  );
+}
+
+/**
+ * One task's detail, fetched on demand and shown in place.
+ *
+ * Read-only on purpose. This renders inside Onshape's right panel, where the
+ * useful thing is knowing what has been asked for without losing the part
+ * that is on screen — acting on a task is the task board's job, and a
+ * transition control in a 300px column beside a CAD model invites the wrong
+ * click. The link out therefore opens a NEW TAB: a normal link would replace
+ * the panel with a page that has no way back to it.
+ */
+function TaskDetail({ taskId, plmBaseUrl }: { taskId: string; plmBaseUrl: string }) {
+  const [data, setData] = React.useState<any>(null);
+  const [error, setError] = React.useState<string | null>(null);
+
+  React.useEffect(() => {
+    let cancelled = false;
+    setData(null);
+    setError(null);
+    fetch(`/api/tasks/${encodeURIComponent(taskId)}`)
+      .then(async (r) => {
+        const j = await r.json();
+        if (!r.ok) throw new Error(j.error || "Could not read the task");
+        if (!cancelled) setData(j.task ?? j);
+      })
+      .catch((e) => { if (!cancelled) setError(String(e?.message ?? e)); });
+    return () => { cancelled = true; };
+  }, [taskId]);
+
+  const box: React.CSSProperties = {
+    marginTop: 8, paddingTop: 8, borderTop: "1px solid var(--border)",
+    display: "flex", flexDirection: "column", gap: 6, fontSize: 12,
+  };
+
+  if (error) {
+    return (
+      <div style={{ ...box, color: "var(--danger)" }}>
+        {error}
+      </div>
+    );
+  }
+  if (!data) {
+    return <div style={{ ...box, color: "var(--text-faint)" }}>Loading…</div>;
+  }
+
+  const comments: any[] = Array.isArray(data.comments) ? data.comments : [];
+
+  return (
+    <div style={box}>
+      {data.description && (
+        <p style={{ margin: 0, color: "var(--text-muted)", lineHeight: 1.5 }}>
+          {data.description}
+        </p>
+      )}
+
+      {data.creatorName || data.creatorEmail ? (
+        <div style={{ color: "var(--text-faint)" }}>
+          Raised by {data.creatorName || data.creatorEmail}
+        </div>
+      ) : null}
+
+      {comments.length > 0 && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          <div style={{ color: "var(--text-faint)" }}>
+            {comments.length} comment{comments.length === 1 ? "" : "s"}
+          </div>
+          {/* The last two only: this is a preview, not the thread. */}
+          {comments.slice(-2).map((c: any, i: number) => (
+            <div
+              key={c.id ?? i}
+              style={{
+                borderLeft: "2px solid var(--border)", paddingLeft: 6,
+                color: "var(--text-muted)",
+              }}
+            >
+              <span style={{ fontWeight: 600 }}>{c.authorName || c.authorEmail || "Someone"}</span>
+              {": "}
+              {String(c.message ?? "").slice(0, 160)}
+            </div>
+          ))}
+        </div>
+      )}
+
+      <a
+        href={`${plmBaseUrl}/tasks?task=${encodeURIComponent(taskId)}`}
+        target="_blank"
+        rel="noreferrer"
+        style={{ fontSize: 12 }}
+      >
+        Open in PLM to act on it ↗
+      </a>
     </div>
   );
 }

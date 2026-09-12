@@ -13,7 +13,7 @@
     "db:status": "./scripts/db.sh status",
     "db:logs": "./scripts/db.sh logs",
     "test:release": "npx --yes tsx scripts/test-release-flow.ts",
-    "test": "npm run test:bom && npm run test:enum && npm run test:enumcodes && npm run test:coords && npm run test:export && npm run test:mass && npm run test:numbering && npm run test:pagination && npm run test:binary && npm run test:extreq && npm run test:elemtype && npm run test:tokenretry && npm run test:gateway && npm run test:asmurls && npm run test:rppkg && npm run test:mockasm && npm run test:products && npm run test:bomstruct && npm run test:structimport && npm run test:productbom && npm run test:bulkattrs && npm run test:refresh && npm run test:tasks && npm run test:release && npm run test:rerelease",
+    "test": "npm run test:bom && npm run test:enum && npm run test:enumcodes && npm run test:coords && npm run test:export && npm run test:mass && npm run test:numbering && npm run test:pagination && npm run test:binary && npm run test:extreq && npm run test:elemtype && npm run test:tokenretry && npm run test:gateway && npm run test:asmurls && npm run test:rppkg && npm run test:mockasm && npm run test:products && npm run test:bomstruct && npm run test:structimport && npm run test:productbom && npm run test:bulkattrs && npm run test:refresh && npm run test:tasks && npm run test:release && npm run test:rerelease && npm run test:hydration",
     "test:bom": "npx --yes tsx scripts/test-bom-parser.ts",
     "test:enum": "npx --yes tsx scripts/test-enum-labels.ts",
     "test:coords": "npx --yes tsx scripts/test-sync-coords.ts",
@@ -37,7 +37,8 @@
     "test:bomstruct": "npx --yes tsx scripts/test-bom-structure.ts",
     "test:structimport": "npx --yes tsx scripts/test-structured-import.ts",
     "test:tasks": "npx --yes tsx scripts/test-tasks.ts",
-    "test:gateway": "npx --yes tsx scripts/test-gateway-errors.ts"
+    "test:gateway": "npx --yes tsx scripts/test-gateway-errors.ts",
+    "test:hydration": "npx --yes tsx scripts/test-hydration-safety.ts"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
