@@ -3,6 +3,7 @@ import { connectDb } from "@/lib/db";
 import { ActivityLog, Enterprise, User } from "@/lib/models";
 import { requireSession } from "@/lib/auth/session";
 import { clientForUser } from "@/lib/onshape/factory";
+import { clearEnterpriseWorkData, countEnterpriseWorkData } from "@/lib/reset";
 import { handler, ok, fail } from "@/lib/api";
 
 export const GET = handler(async () => {
@@ -174,9 +175,40 @@ export const POST = handler(async (req: Request) => {
   const s = await requireSession();
   if (s.role !== "admin") return fail("Only an admin can change enterprise settings", 403);
 
-  const { action } = (await req.json().catch(() => ({}))) as { action?: string };
+  const body = (await req.json().catch(() => ({}))) as { action?: string; apply?: boolean };
+  const { action } = body;
+
+  /*
+   * Two calls, not one: without `apply` this only counts what a clean slate
+   * would remove, so the confirmation dialog can warn with real numbers
+   * instead of a generic "are you sure?" — and so a stray call from a script
+   * or a retried request can never delete anything by accident.
+   */
+  if (action === "clear-work-data") {
+    if (!body.apply) {
+      const counts = await countEnterpriseWorkData(s.enterpriseId);
+      return ok({ counts, total: counts.reduce((n, c) => n + c.count, 0), applied: false });
+    }
+
+    const { counts, total } = await clearEnterpriseWorkData(s.enterpriseId);
+
+    // Written after the clear, deliberately: ActivityLog is itself one of the
+    // collections just emptied, so this becomes the first entry in the fresh
+    // log rather than being wiped along with everything else.
+    await ActivityLog.create({
+      enterpriseId: s.enterpriseId, direction: "plm", action: "deleted",
+      trigger: "user-edit", ok: true,
+      message:
+        `${s.email} cleared ${total} item(s) (parts, releases, drawings, tasks and related ` +
+        `records) to start over from a clean slate. Settings and the attribute mapping ` +
+        `were not touched.`,
+    });
+
+    return ok({ counts, total, applied: true });
+  }
+
   if (action !== "discover-workflow") {
-    return fail(`Unknown action "${action}". Use "discover-workflow".`, 422);
+    return fail(`Unknown action "${action}". Use "discover-workflow" or "clear-work-data".`, 422);
   }
 
   await connectDb();

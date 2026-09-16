@@ -4,6 +4,7 @@ import { BomLink, Part, Product } from "@/lib/models";
 import { plainAttributes } from "@/lib/sync";
 import { listDefinitions, missingForRelease } from "@/lib/attributes";
 import { taskCountsForParts } from "@/lib/tasks";
+import { starReasonsForParts } from "@/lib/star-release";
 
 /**
  * A product's bill of materials, structured and flattened.
@@ -36,6 +37,8 @@ export type BomNode = {
   kind: "part" | "assembly";
   lifecycleState: string;
   revision: string;
+  starCount: number;
+  plmOnly: boolean;
   iteration: number;
   productName: string;
   findNumber: string;
@@ -75,6 +78,8 @@ export type BomNode = {
    */
   openTaskCount: number;
   taskCount: number;
+  /** This part's star releases, newest first, for hovering its "*" — see RevChip. */
+  starReasons: string[];
   /**
    * Set when this node is shown as a root only because nothing reachable
    * contained it — see `unreachable` on the result.
@@ -217,7 +222,7 @@ export async function buildProductBom(
    * after the walk for exactly that reason.
    */
   const own: any[] = await Part.find({ enterpriseId, productId })
-    .select("number name kind lifecycleState revision iteration attributes productName")
+    .select("number name kind lifecycleState revision starCount plmOnly iteration attributes productName")
     .lean();
 
   if (!product) {
@@ -265,7 +270,7 @@ export async function buildProductBom(
         enterpriseId,
         _id: { $in: [...referenced].map((x) => new Types.ObjectId(x)) },
       })
-        .select("number name kind lifecycleState revision iteration attributes productName")
+        .select("number name kind lifecycleState revision starCount plmOnly iteration attributes productName")
         .lean()
     : [];
 
@@ -345,6 +350,8 @@ export async function buildProductBom(
       kind: partRow.kind === "assembly" ? "assembly" : "part",
       lifecycleState: partRow.lifecycleState ?? "",
       revision: partRow.revision ?? "",
+      starCount: partRow.starCount ?? 0,
+      plmOnly: Boolean(partRow.plmOnly),
       iteration: partRow.iteration ?? 1,
       productName: partRow.productName ?? "",
       findNumber,
@@ -365,6 +372,7 @@ export async function buildProductBom(
       /* Filled in by the pass that walks the finished tree. */
       openTaskCount: 0,
       taskCount: 0,
+      starReasons: [],
     };
 
     /*
@@ -526,6 +534,9 @@ export async function buildProductBom(
    * the same count, from one read.
    */
   const taskCounts = await taskCountsForParts(enterpriseId, [...flat.keys()]);
+  // Same one-query-for-the-whole-BOM discipline, for hovering a starred
+  // revision's "*" in the tree.
+  const starReasons = await starReasonsForParts(enterpriseId, [...flat.keys()]);
 
   /* Mark the nodes whose part appears more than once, and carry their tasks. */
   const markShared = (nodes: BomNode[]) => {
@@ -534,6 +545,7 @@ export async function buildProductBom(
       const c = taskCounts.get(n.partId);
       n.openTaskCount = c?.open ?? 0;
       n.taskCount = c?.total ?? 0;
+      n.starReasons = starReasons.get(n.partId) ?? [];
       markShared(n.children);
     }
   };
@@ -546,6 +558,7 @@ export async function buildProductBom(
     const c = taskCounts.get(r.partId);
     r.openTaskCount = c?.open ?? 0;
     r.taskCount = c?.total ?? 0;
+    r.starReasons = starReasons.get(r.partId) ?? [];
   }
 
   return {

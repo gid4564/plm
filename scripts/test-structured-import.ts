@@ -34,6 +34,7 @@ import { importBomLines, importableLines } from "../src/lib/bom-import";
 import { structureFromIndent } from "../src/lib/bom-structure";
 import { buildProductBom } from "../src/lib/product-bom";
 import { resolveProduct } from "../src/lib/products";
+import { syncPartFromOnshape } from "../src/lib/sync";
 
 let passed = 0;
 let failed = 0;
@@ -281,6 +282,75 @@ async function main() {
       String(fourth.result.removedLinks));
     check("and the edge count is unchanged",
       (await BomLink.countDocuments({ enterpriseId: ent._id })) === before);
+  }
+
+  console.log(
+    "\nA part already in PLM is still linked as a child when it is not selected"
+  );
+  {
+    /*
+     * The scenario this whole section exists for: a part someone already
+     * brought into PLM some other way — the panel, an earlier import of a
+     * DIFFERENT assembly, anything — appearing in THIS assembly's bill of
+     * materials. The panel's own default selects only what is new (see
+     * AssemblyPanelClient's "New" filter), so a normal import never ticks
+     * this row at all. It still has to end up as a child here, or the BOM
+     * view is missing every part that predates the import that would
+     * otherwise have to re-select it.
+     */
+    await MockOnshapePart.create({
+      companyId: COMPANY, documentId: DOC, documentName: "Gearbox Assembly",
+      elementId: "e1a2b3c4d5e6f70819207777", elementName: "Preexisting Tab",
+      elementType: "PARTSTUDIO", partId: "PREX", configuration: "default",
+      workspaceId: "w1a2b3c4d5e6f70819202199",
+      properties: { "57f3fb8efa3416c06701d60d": "Pre-existing Bracket" },
+    });
+
+    // Tracked in PLM before this assembly is ever imported — and, crucially,
+    // with no structure edge to anything yet.
+    const preexisting = await syncPartFromOnshape(
+      eid,
+      {
+        documentId: DOC, elementId: "e1a2b3c4d5e6f70819207777", partId: "PREX",
+        configuration: "default", workspaceId: "w1a2b3c4d5e6f70819202199", versionId: null,
+      },
+      { trigger: "test", create: true, kind: "part" }
+    );
+    check("it is tracked ahead of time", !!preexisting.partId);
+    check("with no structure edge yet",
+      !(await BomLink.exists({ enterpriseId: ent._id, childId: preexisting.partId })));
+
+    const t5 = await client.getAssemblyBom(coords, { multiLevel: true });
+    const row = t5.lines.find((l) => l.source?.partId === "PREX");
+    check("it is a row in the assembly's BOM", !!row, "PREX not found in the BOM");
+
+    const allButPreexisting = importableLines(t5)
+      .filter((l) => l.key !== row!.key)
+      .map((l) => l.key);
+    const before = await Part.findById(preexisting.partId).select("iteration").lean();
+
+    const fifth = await importBomLines(session, coords, allButPreexisting, { multiLevel: true });
+
+    check("nothing new was created for it",
+      !fifth.result.lines.some((l) => l.partId === preexisting.partId && l.outcome === "created"),
+      JSON.stringify(fifth.result.lines.filter((l) => l.outcome === "created").map((l) => l.partId)));
+    check("it is reported as linked",
+      fifth.result.lines.some((l) =>
+        l.partId === preexisting.partId && l.outcome === "existing" &&
+        /linked into this assembly's structure/.test(l.message)),
+      JSON.stringify(fifth.result.lines));
+
+    // Nested one level deep in the mock's BOM (indentLevel 1) rather than a
+    // direct child of the top assembly — its true parent is the subassembly,
+    // and the edge has to land there, not just anywhere.
+    const linked = await BomLink.exists({
+      enterpriseId: ent._id, parentId: subPart._id, childId: preexisting.partId,
+    });
+    check("and the structure edge now exists, under its real parent", !!linked);
+
+    const after: any = await Part.findById(preexisting.partId).select("iteration").lean();
+    check("without re-syncing it — the iteration did not move",
+      after.iteration === (before as any)?.iteration, `${(before as any)?.iteration} -> ${after.iteration}`);
   }
 
   for (const M of [BomLink, Part, PartIteration, Product, AttributeDefinition, User,

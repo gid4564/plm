@@ -212,6 +212,19 @@ async function main() {
 
   const afterPkg = await client.getReleasePackage(pkg.id);
   check("the Onshape package is RELEASED", afterPkg.state === "RELEASED", afterPkg.state);
+  check("the package's Comment property was found",
+    afterPkg.propertyDefs.some((p) => p.name === "Comment"),
+    afterPkg.propertyDefs.map((p) => p.name).join(", "));
+  check("\"Released by PLM\" was written back as the package's comment",
+    afterPkg.properties["comment"] === "Released by PLM",
+    JSON.stringify(afterPkg.properties));
+
+  const releaseLog: any = await ActivityLog.findOne({
+    releaseId: takeover.releaseId, action: "transitioned",
+  }).sort({ createdAt: -1 }).lean();
+  check("the activity log records that the comment went out",
+    (releaseLog?.message ?? "").includes('Left "Released by PLM" as a comment'),
+    releaseLog?.message);
 
   const released: any = await Part.findById(part._id).lean();
   check("the part is Released in PLM", released?.lifecycleState === "Released", released?.lifecycleState);
@@ -378,6 +391,56 @@ async function main() {
     check("reversing a decided release is still refused", !reverse.ok, reverse.message);
     check("and the refusal names the state it is in",
       /already|cannot be decided again|Released/i.test(reverse.message), reverse.message);
+  }
+
+  console.log("\n9. A tenant with no Comment property on its release workflow is not blocked");
+  {
+    const PS2 = "e2a2b3c4d5e6f70819202124";
+    await MockOnshapePart.create({
+      companyId: COMPANY, documentId: DOC, documentName: "Gearbox",
+      elementId: PS2, elementName: "Bracket Part Studio", elementType: "PARTSTUDIO",
+      partId: "JHE", configuration: "default",
+      properties: {
+        "57f3fb8efa3416c06701d60d": "Gearbox Bracket",
+        "57f3fb8efa3416c06701d60e": "GB-1002",
+      },
+    });
+
+    const pkg2 = await client.createReleasePackage("mock-workflow", {
+      items: [{ documentId: DOC, elementId: PS2, partId: "JHE" }],
+    });
+
+    // Reproduces a tenant whose release workflow simply has no Comment
+    // property — createReleasePackage seeds one by default so the happy path
+    // above has something to find; this package has it stripped instead.
+    await MockReleasePackage.updateOne(
+      { companyId: COMPANY, rpid: pkg2.id },
+      { $set: { propertyDefs: [] } }
+    );
+
+    const takeover2 = await takeOverReleasePackage(entId, pkg2.id, { client });
+    check("PLM opened a second release", takeover2.action === "opened", takeover2.message);
+
+    const part2: any = await Part.findOne({ enterpriseId: entId, number: { $ne: part?.number } });
+    part2.attributes = {
+      ...part2.attributes,
+      classification: "Make",
+      responsibleEngineer: "R. Engineer",
+    };
+    part2.markModified("attributes");
+    await part2.save();
+
+    const decision2 = await decideRelease(String(takeover2.releaseId), {
+      intent: "approve", userId: String(approver._id), email: approver.email,
+    });
+    check("the release still succeeds with no Comment property to write to",
+      decision2.ok, decision2.transitionError ?? decision2.message);
+
+    const log2: any = await ActivityLog.findOne({
+      releaseId: takeover2.releaseId, action: "transitioned",
+    }).sort({ createdAt: -1 }).lean();
+    check("the activity log explains why no comment was left",
+      (log2?.message ?? "").includes("no Comment property"), log2?.message);
   }
 
   console.log(`\n${passed} passed, ${failed} failed\n`);

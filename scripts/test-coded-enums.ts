@@ -148,6 +148,21 @@ async function main() {
     server.close();
   }
 
+  console.log("\nobjectTypeOrdinal is sent — Onshape rejects the call without it");
+  {
+    // A live tenant answered this call with a 400 naming
+    // BTRestMetadataSchema.getMetadataSchema.objectTypeOrdinal "must not be
+    // null" — it is a required parameter this call used to omit entirely.
+    const { server, hits } = stubOnshape();
+    const port = await listen(server);
+    const client = new LiveOnshapeClient("t", `http://127.0.0.1:${port}`, undefined, "co-ordinal-test");
+    await client.getPartMetadata(COORDS);
+
+    const call = hits.find((h) => h.startsWith("/metadataschema"));
+    check("the query names an objectTypeOrdinal", /objectTypeOrdinal=\d+/.test(call ?? ""), call);
+    server.close();
+  }
+
   console.log("\nWithout the tenant's answer, nothing is invented");
   {
     // No company: the client has nothing to ask.

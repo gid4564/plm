@@ -3,6 +3,7 @@ import {
   ActivityLog, Drawing, Enterprise, Part, PartIteration, Release, User,
 } from "@/lib/models";
 import { clientForEnterprise, clientForUser } from "@/lib/onshape/factory";
+import { findCommentProperty } from "@/lib/onshape/live-client";
 import { listDefinitions, missingForRelease } from "@/lib/attributes";
 import { nextNumber } from "@/lib/numbering";
 import { plainAttributes, syncPartFromOnshape } from "@/lib/sync";
@@ -768,6 +769,12 @@ export async function decideRelease(
    */
   let transitionPending = false;
   const revisions: { itemLabel: string; revision: string }[] = [];
+  /*
+   * Whether "Released by PLM" made it into the transition, so the activity
+   * log can say so — or say why not, when an approving tenant simply has no
+   * Comment property on its release workflow to write one to.
+   */
+  let commentWritten = false;
 
   /*
    * Forget the previous refusal before trying again.
@@ -820,9 +827,29 @@ export async function decideRelease(
       `action=${action.id} (type ${action.type}) from state "${pkg.state}"`
     );
 
+    /*
+     * "Released by PLM", written the same way a task comment is: a workflow
+     * property write, not a dedicated comment field — release packages have
+     * none (docs/ONSHAPE-INTEGRATION-SPEC.md R5). Only on approval, since a
+     * rejection is not a release; and only when the tenant's workflow has a
+     * Comment property to write to, which is not guaranteed on every tenant.
+     * Absence is not an error — the release must not be blocked by a comment
+     * that has nowhere to go — so this only ever adds to the properties sent,
+     * never throws.
+     */
+    const commentProp = decision.intent === "approve" ? findCommentProperty(pkg.propertyDefs) : null;
+    commentWritten = Boolean(commentProp);
+
     await client.transitionReleasePackage(rpid, action.id, {
       note: decision.note,
-      ...(decision.properties ? { properties: decision.properties } : {}),
+      ...((decision.properties || commentProp)
+        ? {
+            properties: {
+              ...(decision.properties ?? {}),
+              ...(commentProp ? { [commentProp.propertyId]: "Released by PLM" } : {}),
+            },
+          }
+        : {}),
     });
 
     /*
@@ -885,16 +912,57 @@ export async function decideRelease(
       for (const item of release.items) {
         const match = after.items.find((i) => i.id === item.onshapeItemId);
         if (!match) continue;
-        item.revision = match.revision || "";
         item.versionId = match.versionId || "";
 
         if (item.kind === "part" && item.partId) {
           const part: any = await Part.findById(item.partId);
           if (!part) continue;
+
+          let revision = match.revision || "";
+          if (!revision) {
+            /*
+             * The release package's own item does not always carry the
+             * object's revision — confirmed live for an assembly item,
+             * where `match.revision` came back blank even though the
+             * transition completed and Onshape's own metadata for the
+             * object reports the letter correctly. That is the same source
+             * an ordinary sync already trusts (see sync.ts's `meta.revision`),
+             * asked directly rather than leaving a released part looking
+             * unreleased.
+             */
+            try {
+              const meta = await client.getPartMetadata({
+                documentId: part.documentId, elementId: part.elementId,
+                partId: part.partId || "", configuration: part.configuration || "default",
+                workspaceId: null, versionId: match.versionId || part.versionId || null,
+              });
+              revision = meta.revision || "";
+              if (revision) {
+                console.log(
+                  `[PLM] release ${release.number}: ${part.number || part.name}'s revision was ` +
+                  `blank on the release package item; read "${revision}" from its own metadata ` +
+                  `instead.`
+                );
+              }
+            } catch (err: any) {
+              console.warn(
+                `[PLM] release ${release.number}: could not read a fallback revision for ` +
+                `${part.number || part.name}: ${String(err?.message ?? err)}`
+              );
+            }
+          }
+          item.revision = revision;
+
           part.lifecycleState = "Released";
-          part.revision = match.revision || part.revision;
+          part.revision = revision || part.revision;
           part.versionId = match.versionId || part.versionId;
           part.iteration = (part.iteration ?? 1) + 1;
+          /*
+           * A genuine new revision starts its star count over — "A*" was
+           * off-cycle changes since revision A, and revision B has had none
+           * yet. See PartSchema.starCount.
+           */
+          part.starCount = 0;
           await part.save();
 
           await PartIteration.create({
@@ -921,8 +989,16 @@ export async function decideRelease(
            *
            * Never allowed to affect the release. captureReleasedGeometry does
            * not throw, and the flag is read once outside the loop.
+           *
+           * Also skipped for a part `writeBackBlocked` already marks as
+           * read-only — standard content and library parts, which is exactly
+           * what a released item like this normally never is, but a BOM can
+           * still name one as a sub-item PLM tracks without owning. Onshape's
+           * gltf export 403s for those the same way a property write does,
+           * and it will every time, so there is nothing here worth spending
+           * the call — or a "failed" row — on.
            */
-          if (captureGeometry) {
+          if (captureGeometry && !part.writeBackBlocked) {
             await captureReleasedGeometry(
               client,
               enterpriseId,
@@ -946,6 +1022,7 @@ export async function decideRelease(
 
           revisions.push({ itemLabel: part.number || part.name, revision: part.revision });
         } else if (item.kind === "drawing" && item.drawingId) {
+          item.revision = match.revision || "";
           await Drawing.updateOne(
             { _id: item.drawingId },
             {
@@ -1027,7 +1104,13 @@ export async function decideRelease(
         `${release.onshapeState}` +
         (revisions.length
           ? `. Revisions: ${revisions.map((r) => `${r.itemLabel} ${r.revision}`).join(", ")}`
-          : "."),
+          : ".") +
+        (decision.intent === "approve"
+          ? commentWritten
+            ? ` Left "Released by PLM" as a comment on the Onshape package.`
+            : ` Could not leave a "Released by PLM" comment — this tenant's release ` +
+              `workflow has no Comment property.`
+          : ""),
     });
   }
 

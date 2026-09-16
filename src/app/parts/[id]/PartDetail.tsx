@@ -1,12 +1,23 @@
 "use client";
 
 import Link from "next/link";
+import dynamic from "next/dynamic";
 import { useCallback, useEffect, useState } from "react";
 import { ProductField } from "@/components/ProductField";
 import { useRouter } from "next/navigation";
-import { Alert, KV, PartThumb, RevChip, Spinner, StatusBadge, relTime } from "@/components/ui";
+import { Alert, FavoriteButton, KV, PartThumb, RevChip, Spinner, StatusBadge, relTime } from "@/components/ui";
 import { AttributeInput, type Definition } from "@/components/AttributeInput";
 import { PartTasks, TaskCountBadge, type PartTask } from "@/components/PartTasks";
+import { StarReleaseDialog } from "@/components/StarReleaseDialog";
+import { SetInitialRevisionDialog } from "@/components/SetInitialRevisionDialog";
+/*
+ * Lazily, and never on the server: the viewer registers a custom element and
+ * pulls in a ~460KB library, so only a reader who opens a model pays for it.
+ */
+const ModelViewer = dynamic(
+  () => import("@/components/ModelViewer").then((m) => m.ModelViewer),
+  { ssr: false, loading: () => null }
+);
 
 type Data = {
   part: any;
@@ -25,6 +36,7 @@ type Data = {
     onshapeVersionId: string | null; releaseId: string | null;
     capturedAt: string | null; failureReason: string | null;
   }[];
+  starReleases: any[];
 };
 
 export function PartDetail({ id, isAdmin }: { id: string; isAdmin: boolean }) {
@@ -34,12 +46,19 @@ export function PartDetail({ id, isAdmin }: { id: string; isAdmin: boolean }) {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
+  /** Which captured revision the viewer is showing. Empty means the newest. */
+  const [viewRevision, setViewRevision] = useState<string>("");
+
   /** Pending edits, keyed by attribute. Empty means nothing is dirty. */
   const [draft, setDraft] = useState<Record<string, unknown>>({});
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
   const [mass, setMass] = useState<any>(null);
+  const [starDialog, setStarDialog] = useState<
+    null | { swapTarget: { bomLinkId: string; number: string | null; name: string } | null }
+  >(null);
+  const [initialRevisionOpen, setInitialRevisionOpen] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -136,6 +155,33 @@ export function PartDetail({ id, isAdmin }: { id: string; isAdmin: boolean }) {
     }
   }
 
+  /** Re-export one revision's 3D model, in place. */
+  async function recaptureGeometry(revision: string) {
+    const key = `recapture:${revision}`;
+    setBusy(key);
+    setNotice(null);
+    try {
+      const r = await fetch(`/api/parts/${id}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "recapture-geometry", revision }),
+      });
+      const j = await r.json();
+      if (!r.ok) throw new Error(j.error || "That did not work");
+      const cap = j.recapture;
+      setNotice(
+        cap?.ok
+          ? `Recaptured the 3D model (${(cap.bytes / 1024).toFixed(0)} KB).`
+          : `Could not recreate it: ${cap?.reason ?? "unknown reason"}`
+      );
+      await load();
+    } catch (e: any) {
+      setError(String(e?.message ?? e));
+    } finally {
+      setBusy(null);
+    }
+  }
+
   /**
    * Move this part into a product.
    *
@@ -197,6 +243,25 @@ export function PartDetail({ id, isAdmin }: { id: string; isAdmin: boolean }) {
     }
   }
 
+  /** Copy this part to a new, PLM-only one and go straight there. */
+  async function copyThis() {
+    setBusy("copy");
+    setError(null);
+    try {
+      const r = await fetch(`/api/parts/${id}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "copy" }),
+      });
+      const j = await r.json();
+      if (!r.ok) throw new Error(j.error || "Could not copy this part");
+      router.push(`/parts/${j.copy.id}`);
+    } catch (e: any) {
+      setError(String(e?.message ?? e));
+      setBusy(null);
+    }
+  }
+
   // Grouped in the order the schema declares, so an admin's grouping and
   // ordering is what a reader sees.
   const groups: { name: string; defs: Definition[] }[] = [];
@@ -213,10 +278,44 @@ export function PartDetail({ id, isAdmin }: { id: string; isAdmin: boolean }) {
         <PartThumb partId={id} size={64} radius={8} alt="" />
         <div style={{ flex: 1, minWidth: 220 }}>
           <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+            <FavoriteButton kind="part" targetId={id} active={Boolean(p.isFavorite)} size={20} />
             <h1 className="mono" style={{ margin: 0, fontSize: 19 }}>{p.number ?? "—"}</h1>
-            <RevChip revision={p.revision} iteration={p.iteration} />
+            <RevChip
+              revision={p.revision} iteration={p.iteration} starCount={p.starCount}
+              starReasons={data.starReleases.map(
+                (s: any) => `${s.baseRevision}${"*".repeat(s.starIndex)}: ${s.reason}`
+              )}
+            />
             <StatusBadge status={p.lifecycleState} />
             {p.kind === "assembly" && <span className="badge">assembly</span>}
+            {p.plmOnly && (
+              <span className="badge" title="Created by copying another part — no Onshape original backs this one">
+                PLM only
+              </span>
+            )}
+            {p.revision ? (
+              <button
+                className="btn btn-sm"
+                onClick={() => setStarDialog({ swapTarget: null })}
+                title="A form-fit-function equivalent swap, or a metadata/cosmetic note — no new revision, nothing sent to Onshape"
+              >
+                ★ Register star release
+              </button>
+            ) : isAdmin && (
+              /*
+               * The escape hatch for something released before PLM tracked
+               * it, or released in Onshape with no PLM release ever taken
+               * over — star release has no revision to attach to without
+               * this. See lib/star-release.ts.
+               */
+              <button
+                className="btn btn-sm"
+                onClick={() => setInitialRevisionOpen(true)}
+                title="Record that this is already released outside PLM's own workflow, so star releases work from here"
+              >
+                Set initial revision…
+              </button>
+            )}
           </div>
           <div style={{ color: "var(--text-muted)", fontSize: 14, marginTop: 3 }}>{p.name}</div>
           <div style={{ color: "var(--text-faint)", fontSize: 12, marginTop: 2 }}>
@@ -242,8 +341,16 @@ export function PartDetail({ id, isAdmin }: { id: string; isAdmin: boolean }) {
           {data.onshapeUrl && (
             <a className="btn" href={data.onshapeUrl} target="_blank" rel="noreferrer">Open in Onshape</a>
           )}
-          <button className="btn" onClick={() => act("pull")} disabled={busy === "pull"}>
-            {busy === "pull" ? <Spinner /> : "Re-read from Onshape"}
+          {!p.plmOnly && (
+            <button className="btn" onClick={() => act("pull")} disabled={busy === "pull"}>
+              {busy === "pull" ? <Spinner /> : "Re-read from Onshape"}
+            </button>
+          )}
+          <button
+            className="btn" onClick={copyThis} disabled={busy === "copy"}
+            title="Create a new, PLM-only part with the same attributes — a fresh number, no Onshape link"
+          >
+            {busy === "copy" ? <Spinner /> : "Copy"}
           </button>
           {p.pushPending && (
             <button className="btn" onClick={() => act("push")} disabled={busy === "push"}>
@@ -381,9 +488,71 @@ export function PartDetail({ id, isAdmin }: { id: string; isAdmin: boolean }) {
             <div className="card">
               <h2 style={{ margin: "0 0 10px", fontSize: 15 }}>3D model</h2>
               <p style={{ margin: "0 0 8px", fontSize: 11.5, color: "var(--text-faint)" }}>
-                Captured from the version each release produced — the geometry as released,
-                kept per revision.
+                Captured when the part is synced, and again from the version each release
+                produced — a released revision is kept for good; the unreleased capture keeps
+                moving until then.
               </p>
+
+              {/*
+                * The viewer, on whichever revision is selected.
+                *
+                * Only shown for a capture that actually has bytes: pointing it
+                * at a failed row would render an empty scene, which reads as a
+                * broken viewer rather than a model that was never stored.
+                */}
+              {(() => {
+                const withBytes = (data.geometry ?? []).filter((g) => !g.failureReason);
+                const shown = withBytes.find((g) => g.revision === viewRevision) ?? withBytes[0];
+                if (!shown) return null;
+                return (
+                  <div style={{ marginBottom: 10 }}>
+                    <ModelViewer
+                      key={shown.id}
+                      src={`/api/parts/${id}/geometry?revision=${encodeURIComponent(shown.revision)}`}
+                      label={`${p.number ?? p.name} revision ${shown.revision || "—"}`}
+                      // Whatever PLM already has cached — even the generic
+                      // placeholder svg, which still beats a blank box.
+                      poster={`/api/parts/${id}/thumbnail?size=400`}
+                      // Only once Mass properties below has actually been
+                      // measured — see loadMass. Onshape reports a centroid
+                      // from geometry alone, so this can exist even for a
+                      // part with no material and therefore no mass.
+                      hotspot={
+                        mass?.centroidM
+                          ? {
+                              positionM: mass.centroidM,
+                              label:
+                                mass.hasMass && mass.massKg != null
+                                  ? `Center of mass · ${mass.massKg.toFixed(2)} kg`
+                                  : "Center of mass",
+                            }
+                          : undefined
+                      }
+                    />
+                    {withBytes.length > 1 && (
+                      <div style={{ display: "flex", gap: 6, marginTop: 6, flexWrap: "wrap" }}>
+                        <span style={{ fontSize: 11.5, color: "var(--text-faint)", alignSelf: "center" }}>
+                          Revision:
+                        </span>
+                        {withBytes.map((g) => (
+                          <button
+                            key={g.id}
+                            className="btn btn-sm"
+                            onClick={() => setViewRevision(g.revision)}
+                            style={{
+                              borderColor: g.revision === shown.revision ? "var(--accent)" : undefined,
+                              color: g.revision === shown.revision ? "var(--accent)" : undefined,
+                              fontWeight: g.revision === shown.revision ? 600 : undefined,
+                            }}
+                          >
+                            {g.revision || "—"}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
               {(data.geometry ?? []).map((g) => (
                 <div
                   key={g.id}
@@ -398,19 +567,39 @@ export function PartDetail({ id, isAdmin }: { id: string; isAdmin: boolean }) {
                       {g.failureReason}
                     </span>
                   ) : (
-                    <>
-                      <span style={{ fontSize: 12.5, color: "var(--text-muted)", flex: 1 }}>
-                        glTF · {(g.size / 1024).toFixed(0)} KB
-                        {g.capturedAt ? ` · ${relTime(g.capturedAt)}` : ""}
-                      </span>
-                      <a
-                        className="btn btn-sm"
-                        href={`/api/parts/${id}/geometry?revision=${encodeURIComponent(g.revision)}`}
-                        download
-                      >
-                        Download
-                      </a>
-                    </>
+                    <span style={{ fontSize: 12.5, color: "var(--text-muted)", flex: 1 }}>
+                      glTF · {(g.size / 1024).toFixed(0)} KB
+                      {g.capturedAt ? ` · ${relTime(g.capturedAt)}` : ""}
+                    </span>
+                  )}
+                  {/*
+                    * Re-exports this one revision from Onshape in place —
+                    * the retry for a capture that failed (too large, a
+                    * translation that timed out, Onshape briefly
+                    * unreachable), and also just a way to refresh one that
+                    * did not: nothing else in PLM re-triggers this short of
+                    * waiting for the next sync or release.
+                    */}
+                  <button
+                    className="btn btn-sm"
+                    onClick={() => recaptureGeometry(g.revision)}
+                    disabled={busy === `recapture:${g.revision}`}
+                    title={
+                      g.failureReason
+                        ? "Try exporting this revision's 3D model again"
+                        : "Re-export this revision's 3D model from Onshape"
+                    }
+                  >
+                    {busy === `recapture:${g.revision}` ? <Spinner /> : "Recreate"}
+                  </button>
+                  {!g.failureReason && (
+                    <a
+                      className="btn btn-sm"
+                      href={`/api/parts/${id}/geometry?revision=${encodeURIComponent(g.revision)}`}
+                      download
+                    >
+                      Download
+                    </a>
                   )}
                 </div>
               ))}
@@ -480,7 +669,24 @@ export function PartDetail({ id, isAdmin }: { id: string; isAdmin: boolean }) {
                       Contains
                     </div>
                     {data.structure.children.map((c) => (
-                      <StructureRow key={c.linkId} row={c} showQty />
+                      <StructureRow
+                        key={c.linkId}
+                        row={c}
+                        showQty
+                        /*
+                         * Swapping only makes sense once this assembly itself
+                         * has a revision to keep — see the disabled reason
+                         * below, which is what registerStarRelease enforces
+                         * server-side too.
+                         */
+                        onSwap={
+                          p.revision
+                            ? () => setStarDialog({
+                                swapTarget: { bomLinkId: c.linkId, number: c.number, name: c.name },
+                              })
+                            : undefined
+                        }
+                      />
                     ))}
                   </>
                 )}
@@ -497,6 +703,43 @@ export function PartDetail({ id, isAdmin }: { id: string; isAdmin: boolean }) {
               </>
             )}
           </div>
+
+          {/* --------------------------- Star releases -------------------------
+            * Only once there is a revision to star, and only once one has
+            * actually happened — an empty card here on every released part
+            * would suggest the feature is broken rather than simply unused.
+            */}
+          {p.revision && data.starReleases.length > 0 && (
+            <div className="card">
+              <h2 style={{ margin: "0 0 4px", fontSize: 15 }}>Star releases</h2>
+              <p style={{ margin: "0 0 10px", fontSize: 11.5, color: "var(--text-faint)" }}>
+                Off-cycle changes at revision {p.revision} — never sent to Onshape, and none of
+                them move the revision itself.
+              </p>
+              <div style={{ display: "grid", gap: 8 }}>
+                {data.starReleases.map((star: any) => (
+                  <div
+                    key={star.id}
+                    style={{ borderTop: "1px solid var(--border)", paddingTop: 8, fontSize: 12.5 }}
+                  >
+                    <div style={{ display: "flex", gap: 8, alignItems: "baseline", flexWrap: "wrap" }}>
+                      <span className="badge mono">{star.baseRevision}{"*".repeat(star.starIndex)}</span>
+                      <span style={{ color: "var(--text-faint)", fontSize: 11 }}>
+                        {star.createdByEmail} · {relTime(star.createdAt)}
+                      </span>
+                    </div>
+                    {star.swap && (
+                      <div style={{ marginTop: 3, color: "var(--text-muted)" }}>
+                        Swapped <span className="mono">{star.swap.fromNumber || "—"}</span> for{" "}
+                        <span className="mono">{star.swap.toNumber || "—"}</span>
+                      </div>
+                    )}
+                    <div style={{ marginTop: 3 }}>{star.reason}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
 
           {/* ----------------------------- Mass properties -------------------- */}
           <div className="card">
@@ -650,11 +893,46 @@ export function PartDetail({ id, isAdmin }: { id: string; isAdmin: boolean }) {
           </tbody>
         </table>
       </div>
+
+      <StarReleaseDialog
+        open={starDialog !== null}
+        onClose={() => setStarDialog(null)}
+        onDone={(result) => {
+          setNotice(`Registered ${result.revisionLabel}.`);
+          void load();
+        }}
+        partId={id}
+        partLabel={p.number ?? p.name}
+        revisionLabel={`${p.revision}${"*".repeat(p.starCount ?? 0)}`}
+        swapTarget={starDialog?.swapTarget ?? null}
+        swapChoices={
+          p.kind === "assembly"
+            ? data.structure.children.map((c: any) => ({ bomLinkId: c.linkId, number: c.number, name: c.name }))
+            : []
+        }
+      />
+
+      <SetInitialRevisionDialog
+        open={initialRevisionOpen}
+        onClose={() => setInitialRevisionOpen(false)}
+        onDone={(result) => {
+          setNotice(`Recorded revision ${result.revision}.`);
+          void load();
+        }}
+        partId={id}
+        partLabel={p.number ?? p.name}
+      />
     </div>
   );
 }
 
-function StructureRow({ row, showQty }: { row: any; showQty?: boolean }) {
+function StructureRow({
+  row, showQty, onSwap,
+}: {
+  row: any; showQty?: boolean;
+  /** Present only for a child row of an assembly that can be starred. */
+  onSwap?: () => void;
+}) {
   return (
     <div style={{ display: "flex", gap: 8, alignItems: "center", padding: "4px 0", fontSize: 12.5 }}>
       {showQty && (
@@ -668,6 +946,15 @@ function StructureRow({ row, showQty }: { row: any; showQty?: boolean }) {
       </span>
       {row.revision && <span className="badge">{row.revision}</span>}
       <StatusBadge status={row.lifecycleState} />
+      {onSwap && (
+        <button
+          className="btn btn-sm"
+          onClick={onSwap}
+          title="Swap this component for a form-fit-function equivalent, without a new revision"
+        >
+          Swap…
+        </button>
+      )}
     </div>
   );
 }

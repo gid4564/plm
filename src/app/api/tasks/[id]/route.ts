@@ -5,6 +5,7 @@ import { ActivityLog, Part, Task } from "@/lib/models";
 import {
   columnForTask, commentOnTask, moveTaskToColumn, refreshTask, transitionTask, updateTaskFields,
 } from "@/lib/tasks";
+import { isFavorited } from "@/lib/favorites";
 import { handler, ok, fail } from "@/lib/api";
 
 type Ctx = { params: Promise<{ id: string }> };
@@ -27,18 +28,19 @@ export const GET = handler(async (_req: Request, ctx: Ctx) => {
     : [];
   const partById = new Map(parts.map((p) => [String(p._id), p]));
 
-  const logs: any[] = await ActivityLog.find({
-    enterpriseId: s.enterpriseId,
-    trigger: "task",
-  })
-    .sort({ createdAt: -1 })
-    .limit(20)
-    .lean();
+  const [logs, isFavorite] = await Promise.all([
+    ActivityLog.find({ enterpriseId: s.enterpriseId, trigger: "task" })
+      .sort({ createdAt: -1 })
+      .limit(20)
+      .lean(),
+    isFavorited(s.userId, "task", id),
+  ]);
 
   return ok({
     task: {
       id: String(t._id),
       onshapeTaskId: t.onshapeTaskId,
+      isFavorite,
       name: t.name,
       description: t.description,
       state: t.state,

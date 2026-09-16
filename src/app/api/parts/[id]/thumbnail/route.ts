@@ -36,6 +36,33 @@ function placeholder(): NextResponse {
 }
 
 /**
+ * A hex nut, for a part Onshape will never render a picture of.
+ *
+ * Standard content — the library screws, washers and bearings Onshape
+ * supplies, the same ones `writeBackBlocked` already names — lives in
+ * documents everyone can read renderings from in Onshape's own UI but this
+ * account apparently cannot, at least for the tenants this has been seen on:
+ * `getPartThumbnail`'s shadedviews call fails for every one of them, so they
+ * always fall through to a placeholder. The generic gray blob above reads as
+ * "not rendered yet"; a part that will never render one deserves an icon that
+ * says what it actually is, not a shape that looks like a stalled fetch.
+ */
+function standardPartPlaceholder(): NextResponse {
+  const svg =
+    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">` +
+    `<rect width="100" height="100" fill="#eef1f5"/>` +
+    `<polygon points="74.25,64 50,78 25.75,64 25.75,36 50,22 74.25,36" fill="#c3cad3"/>` +
+    `<circle cx="50" cy="50" r="12" fill="#eef1f5"/></svg>`;
+  return new NextResponse(svg, {
+    status: 200,
+    headers: {
+      "Content-Type": "image/svg+xml",
+      "Cache-Control": "private, max-age=300",
+    },
+  });
+}
+
+/**
  * Serve a rendering of the part behind a manufacturing part.
  *
  * Cached in MongoDB on first request rather than fetched during sync: rendering
@@ -51,6 +78,17 @@ export const GET = handler(async (req: Request, ctx: Ctx) => {
 
   const part: any = await Part.findOne({ _id: id, enterpriseId: s.enterpriseId }).lean();
   if (!part) return placeholder();
+
+  // Not even attempted: a plmOnly part's documentId/elementId are synthetic,
+  // not an Onshape object this account merely lacks access to — there is
+  // nothing there to ask, ever, so this skips the call rather than caching a
+  // failure from asking Onshape about an id it was never going to recognise.
+  if (part.plmOnly) return placeholder();
+
+  // `writeBackBlocked` already names standard content and library parts —
+  // the account can read but not write to the document they live in — and
+  // that is the same population Onshape will not render a thumbnail for.
+  const noPicture = () => (part.writeBackBlocked ? standardPartPlaceholder() : placeholder());
 
   const cached: any = await PartThumbnail.findOne({ partId: id });
 
@@ -72,7 +110,7 @@ export const GET = handler(async (req: Request, ctx: Ctx) => {
   // Back off after a failure so a part Onshape cannot render does not cause a
   // fetch on every page view.
   if (cached?.failedAt && Date.now() - cached.failedAt.getTime() < RETRY_AFTER_MS) {
-    return placeholder();
+    return noPicture();
   }
 
   const coords: PartCoords = {
@@ -97,7 +135,7 @@ export const GET = handler(async (req: Request, ctx: Ctx) => {
                 data: Buffer.from(""), size, failedAt: new Date(), failureReason: reason } },
       { upsert: true }
     );
-    return placeholder();
+    return noPicture();
   }
 
   await PartThumbnail.updateOne(

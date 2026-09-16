@@ -6,6 +6,7 @@ import { handler, ok, fail } from "@/lib/api";
 import { taskCountsForParts } from "@/lib/tasks";
 import { decodeCursor, encodeCursor } from "@/lib/pagination";
 import { plainAttributes } from "@/lib/sync";
+import { starReasonsForParts } from "@/lib/star-release";
 
 /**
  * Page size for the parts list.
@@ -137,6 +138,11 @@ export const GET = handler(async (req: Request) => {
     ids.map((i: any) => String(i))
   );
 
+  // Same discipline again: one query for the page's star reasons, not one
+  // per row, so hovering a starred revision's "*" shows why without the list
+  // costing a query per part to make that possible.
+  const starReasons = await starReasonsForParts(s.enterpriseId, ids.map((i: any) => String(i)));
+
   // Lifecycle facet, computed over the whole enterprise rather than the current
   // filter, so choosing a state does not immediately remove every other option.
   const states = await Part.aggregate([
@@ -156,7 +162,10 @@ export const GET = handler(async (req: Request) => {
         number: p.number,
         name: p.name,
         kind: p.kind,
+        plmOnly: Boolean(p.plmOnly),
         revision: p.revision || "",
+        starCount: p.starCount ?? 0,
+        starReasons: starReasons.get(String(p._id)) ?? [],
         iteration: p.iteration ?? 1,
         lifecycleState: p.lifecycleState,
         onshapeState: p.onshapeState || "",

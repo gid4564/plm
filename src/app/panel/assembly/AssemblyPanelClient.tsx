@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Alert, Spinner } from "@/components/ui";
+import { Alert, RevChip, Spinner, StatusBadge } from "@/components/ui";
 import { ProductField } from "@/components/ProductField";
 import { PanelHeader, SignedOut, panelWrap } from "../shared";
 
@@ -51,6 +51,19 @@ export function AssemblyPanelClient({
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<ImportResult | null>(null);
 
+  /*
+   * The assembly ELEMENT itself, as its own PLM object — distinct from the
+   * BOM below, which is its children. A BOM legitimately never lists the
+   * assembly as one of its own lines, so without this there was no entry for
+   * the assembly anywhere in its own panel, and no way back in for someone
+   * once it was removed from PLM: the BOM view only ever offers to import
+   * children, never to (re)track the assembly they belong to.
+   */
+  const [assemblyPart, setAssemblyPart] = useState<any>(null);
+  const [assemblyLoading, setAssemblyLoading] = useState(signedIn && Boolean(ctx.elementId));
+  const [assemblySyncing, setAssemblySyncing] = useState(false);
+  const [assemblyNotice, setAssemblyNotice] = useState<string | null>(null);
+
   const params = useCallback(() => {
     const p = new URLSearchParams({ documentId: ctx.documentId, elementId: ctx.elementId });
     if (ctx.workspaceId) p.set("workspaceId", ctx.workspaceId);
@@ -80,6 +93,52 @@ export function AssemblyPanelClient({
   }, [ctx.elementId, signedIn]);
 
   useEffect(() => { loadTracked(); }, [loadTracked]);
+
+  /**
+   * Whether the assembly ELEMENT itself — not its children — is in PLM.
+   *
+   * Read-only: `sync` is only ever set by the button below, the same rule
+   * `/api/parts/lookup` applies everywhere else it is used. Opening the panel
+   * must never be what brings something into PLM.
+   */
+  const loadAssembly = useCallback(async () => {
+    if (!signedIn || !ctx.elementId) return;
+    setAssemblyLoading(true);
+    try {
+      const res = await fetch(`/api/parts/lookup?${params()}`);
+      const data = await res.json();
+      if (res.ok) setAssemblyPart(data.part ?? null);
+    } catch {
+      // Cosmetic; the sync button below still works from a stale read.
+    } finally {
+      setAssemblyLoading(false);
+    }
+  }, [ctx.elementId, params, signedIn]);
+
+  useEffect(() => { loadAssembly(); }, [loadAssembly]);
+
+  async function syncAssembly() {
+    setAssemblySyncing(true);
+    setError(null);
+    try {
+      const p = params();
+      p.set("sync", "1");
+      const res = await fetch(`/api/parts/lookup?${p}`);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Sync failed");
+      setAssemblyPart(data.part ?? null);
+      setAssemblyNotice(
+        `In PLM as ${data.part?.number}. Its part number has been written to Onshape.`
+      );
+      // The BOM view's own "already tracked" badges read stale otherwise —
+      // this assembly may itself be a line in a BOM read a moment ago.
+      await Promise.all([loadTracked(), bom ? readBom() : Promise.resolve()]);
+    } catch (err: any) {
+      setError(String(err.message ?? err));
+    } finally {
+      setAssemblySyncing(false);
+    }
+  }
 
   const readBom = useCallback(async () => {
     setReading(true); setError(null);
@@ -161,7 +220,11 @@ export function AssemblyPanelClient({
       if (!res.ok) throw new Error(data.error || "Import failed");
 
       setResult(data);
-      await Promise.all([readBom(), loadTracked()]);
+      // The import itself always syncs the assembly ELEMENT too, whatever
+      // was selected below — see importBomLines' parentSync. Without this,
+      // the card at the top kept saying "not in PLM" for an assembly the
+      // import had just tracked.
+      await Promise.all([readBom(), loadTracked(), loadAssembly()]);
     } catch (err: any) {
       setError(String(err.message ?? err));
     } finally {
@@ -204,6 +267,72 @@ export function AssemblyPanelClient({
       <PanelHeader title="Bill of Materials" />
 
       {error && <Alert kind="error" onDismiss={() => setError(null)}>{error}</Alert>}
+      {assemblyNotice && (
+        <Alert kind="ok" onDismiss={() => setAssemblyNotice(null)}>{assemblyNotice}</Alert>
+      )}
+
+      {/*
+        * The assembly ELEMENT, as its own PLM record — separate from the BOM
+        * below, which is its children. A BOM never lists the assembly as one
+        * of its own lines, so without a card of its own here there was no
+        * entry for the assembly anywhere in this panel, and once it was
+        * removed from PLM nothing in the panel offered a way back in.
+        */}
+      {assemblyLoading ? (
+        <div style={{ padding: 10, textAlign: "center" }}><Spinner size={16} /></div>
+      ) : assemblyPart ? (
+        <div
+          style={{
+            display: "flex", gap: 8, alignItems: "center",
+            background: "var(--surface)", border: "1px solid var(--border)",
+            borderRadius: 8, padding: 10,
+          }}
+        >
+          <div style={{ minWidth: 0, flex: 1 }}>
+            <div className="mono" style={{ fontWeight: 600, fontSize: 13 }}>
+              {assemblyPart.number}
+            </div>
+            <div style={{ fontSize: 11.5, color: "var(--text-muted)", wordBreak: "break-word" }}>
+              {assemblyPart.name}
+            </div>
+            <div style={{ display: "flex", gap: 5, marginTop: 4, flexWrap: "wrap" }}>
+              <RevChip revision={assemblyPart.revision} iteration={assemblyPart.iteration} />
+              <StatusBadge status={assemblyPart.lifecycleState} />
+              <span className="badge">asm</span>
+            </div>
+          </div>
+          <a className="btn btn-sm" href={`/parts/${assemblyPart.id}`} target="_blank" rel="noreferrer">
+            Open
+          </a>
+        </div>
+      ) : (
+        <div
+          style={{
+            display: "grid", gap: 8,
+            background: "var(--surface)", border: "1px dashed var(--border-strong)",
+            borderRadius: 8, padding: 10,
+          }}
+        >
+          <span style={{ fontSize: 12, color: "var(--text-muted)" }}>
+            This assembly itself is not in PLM.
+          </span>
+          {/*
+            Chosen before syncing, same as the single-part panel: this is the
+            only chance to pick a product before the assembly is filed into
+            whichever one was last remembered.
+            */}
+          <ProductField
+            label="File into product"
+            compact
+            value={currentProductId}
+            emptyLabel="Unassigned"
+            onChange={(pid) => selectCurrentProduct(pid)}
+          />
+          <button className="btn btn-sm btn-primary" onClick={syncAssembly} disabled={assemblySyncing}>
+            {assemblySyncing ? <Spinner /> : "Sync to PLM"}
+          </button>
+        </div>
+      )}
 
       {result && (
         <Alert kind={result.failed > 0 ? "warn" : "ok"} onDismiss={() => setResult(null)}>

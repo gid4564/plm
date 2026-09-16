@@ -295,7 +295,7 @@ async function main() {
 
   const base = (over: Partial<ReleasePackage>): ReleasePackage => ({
     id: "RP1", workflowId: "WF1", state: "", changeOrderId: "", items: [],
-    properties: {}, availableActions: [], transitionStatus: [],
+    properties: {}, propertyDefs: [], availableActions: [], transitionStatus: [],
     permissions: { approverIds: [], isCreator: false, createdById: "" },
     syncedWithPLM: false, raw: {}, ...over,
   });

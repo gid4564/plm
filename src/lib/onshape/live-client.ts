@@ -10,7 +10,7 @@ import { parseBom, type BomTable } from "./bom";
 import { describeShape } from "./describe-payload";
 import { classify } from "./element-type";
 import { parseWorkflowSnapshot } from "./workflow-snapshot";
-import { objectTypeName, resolveTaskCommentContext } from "./object-types";
+import { objectTypeCode, objectTypeName, resolveTaskCommentContext } from "./object-types";
 import { parseMassProperties, type MassProperties } from "./mass-properties";
 import type { ExportFormat } from "./export-formats";
 import { looksCoded, mapStandardProperties, resolveEnumLabel, toDefinitions, toDisplayString, type RawProperty } from "./standard-properties";
@@ -124,20 +124,23 @@ export const TRANSLATION_POLL_SCHEDULE_MS = [3_000, 5_000, 10_000, 20_000, 25_00
  * a clash: it is the set the task's own state declares editable.
  */
 /**
- * The task's Comment property, if its workflow has one.
+ * The Comment property in a set of workflow properties, if there is one.
  *
  * Matched by name rather than by a hardcoded id: the id belongs to the
- * tenant's published task workflow, and another tenant's will differ. Required
+ * tenant's own published workflow, and another tenant's will differ. Required
  * to be editable, because a read-only property is not a place to write.
+ *
+ * Shared between tasks and release packages — both run the same
+ * `BTWorkflowSnapshotInfo` workflow shape (confirmed for tasks; see
+ * docs/ONSHAPE-INTEGRATION-SPEC.md T2), so a Comment property on either is
+ * found the same way.
  */
-function findCommentProperty(task: OnshapeTask) {
+export function findCommentProperty<
+  P extends { propertyId: string; name: string; valueType: string; editable: boolean }
+>(props: P[]): P | null {
   return (
-    task.properties.find(
-      (p) => p.editable && p.valueType === "STRING" && /^comment$/i.test(p.name)
-    ) ??
-    task.properties.find(
-      (p) => p.editable && p.valueType === "STRING" && /comment|note|remark/i.test(p.name)
-    ) ??
+    props.find((p) => p.editable && p.valueType === "STRING" && /^comment$/i.test(p.name)) ??
+    props.find((p) => p.editable && p.valueType === "STRING" && /comment|note|remark/i.test(p.name)) ??
     null
   );
 }
@@ -342,9 +345,30 @@ export class LiveOnshapeClient implements OnshapeClient {
 
   async listPropertyDefinitions(companyId: string): Promise<PropertyDef[]> {
     const path = process.env.ONSHAPE_METADATA_SCHEMA_PATH || "/metadataschema";
+    /*
+     * `objectTypeOrdinal` is REQUIRED, not optional as this call used to send
+     * it. Omitting it now earns a 400 naming
+     * `BTRestMetadataSchema.getMetadataSchema.objectTypeOrdinal`, `"must not
+     * be null"` — caught live, on a real tenant, where it silently disabled
+     * every coded value this endpoint exists to name.
+     *
+     * The endpoint is unpublished (absent from Onshape's OpenAPI definition,
+     * the same way findTasks and several task endpoints are — see
+     * docs/ONSHAPE-INTEGRATION-SPEC.md), so which ordinal to send is not
+     * documented either. It is inferred from `BTMetadataObjectType`'s
+     * declared order — the same inference object-types.ts already uses for a
+     * comment's objectType — and PART is what this call's one consumer,
+     * `getPartMetadata`, actually needs: a part's own coded properties
+     * (State, say) resolved against the tenant's schema.
+     * `ONSHAPE_METADATA_SCHEMA_OBJECT_TYPE` overrides the ordinal, so being
+     * wrong here costs a line of configuration rather than a rebuild.
+     */
+    const configuredType = Number(process.env.ONSHAPE_METADATA_SCHEMA_OBJECT_TYPE);
+    const objectTypeOrdinal = Number.isInteger(configuredType) ? configuredType : objectTypeCode("PART");
     // ownerType 1 = company/enterprise.
     const data = await this.req<Record<string, any>>(
-      `${path}?ownerId=${encodeURIComponent(companyId)}&ownerType=1&active=true`
+      `${path}?ownerId=${encodeURIComponent(companyId)}&ownerType=1&active=true` +
+      `&objectTypeOrdinal=${objectTypeOrdinal}`
     );
 
     const rows: any[] = data.items ?? data.properties ?? (Array.isArray(data) ? data : []);
@@ -1367,7 +1391,15 @@ export class LiveOnshapeClient implements OnshapeClient {
       ["nextActions", d?.nextActions],
       ["allowedActions", d?.allowedActions],
     ];
-    const actionHit = actionPaths.find(([, v]) => Array.isArray(v) && v.length > 0);
+    /*
+     * Any real array counts, empty or not — a released, obsoleted or
+     * rejected package genuinely has no further actions, and requiring a
+     * non-empty array to count as "found" turned that correct answer into a
+     * false "NO actions found" warning on every terminal package. See the
+     * identical fix and fuller explanation in workflow-snapshot.ts, which a
+     * task hits the same way.
+     */
+    const actionHit = actionPaths.find(([, v]) => Array.isArray(v));
     const rawActions: any[] = (actionHit?.[1] as any[]) ?? [];
 
     const availableActions: WorkflowAction[] = rawActions.map((a: any) => {
@@ -1429,6 +1461,49 @@ export class LiveOnshapeClient implements OnshapeClient {
      * record. An array cast to a record is not a record: every lookup by
      * property id would miss, silently.
      */
+    /*
+     * The same properties, with their metadata kept — where a Comment
+     * property (or anything else worth finding by name) has to be looked up.
+     *
+     * A task keeps its workflow properties — Comment, Assigned to — in
+     * `workflowInfo.properties`, separate from the metadata schema in
+     * `properties` (docs/ONSHAPE-INTEGRATION-SPEC.md T6, [confirmed]). A
+     * release package runs the same `BTWorkflowSnapshotInfo` workflow (T2),
+     * so it is tried in the same place first; `workflow.properties` is tried
+     * too, since the rest of a package's workflow state lives under
+     * `workflow` rather than `workflowInfo` (see actionPaths/statePaths
+     * above) and Onshape's naming here is not documented either way.
+     * Whichever hits is logged once; a miss logs nothing extra — the
+     * `rp-miss`/`rp-shape` logging above already dumps the payload shape when
+     * state or actions are not found, and a package with none of these paths
+     * populated simply has no workflow properties, which is a valid outcome.
+     */
+    const propDefPaths: [string, unknown][] = [
+      ["workflowInfo.properties", d?.workflowInfo?.properties],
+      ["workflow.properties", d?.workflow?.properties],
+    ];
+    const propDefHit = propDefPaths.find(([, v]) => Array.isArray(v) && v.length > 0);
+    if (propDefHit) {
+      const key = `rp-propdefs|${propDefHit[0]}`;
+      if (!LiveOnshapeClient.reportedShapes.has(key)) {
+        LiveOnshapeClient.reportedShapes.add(key);
+        console.log(
+          `[PLM] release package ${d?.id}: workflow property definitions from ` +
+          `"${propDefHit[0]}" (${(propDefHit[1] as any[]).length}: ` +
+          `${(propDefHit[1] as any[]).map((p: any) => p?.name).filter(Boolean).join(", ")})`
+        );
+      }
+    }
+    const propertyDefs: ReleasePackage["propertyDefs"] = (
+      (propDefHit?.[1] as any[] | undefined) ?? []
+    ).map((p: any) => ({
+      propertyId: String(p?.propertyId ?? ""),
+      name: String(p?.name ?? ""),
+      value: p?.value,
+      valueType: String(p?.valueType ?? ""),
+      editable: Boolean(p?.editable),
+    })).filter((p) => p.propertyId);
+
     const properties: Record<string, unknown> = Array.isArray(d?.properties)
       ? Object.fromEntries(
           (d.properties as any[])
@@ -1494,6 +1569,7 @@ export class LiveOnshapeClient implements OnshapeClient {
       changeOrderId: String(d?.changeOrderId ?? ""),
       items,
       properties,
+      propertyDefs,
       availableActions,
       permissions: {
         approverIds: (Array.isArray(d?.workflow?.approverIds) ? d.workflow.approverIds : [])
@@ -1855,7 +1931,7 @@ export class LiveOnshapeClient implements OnshapeClient {
      * differ.
      */
     const task = await this.getTask(taskId);
-    const prop = findCommentProperty(task);
+    const prop = findCommentProperty(task.properties);
     if (!prop) {
       throw new Error(
         `This task's workflow has no Comment property, so there is nowhere to post a ` +

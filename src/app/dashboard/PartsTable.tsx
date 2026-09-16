@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import { ProductSidebar, type ProductSummary } from "./ProductSidebar";
-import { Alert, PartThumb, RevChip, Spinner, StatusBadge, relTime } from "@/components/ui";
+import { Alert, CollapsibleSection, PartThumb, RevChip, Spinner, StatusBadge, relTime } from "@/components/ui";
 import { TaskCountBadge } from "@/components/PartTasks";
 
 type Part = {
@@ -11,7 +11,10 @@ type Part = {
   number: string | null;
   name: string;
   kind: "part" | "assembly";
+  plmOnly: boolean;
   revision: string;
+  starCount: number;
+  starReasons: string[];
   iteration: number;
   lifecycleState: string;
   onshapeState: string;
@@ -258,13 +261,43 @@ export function PartsTable({
   }
 
   const activeProduct = products.find((x) => x.id === product);
+  const titleText = product === "all"
+    ? "Parts and assemblies"
+    : product === "unfiled"
+      ? "Not yet filed"
+      : activeProduct?.name ?? "Parts and assemblies";
 
   return (
-    /*
+    <CollapsibleSection
+      storageKey="plm:dashboard:parts-open"
+      title={<h1 style={{ margin: 0, fontSize: 19 }}>{titleText}</h1>}
+      right={
+        <div style={{ display: "flex", gap: 12, alignItems: "center", flex: 1, minWidth: 0 }}>
+          <span style={{ color: "var(--text-faint)", fontSize: 13 }}>
+            {loading ? "loading…" : `${parts.length} of ${total}`}
+          </span>
+          <div style={{ flex: 1 }} />
+          {stateFacets.map((f) => (
+            <button
+              key={f.state}
+              className="btn btn-sm"
+              onClick={() => setState(state === f.state ? "all" : f.state)}
+              style={{
+                borderColor: state === f.state ? "var(--accent)" : undefined,
+                color: state === f.state ? "var(--accent)" : undefined,
+              }}
+            >
+              {f.state} {f.count}
+            </button>
+          ))}
+        </div>
+      }
+    >
+    {/*
      * Sidebar beside the table, wrapping to a stacked layout on a narrow
      * viewport. `min-width: 0` on the main column is what stops the table's own
      * horizontal scroll container from pushing the sidebar off the page.
-     */
+     */}
     <div style={{ display: "flex", gap: 16, alignItems: "flex-start", flexWrap: "wrap" }}>
       <ProductSidebar
         products={products}
@@ -324,33 +357,6 @@ export function PartsTable({
       />
 
       <div style={{ flex: 1, minWidth: 0, display: "grid", gap: 16 }}>
-      <div style={{ display: "flex", alignItems: "baseline", gap: 12, flexWrap: "wrap" }}>
-        <h1 style={{ margin: 0, fontSize: 19 }}>
-          {product === "all"
-            ? "Parts and assemblies"
-            : product === "unfiled"
-              ? "Not yet filed"
-              : activeProduct?.name ?? "Parts and assemblies"}
-        </h1>
-        <span style={{ color: "var(--text-faint)", fontSize: 13 }}>
-          {loading ? "loading…" : `${parts.length} of ${total}`}
-        </span>
-        <div style={{ flex: 1 }} />
-        {stateFacets.map((f) => (
-          <button
-            key={f.state}
-            className="btn btn-sm"
-            onClick={() => setState(state === f.state ? "all" : f.state)}
-            style={{
-              borderColor: state === f.state ? "var(--accent)" : undefined,
-              color: state === f.state ? "var(--accent)" : undefined,
-            }}
-          >
-            {f.state} {f.count}
-          </button>
-        ))}
-      </div>
-
       {underReview > 0 && (
         <Alert kind="warn">
           {underReview} release{underReview === 1 ? " is" : "s are"} waiting for a decision.{" "}
@@ -579,6 +585,14 @@ export function PartsTable({
                       {p.kind === "assembly" && (
                         <span className="badge" style={{ marginLeft: 6 }}>asm</span>
                       )}
+                      {p.plmOnly && (
+                        <span
+                          className="badge" style={{ marginLeft: 6 }}
+                          title="Created by copying another part — no Onshape original backs this one"
+                        >
+                          PLM only
+                        </span>
+                      )}
                       {/*
                         * Beside the number rather than in its own column: it
                         * appears on a minority of rows, and an almost-empty
@@ -599,7 +613,12 @@ export function PartsTable({
                         {p.documentName}{p.elementName ? ` · ${p.elementName}` : ""}
                       </div>
                     </td>
-                    <td><RevChip revision={p.revision} iteration={p.iteration} /></td>
+                    <td>
+                      <RevChip
+                        revision={p.revision} iteration={p.iteration} starCount={p.starCount}
+                        starReasons={p.starReasons}
+                      />
+                    </td>
                     <td>
                       <StatusBadge status={p.lifecycleState} />
                       {p.releaseId && (
@@ -677,5 +696,6 @@ export function PartsTable({
       )}
       </div>
     </div>
+    </CollapsibleSection>
   );
 }

@@ -1,9 +1,10 @@
 import { z } from "zod";
 import { connectDb } from "@/lib/db";
-import { ActivityLog, AttributeDefinition, Drawing, LIFECYCLE_STATES, Part } from "@/lib/models";
+import { ActivityLog, AttributeDefinition, Drawing, Enterprise, LIFECYCLE_STATES, Part } from "@/lib/models";
 import { requireSession } from "@/lib/auth/session";
 import { handler, ok, fail } from "@/lib/api";
 import { shapeDefinition } from "@/lib/attributes";
+import { bindAttributeProperties } from "@/lib/onshape/properties";
 
 type Ctx = { params: Promise<{ id: string }> };
 
@@ -105,6 +106,17 @@ export const PATCH = handler(async (req: Request, ctx: Ctx) => {
 
   await def.save();
 
+  /*
+   * Resolved against whatever was already discovered, immediately — see the
+   * matching comment in the POST handler. A changed onshapePropertyName is
+   * exactly the case that used to show "not found" until the next sync or a
+   * separate "Run discovery" click, even when the name was a real, already-
+   * discovered property.
+   */
+  const ent: any = await Enterprise.findById(s.enterpriseId).select("onshapePropertyDefs").lean();
+  await bindAttributeProperties(s.enterpriseId, ent?.onshapePropertyDefs ?? []);
+  const bound: any = await AttributeDefinition.findById(def._id).lean();
+
   await ActivityLog.create({
     enterpriseId: s.enterpriseId, direction: "plm", action: "updated", trigger: "user-edit", ok: true,
     message:
@@ -116,7 +128,7 @@ export const PATCH = handler(async (req: Request, ctx: Ctx) => {
   });
 
   return ok({
-    definition: shapeDefinition(def.toObject()),
+    definition: shapeDefinition(bound ?? def.toObject()),
     strandedValues,
     warning: strandedValues
       ? `${strandedValues} object(s) hold "${removed.join('", "')}", which this attribute no ` +

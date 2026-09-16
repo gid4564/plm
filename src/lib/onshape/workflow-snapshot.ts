@@ -88,7 +88,18 @@ export function parseWorkflowSnapshot(
   const label = opts.label ?? "object";
 
   const stateHit = statePaths(wf, root).find(([, v]) => typeof v === "string" && v !== "");
-  const actionHit = actionPaths(wf, root).find(([, v]) => Array.isArray(v) && v.length > 0);
+  /*
+   * Any real array counts, empty or not.
+   *
+   * A finished task — Complete, frozen, nothing left to do — genuinely has
+   * zero actions: `workflow.actions` is `[]`, not absent. Requiring a
+   * non-empty array to count as "found" treated that correct, empty answer
+   * as a miss, so every closed task fell through every candidate and logged
+   * a "NO actions found" warning with a full shape dump — once per task,
+   * since the dedup key includes the task id. The outcome was never wrong
+   * (`actions` still ended up `[]` either way); only the diagnostic was.
+   */
+  const actionHit = actionPaths(wf, root).find(([, v]) => Array.isArray(v));
 
   const actions: WorkflowAction[] = ((actionHit?.[1] as any[]) ?? [])
     .map((a: any) => {

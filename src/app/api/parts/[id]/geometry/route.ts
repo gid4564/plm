@@ -1,7 +1,7 @@
 import { connectDb } from "@/lib/db";
 import { Part, PartGeometry } from "@/lib/models";
 import { requireSession } from "@/lib/auth/session";
-import { geometryBytes } from "@/lib/geometry";
+import { readGeometryBytes } from "@/lib/geometry";
 
 type Ctx = { params: Promise<{ id: string }> };
 
@@ -39,11 +39,13 @@ export async function GET(req: Request, ctx: Ctx) {
     .lean();
 
   /*
-   * Decoded rather than trusted. See geometryBytes: a lean() read hands back a
-   * BSON Binary whose `.length` is a function — always truthy — so checking
-   * the raw field would let an empty row through as a valid model.
+   * Decoded rather than trusted. See readGeometryBytes: a lean() read hands
+   * back a BSON Binary whose `.length` is a function — always truthy — so
+   * checking the raw field would let an empty row through as a valid model.
+   * A model over the inline threshold has nothing in that field at all — its
+   * bytes live in GridFS, which is the other thing this resolves.
    */
-  const bytes = geometryBytes(row?.data);
+  const bytes = await readGeometryBytes(row);
 
   if (!bytes.length) {
     /*

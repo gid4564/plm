@@ -28,20 +28,43 @@ export function StatusBadge({ status }: { status: string }) {
 }
 
 /**
- * A part's version, as one legible token: "A.3", or "–.2" before release.
+ * A part's version, as one legible token: "A.3", "A*.3", or "–.2" before
+ * release.
  *
  * The dash is not decoration. An unreleased part genuinely has no revision —
  * Onshape assigns it at release — and showing the iteration alone would read
  * as though the revision were simply missing from the display.
+ *
+ * The stars are PLM's own, never Onshape's — each one is an off-cycle star
+ * release (a form-fit-function-equivalent swap, or a metadata/cosmetic note)
+ * registered since Onshape last assigned this letter. See lib/star-release.ts.
  */
-export function RevChip({ revision, iteration }: { revision: string; iteration: number }) {
+export function RevChip({
+  revision, iteration, starCount = 0, starReasons,
+}: {
+  revision: string; iteration: number; starCount?: number;
+  /**
+   * Each star release's reason, newest first — shown on hovering the stars
+   * themselves, one line per event. Left off wherever fetching them would
+   * cost a query per row (a long list); the stars still show, just without
+   * the hover detail, and the chip's own title keeps saying how many there
+   * are.
+   */
+  starReasons?: string[];
+}) {
   const released = Boolean(revision);
+  const stars = released ? "*".repeat(Math.max(0, starCount)) : "";
+  const starTitle = starReasons?.length
+    ? starReasons.join("\n")
+    : starCount > 0
+      ? `${starCount} star release${starCount === 1 ? "" : "s"} since ${revision} — open the part page for why`
+      : undefined;
   return (
     <span
       className="badge mono"
       title={
         released
-          ? `Revision ${revision}, iteration ${iteration}`
+          ? `Revision ${revision}${stars}, iteration ${iteration}`
           : `Not yet released — iteration ${iteration}. Onshape assigns the revision at release.`
       }
       style={{
@@ -50,7 +73,13 @@ export function RevChip({ revision, iteration }: { revision: string; iteration: 
         borderColor: released ? "var(--ok)" : "var(--border)",
       }}
     >
-      {released ? revision : "–"}.{iteration}
+      {released ? revision : "–"}
+      {stars && (
+        // Its own title, so hovering the stars specifically shows why each
+        // one happened rather than the chip's generic revision/iteration line.
+        <span title={starTitle}>{stars}</span>
+      )}
+      .{iteration}
     </span>
   );
 }
@@ -178,5 +207,137 @@ export function PartThumb({
       style={box}
       onError={() => setFailed(true)}
     />
+  );
+}
+
+/**
+ * The star that puts something on — or takes it off — a person's own
+ * favorites list.
+ *
+ * Optimistic, with a revert on failure: a star is a light, frequent action —
+ * scanning a BOM and starring several parts in a row — and waiting on a round
+ * trip for each one would make the control feel heavier than what it does.
+ */
+export function FavoriteButton({
+  kind, targetId, active, size = 18, onChange,
+}: {
+  kind: "part" | "task";
+  targetId: string;
+  active: boolean;
+  size?: number;
+  /** Told the outcome once the request settles, so a list can drop a row that was just unstarred. */
+  onChange?: (active: boolean) => void;
+}) {
+  const [on, setOn] = React.useState(active);
+  const [busy, setBusy] = React.useState(false);
+  React.useEffect(() => setOn(active), [active]);
+
+  async function toggle(e: React.MouseEvent) {
+    // Never the row underneath — a favorite lives beside a link to the same
+    // object often enough that this has to stop the click there.
+    e.preventDefault();
+    e.stopPropagation();
+    if (busy) return;
+    const next = !on;
+    setOn(next);
+    setBusy(true);
+    try {
+      const r = await fetch("/api/favorites", {
+        method: next ? "POST" : "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ kind, targetId }),
+      });
+      if (!r.ok) throw new Error();
+      onChange?.(next);
+    } catch {
+      setOn(!next);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <button
+      type="button"
+      onClick={toggle}
+      disabled={busy}
+      aria-pressed={on}
+      aria-label={on ? "Remove from favorites" : "Add to favorites"}
+      title={on ? "Remove from favorites" : "Add to favorites"}
+      style={{
+        background: "none", border: "none", padding: 0, lineHeight: 1,
+        fontSize: size, cursor: busy ? "default" : "pointer",
+        color: on ? "var(--warn)" : "var(--text-faint)",
+      }}
+    >
+      {on ? "★" : "☆"}
+    </button>
+  );
+}
+
+/**
+ * A titled block that remembers whether it is open, per browser.
+ *
+ * Not per account: which sections someone likes collapsed is a convenience
+ * about this screen, not data worth a round trip or a field on the user
+ * record — and it should not follow them to a machine where the dashboard
+ * might not even be scrolled past the fold the same way.
+ */
+export function CollapsibleSection({
+  title, storageKey, defaultOpen = true, right, children,
+}: {
+  title: React.ReactNode;
+  /** Distinct per section — two sections sharing a key would open and close together. */
+  storageKey: string;
+  defaultOpen?: boolean;
+  /** Rendered beside the title, outside the toggle button — counts, filters, actions. */
+  right?: React.ReactNode;
+  children: React.ReactNode;
+}) {
+  const [open, setOpen] = React.useState(defaultOpen);
+
+  React.useEffect(() => {
+    try {
+      const v = localStorage.getItem(storageKey);
+      if (v != null) setOpen(v === "1");
+    } catch {
+      // A private window or a blocked store leaves the default, which is fine.
+    }
+  }, [storageKey]);
+
+  function toggle() {
+    setOpen((prev) => {
+      const next = !prev;
+      try { localStorage.setItem(storageKey, next ? "1" : "0"); } catch {}
+      return next;
+    });
+  }
+
+  return (
+    <div style={{ display: "grid", gap: open ? 12 : 0 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+        <button
+          onClick={toggle}
+          aria-expanded={open}
+          style={{
+            display: "flex", alignItems: "center", gap: 8, background: "none", border: "none",
+            padding: 0, margin: 0, cursor: "pointer", font: "inherit", color: "inherit",
+          }}
+        >
+          <span
+            aria-hidden
+            style={{
+              display: "inline-block", fontSize: 11, color: "var(--text-faint)",
+              transform: open ? "rotate(90deg)" : "none", transition: "transform .15s",
+            }}
+          >
+            ▶
+          </span>
+          {title}
+        </button>
+        {right}
+      </div>
+      {open && children}
+    </div>
   );
 }

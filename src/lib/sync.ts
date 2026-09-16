@@ -8,6 +8,7 @@ import { clientForEnterprise } from "@/lib/onshape/factory";
 import { bindAttributeProperties } from "@/lib/onshape/properties";
 import { listDefinitions, mapInbound, mapOutbound, type AttrDef } from "@/lib/attributes";
 import { nextNumber } from "@/lib/numbering";
+import { captureWorkspaceGeometry, geometryCaptureEnabled } from "@/lib/geometry";
 import type { OnshapeClient, PartCoords, PartMetadata } from "@/lib/onshape/types";
 
 /* -------------------------------------------------------------------------- */
@@ -237,8 +238,35 @@ export type SyncResult = {
  * attribute's direction, authority and editability. A real change to a
  * pre-release object produces a new iteration with a snapshot, which is the
  * pre-release history Onshape does not keep in a readable form.
+ *
+ * Retries once on a Mongoose `VersionError` — "No matching document found
+ * for id ... version N" — before giving up. That error means another sync
+ * of the same part landed between this one's read and its `save()`; caught
+ * live, from two webhook deliveries close enough together to overlap. A
+ * retry re-reads the part fresh and recomputes every diff against whatever
+ * the other sync just wrote, so it converges rather than racing again — and
+ * the Onshape writes a retried attempt repeats (a property push-back) are
+ * themselves idempotent, so repeating one changes nothing beyond a second,
+ * harmless network call.
  */
 export async function syncPartFromOnshape(
+  enterpriseId: string,
+  coords: PartCoords,
+  opts: Parameters<typeof syncPartFromOnshapeOnce>[2] = {}
+): Promise<SyncResult> {
+  try {
+    return await syncPartFromOnshapeOnce(enterpriseId, coords, opts);
+  } catch (err: any) {
+    if (err?.name !== "VersionError") throw err;
+    console.warn(
+      `[PLM] sync of ${coords.partId || coords.elementId} hit a concurrent write ` +
+      `(${err.message}); retrying once against the current record.`
+    );
+    return await syncPartFromOnshapeOnce(enterpriseId, coords, opts);
+  }
+}
+
+async function syncPartFromOnshapeOnce(
   enterpriseId: string,
   coords: PartCoords,
   opts: {
@@ -532,6 +560,28 @@ export async function syncPartFromOnshape(
 
     if (isNewResolved) {
       await snapshotIteration(part, "sync", Object.keys(inbound.changed), opts);
+
+      /*
+       * A first look at the part, captured before there is anything to
+       * release. Skipped when this sync itself came from a release: that path
+       * captures the released version separately, at the version Onshape just
+       * produced, which is the geometry that actually matters once it exists.
+       * Capturing the workspace here too would spend a second Onshape call to
+       * store a row this same request is about to make stale.
+       *
+       * Also skipped for a part `blocked` already marks as read-only —
+       * standard content and library parts (screws, washers, bearings, the
+       * same population the write-back and the thumbnail already refuse).
+       * Onshape's gltf export 403s for these exactly the way a property
+       * write does, and unlike a part that just has not synced yet, that
+       * answer never changes — attempting it would only spend a call to
+       * store the same refusal as a "failed" row forever.
+       */
+      if (!opts.fromRelease && !blocked && (await geometryCaptureEnabled(enterpriseId))) {
+        await captureWorkspaceGeometry(client, enterpriseId, String(part._id), readCoords(coordsForRead), {
+          isAssembly: kind === "assembly",
+        });
+      }
     }
   }
 
@@ -567,6 +617,8 @@ export async function syncPartFromOnshape(
       if (String(part.revision ?? "") !== String(incomingRev)) {
         changes.revision = { from: part.revision, to: incomingRev };
         part.revision = incomingRev;
+        // A genuine new revision — see PartSchema.starCount.
+        part.starCount = 0;
       }
     }
 

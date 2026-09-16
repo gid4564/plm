@@ -241,6 +241,23 @@ export type ReleasePackage = {
   items: ReleasePackageItem[];
   /** Workflow properties, keyed by property id. */
   properties: Record<string, unknown>;
+  /**
+   * The same properties as `properties`, with their metadata kept.
+   *
+   * `properties` is a value-only map because most callers just need to read a
+   * value back by id. Finding a property by name — a Comment field, say,
+   * mirroring how a task's is found — needs the name and editability that map
+   * throws away, so this carries the full records instead. Same shape as
+   * `OnshapeTask.properties`, on purpose: a release package's workflow is the
+   * same `BTWorkflowSnapshotInfo` a task's is.
+   */
+  propertyDefs: {
+    propertyId: string;
+    name: string;
+    value: unknown;
+    valueType: string;
+    editable: boolean;
+  }[];
   availableActions: WorkflowAction[];
   /**
    * Who Onshape will let act on this package.

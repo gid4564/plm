@@ -1,18 +1,24 @@
 import { z } from "zod";
 import { connectDb } from "@/lib/db";
 import {
-  ActivityLog, BomLink, Drawing, Enterprise, Part, PartIteration, Release,
+  ActivityLog, BomLink, Drawing, Enterprise, Part, PartGeometry, PartIteration, Release,
 } from "@/lib/models";
 import { requireSession } from "@/lib/auth/session";
-import { deletePart, plainAttributes, pushPartToOnshape, syncPartFromOnshape } from "@/lib/sync";
+import {
+  deletePart, plainAttributes, pushPartToOnshape, readCoords, syncPartFromOnshape,
+} from "@/lib/sync";
 import {
   editabilityReason, isEditable, listDefinitions, missingForRelease, missingForReleaseKeys,
   validateAttributes,
 } from "@/lib/attributes";
 import { handler, ok, fail } from "@/lib/api";
 import { onshapeElementUrl } from "@/lib/onshape/oauth";
+import { clientForEnterprise } from "@/lib/onshape/factory";
 import { tasksForPart } from "@/lib/tasks";
-import { geometryForPart } from "@/lib/geometry";
+import { captureReleasedGeometry, geometryForPart } from "@/lib/geometry";
+import { isFavorited } from "@/lib/favorites";
+import { registerStarRelease, setInitialRevision, starHistory, starLabel } from "@/lib/star-release";
+import { copyPart } from "@/lib/part-copy";
 
 type Ctx = { params: Promise<{ id: string }> };
 
@@ -35,7 +41,22 @@ export const GET = handler(async (_req: Request, ctx: Ctx) => {
   const attributes = plainAttributes(part.attributes);
   const state = String(part.lifecycleState);
 
-  const [children, parents, iterations, drawings, logs, ent, release, tasks, geometry] =
+  /*
+   * "Currently in the structure" excludes an edge a star release has since
+   * closed out — see lib/star-release.ts. Without this, a swapped assembly
+   * would show both the old and the new component here forever; the old one
+   * still belongs in the part's history, which the star releases list below
+   * is what carries it in.
+   */
+  const now = new Date();
+  const currentlyEffective = {
+    $and: [
+      { $or: [{ effectiveFrom: null }, { effectiveFrom: { $lte: now } }] },
+      { $or: [{ effectiveTo: null }, { effectiveTo: { $gte: now } }] },
+    ],
+  };
+
+  const [children, parents, iterations, drawings, logs, ent, release, tasks, geometry, isFavorite, stars] =
     await Promise.all([
     /*
      * Self-referencing edges are excluded rather than shown.
@@ -45,8 +66,8 @@ export const GET = handler(async (_req: Request, ctx: Ctx) => {
      * reads as a product bug rather than a bad row. The import path refuses to
      * create one; this makes sure one that arrived another way cannot mislead.
      */
-    BomLink.find({ parentId: id, childId: { $ne: id } }).lean(),
-    BomLink.find({ childId: id, parentId: { $ne: id } }).lean(),
+    BomLink.find({ parentId: id, childId: { $ne: id }, ...currentlyEffective }).lean(),
+    BomLink.find({ childId: id, parentId: { $ne: id }, ...currentlyEffective }).lean(),
     PartIteration.find({ partId: id }).sort({ iteration: -1 }).limit(25).lean(),
     Drawing.find({ partIds: id }).select("-attributes").lean(),
     ActivityLog.find({ partId: id }).sort({ createdAt: -1 }).limit(25).lean(),
@@ -60,8 +81,19 @@ export const GET = handler(async (_req: Request, ctx: Ctx) => {
      * query and a part page does not wait on a network call to render.
      */
     tasksForPart(s.enterpriseId, id),
-    /* What 3D has been captured, metadata only — never the mesh itself. */
-    geometryForPart(s.enterpriseId, id),
+    /*
+     * What 3D has been captured, metadata only — never the mesh itself.
+     *
+     * Never asked for a part `writeBackBlocked` marks read-only — standard
+     * content and library parts, which have no 3D representation to capture
+     * and no revision to attach one to. Without this, a row from before the
+     * capture side stopped even trying still shows Onshape's raw 403 for the
+     * gltf export, forever, on a part where "no picture" is not a failure at
+     * all but the honest answer.
+     */
+    part.writeBackBlocked ? [] : geometryForPart(s.enterpriseId, id),
+    isFavorited(s.userId, "part", id),
+    starHistory(s.enterpriseId, id),
   ]);
 
   // Resolve the other end of each structure edge in two queries, not one per row.
@@ -100,9 +132,13 @@ export const GET = handler(async (_req: Request, ctx: Ctx) => {
       productName: part.productName || "",
       name: part.name,
       kind: part.kind,
+      plmOnly: Boolean(part.plmOnly),
       revision: part.revision || "",
+      starCount: part.starCount ?? 0,
+      revisionLabel: starLabel(part.revision || "", part.starCount ?? 0),
       iteration: part.iteration ?? 1,
       lifecycleState: state,
+      isFavorite,
       onshapeState: part.onshapeState || "",
       documentId: part.documentId,
       elementId: part.elementId,
@@ -155,6 +191,7 @@ export const GET = handler(async (_req: Request, ctx: Ctx) => {
       children: children.map((l: any) => describe(l, "childId")),
       usedIn: parents.map((l: any) => describe(l, "parentId")),
     },
+    starReleases: stars,
     iterations: iterations.map((i: any) => ({
       iteration: i.iteration,
       revision: i.revision || "",
@@ -186,7 +223,9 @@ export const GET = handler(async (_req: Request, ctx: Ctx) => {
     tasks,
     openTaskCount: tasks.filter((t) => t.open).length,
     geometry,
-    onshapeUrl: onshapeElementUrl(part, (ent as any)?.onshapeDomain),
+    // A plmOnly part's documentId/elementId are synthetic — real-looking
+    // enough to satisfy the schema, not real enough to link to.
+    onshapeUrl: part.plmOnly ? null : onshapeElementUrl(part, (ent as any)?.onshapeDomain),
     logs: logs.map((l: any) => ({
       id: String(l._id),
       direction: l.direction,
@@ -314,11 +353,21 @@ export const PATCH = handler(async (req: Request, ctx: Ctx) => {
 export const POST = handler(async (req: Request, ctx: Ctx) => {
   const s = await requireSession();
   const { id } = await ctx.params;
-  const { action } = (await req.json().catch(() => ({}))) as { action?: string };
+  const { action, revision, reason, swap } = (await req.json().catch(() => ({}))) as {
+    action?: string; revision?: string;
+    reason?: string; swap?: { bomLinkId?: string; newPartId?: string };
+  };
 
   await connectDb();
   const part: any = await Part.findOne({ _id: id, enterpriseId: s.enterpriseId }).lean();
   if (!part) return fail("Part not found", 404);
+
+  if ((action === "push" || action === "pull") && part.plmOnly) {
+    return fail(
+      `${part.number || part.name} is PLM-only — it has no Onshape original to sync with.`,
+      422
+    );
+  }
 
   if (action === "push") {
     return ok({ push: await pushPartToOnshape(id, { trigger: "manual" }) });
@@ -334,6 +383,124 @@ export const POST = handler(async (req: Request, ctx: Ctx) => {
       { trigger: "manual", kind: part.kind }
     );
     return ok({ pull: result });
+  }
+
+  /*
+   * Re-export the 3D model by hand — the retry button for a capture that
+   * failed (too large before GridFS, a translation that timed out, Onshape
+   * briefly unreachable) without waiting for the next sync or release to
+   * try again on its own.
+   *
+   * Targets one existing row, named by its revision: a part can hold several
+   * (one per released revision, plus the unreleased "" row — see
+   * PartGeometry), and only the caller knows which one they are looking at.
+   * Nothing is invented for a revision PLM has no row for at all.
+   */
+  if (action === "recapture-geometry") {
+    // The same population the write-back and the thumbnail already refuse —
+    // standard content and library parts, read-only to this account. Onshape
+    // 403s the gltf export for these every time, so a retry can only ever
+    // reproduce the same failure.
+    if (part.writeBackBlocked) {
+      return fail(
+        `This part has no 3D capture to recreate: ${part.writeBackBlocked}`,
+        409
+      );
+    }
+
+    const row: any = await PartGeometry.findOne({
+      enterpriseId: s.enterpriseId, partId: id, revision: revision ?? "",
+    }).lean();
+    if (!row) {
+      return fail(
+        `No 3D capture at revision "${revision || "(none)"}" to recreate. ` +
+        `It has to have been attempted at least once first.`,
+        404
+      );
+    }
+
+    /*
+     * A released row is pinned to the version the release produced — read
+     * from there, never the live workspace, or "revision A" would start
+     * showing whatever the model looks like today. The unreleased row has no
+     * version to pin to, so it reads the part's current workspace, the same
+     * as the sync that first captured it.
+     */
+    const coords = row.revision
+      ? {
+          documentId: part.documentId, elementId: part.elementId, partId: part.partId,
+          configuration: part.configuration, workspaceId: null, versionId: row.onshapeVersionId,
+        }
+      : readCoords({
+          documentId: part.documentId, elementId: part.elementId, partId: part.partId,
+          configuration: part.configuration, workspaceId: part.workspaceId, versionId: part.versionId,
+        });
+
+    const { client } = await clientForEnterprise(s.enterpriseId);
+    const result = await captureReleasedGeometry(client, s.enterpriseId, id, coords, {
+      revision: row.revision || "",
+      releaseId: row.releaseId ? String(row.releaseId) : null,
+      isAssembly: part.kind === "assembly",
+    });
+    return ok({ recapture: result });
+  }
+
+  /*
+   * A new PLM number, the same metadata, no link back to Onshape at all.
+   * See lib/part-copy.ts.
+   */
+  if (action === "copy") {
+    try {
+      const result = await copyPart(s.enterpriseId, { userId: s.userId, email: s.email }, id);
+      return ok({ copy: result });
+    } catch (err: any) {
+      return fail(String(err?.message ?? err), 422);
+    }
+  }
+
+  /*
+   * "A*" — an off-cycle change to an already-released part, never sent to
+   * Onshape. See lib/star-release.ts for what this actually does; here it is
+   * just parsing the two request shapes (a component swap, or a plain note)
+   * into what that function wants.
+   */
+  if (action === "star-release") {
+    try {
+      const result = await registerStarRelease(
+        s.enterpriseId, { email: s.email }, id,
+        {
+          reason: String(reason ?? ""),
+          swap: swap?.bomLinkId && swap?.newPartId
+            ? { bomLinkId: swap.bomLinkId, newPartId: swap.newPartId }
+            : undefined,
+        }
+      );
+      return ok({ star: result });
+    } catch (err: any) {
+      return fail(String(err?.message ?? err), 422);
+    }
+  }
+
+  /*
+   * Catching PLM's own record up to reality — an object released before PLM
+   * tracked it, or directly in Onshape with no PLM release ever taken over.
+   * See lib/star-release.ts. Admin-only: this is the one write in the system
+   * that takes somebody's word for a revision rather than reading it off
+   * Onshape or assigning it through the release workflow.
+   */
+  if (action === "set-initial-revision") {
+    if (s.role !== "admin") {
+      return fail("Only an admin can record an object as already released outside PLM.", 403);
+    }
+    try {
+      const result = await setInitialRevision(
+        s.enterpriseId, { email: s.email }, id,
+        { revision: String(revision ?? ""), reason: String(reason ?? "") }
+      );
+      return ok({ initialRevision: result });
+    } catch (err: any) {
+      return fail(String(err?.message ?? err), 422);
+    }
   }
 
   /*
@@ -360,7 +527,11 @@ export const POST = handler(async (req: Request, ctx: Ctx) => {
     return ok({ obsoleted: true });
   }
 
-  return fail(`Unknown action "${action}". Use "push", "pull" or "obsolete".`, 422);
+  return fail(
+    `Unknown action "${action}". Use "push", "pull", "copy", "star-release", "set-initial-revision" or ` +
+    `"obsolete".`,
+    422
+  );
 });
 
 /**

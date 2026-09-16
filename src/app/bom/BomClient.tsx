@@ -6,6 +6,7 @@ import { Alert, PartThumb, RevChip, Spinner, StatusBadge } from "@/components/ui
 import { TaskCountBadge } from "@/components/PartTasks";
 import { AttributeInput, type Definition } from "@/components/AttributeInput";
 import { PartPanel } from "./PartPanel";
+import { StarReleaseDialog } from "@/components/StarReleaseDialog";
 
 type Node = {
   key: string;
@@ -17,6 +18,8 @@ type Node = {
   kind: "part" | "assembly";
   lifecycleState: string;
   revision: string;
+  starCount: number;
+  plmOnly: boolean;
   iteration: number;
   productName: string;
   findNumber: string;
@@ -36,6 +39,7 @@ type Node = {
   unreachable: boolean;
   openTaskCount: number;
   taskCount: number;
+  starReasons: string[];
 };
 
 type Row = Omit<Node, "children" | "key" | "quantity"> & { usedIn: number };
@@ -92,6 +96,9 @@ export function BomClient({
   const [q, setQ] = useState("");
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [openPart, setOpenPart] = useState<string | null>(null);
+  const [swapTarget, setSwapTarget] = useState<
+    { parentId: string; bomLinkId: string; number: string | null; name: string } | null
+  >(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   /* Narrow to the parts that are short of something, which is the work. */
   const [needsOnly, setNeedsOnly] = useState(false);
@@ -649,12 +656,14 @@ export function BomClient({
                 <TreeRows
                   key={n.key}
                   node={n}
+                  parentId={null}
                   collapsed={collapsed}
                   onToggle={toggle}
                   onOpen={setOpenPart}
                   onChanged={load}
                   selected={selected}
                   onSelect={toggleSelect}
+                  onSwap={setSwapTarget}
                 />
               ))}
             </tbody>
@@ -710,6 +719,14 @@ export function BomClient({
             : undefined
         }
       />
+
+      <StarReleaseDialog
+        open={swapTarget !== null}
+        onClose={() => setSwapTarget(null)}
+        onDone={load}
+        partId={swapTarget?.parentId ?? ""}
+        swapTarget={swapTarget}
+      />
     </div>
   );
 }
@@ -755,15 +772,18 @@ function Head({
 
 /** One node and its descendants, as table rows so the columns stay aligned. */
 function TreeRows({
-  node, collapsed, onToggle, onOpen, onChanged, selected, onSelect,
+  node, parentId, collapsed, onToggle, onOpen, onChanged, selected, onSelect, onSwap,
 }: {
   node: Node;
+  /** This node's own parent — null at the root, where there is no edge to swap. */
+  parentId: string | null;
   collapsed: Set<string>;
   onToggle: (key: string) => void;
   onOpen: (partId: string) => void;
   onChanged: () => void;
   selected: Set<string>;
   onSelect: (partId: string) => void;
+  onSwap: (target: { parentId: string; bomLinkId: string; number: string | null; name: string }) => void;
 }) {
   const isCollapsed = collapsed.has(node.key);
   const hasKids = node.children.length > 0;
@@ -810,13 +830,24 @@ function TreeRows({
           {node.totalQuantity}
         </td>
         <td>
-          {node.linkId ? (
-            <LinkWindow
-              linkId={node.linkId}
-              from={node.linkEffectiveFrom}
-              to={node.linkEffectiveTo}
-              onSaved={onChanged}
-            />
+          {node.linkId && parentId ? (
+            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <LinkWindow
+                linkId={node.linkId}
+                from={node.linkEffectiveFrom}
+                to={node.linkEffectiveTo}
+                onSaved={onChanged}
+              />
+              <button
+                className="btn btn-sm"
+                title="Swap this component for a form-fit-function equivalent, without a new revision"
+                onClick={() =>
+                  onSwap({ parentId, bomLinkId: node.linkId!, number: node.number, name: node.name })
+                }
+              >
+                Swap…
+              </button>
+            </div>
           ) : (
             <span style={{ fontSize: 11.5, color: "var(--text-faint)" }}>top level</span>
           )}
@@ -824,8 +855,8 @@ function TreeRows({
       </tr>
       {!isCollapsed && node.children.map((c) => (
         <TreeRows
-          key={c.key} node={c} collapsed={collapsed} onToggle={onToggle}
-          onOpen={onOpen} onChanged={onChanged} selected={selected} onSelect={onSelect}
+          key={c.key} node={c} parentId={node.partId} collapsed={collapsed} onToggle={onToggle}
+          onOpen={onOpen} onChanged={onChanged} selected={selected} onSelect={onSelect} onSwap={onSwap}
         />
       ))}
     </>
@@ -838,10 +869,10 @@ function NumberCell({
 }: {
   row: {
     partId: string; number: string | null; name: string; kind: string;
-    revision: string; iteration: number;
+    revision: string; starCount?: number; starReasons?: string[]; iteration: number;
     alsoUsedElsewhere?: boolean; cycle?: boolean; unreachable?: boolean; productName?: string;
     missingForRelease?: string[];
-    openTaskCount?: number; taskCount?: number;
+    openTaskCount?: number; taskCount?: number; plmOnly?: boolean;
   };
   onOpen: (partId: string) => void;
 }) {
@@ -858,8 +889,16 @@ function NumberCell({
       >
         {row.number ?? row.name ?? "—"}
       </button>
-      <RevChip revision={row.revision} iteration={row.iteration} />
+      <RevChip
+        revision={row.revision} iteration={row.iteration} starCount={row.starCount ?? 0}
+        starReasons={row.starReasons}
+      />
       {row.kind === "assembly" && <span className="badge">asm</span>}
+      {row.plmOnly && (
+        <span className="badge" title="Created by copying another part — no Onshape original backs this one">
+          PLM only
+        </span>
+      )}
       {row.alsoUsedElsewhere && (
         <span className="badge" title="This part appears in more than one place in this BOM">
           shared

@@ -318,8 +318,8 @@ export function SettingsClient(p: Props) {
                 checked={Boolean(ent?.releaseTakeoverEnabled)}
                 onChange={(e) =>
                   run("takeover", async () => {
-                    await post("/api/enterprise", { releaseTakeoverEnabled: e.target.checked }, "PATCH");
-                    setNotice(e.target.checked ? "PLM will now take over releases." : "Release takeover switched off.");
+                    const j = await post("/api/enterprise", { releaseTakeoverEnabled: e.target.checked }, "PATCH");
+                    setNotice(j.releaseTakeoverEnabled ? "PLM will now take over releases." : "Release takeover switched off.");
                     await load();
                   })
                 }
@@ -334,10 +334,10 @@ export function SettingsClient(p: Props) {
                 checked={Boolean(ent?.releaseGltfEnabled)}
                 onChange={(e) =>
                   run("gltf", async () => {
-                    await post("/api/enterprise", { releaseGltfEnabled: e.target.checked }, "PATCH");
+                    const j = await post("/api/enterprise", { releaseGltfEnabled: e.target.checked }, "PATCH");
                     setNotice(
-                      e.target.checked
-                        ? "PLM will capture the 3D model of each part as it is released."
+                      j.releaseGltfEnabled
+                        ? "PLM will capture the 3D model of each part when it is synced, and again when released."
                         : "3D capture switched off. Models already captured are kept."
                     );
                     await load();
@@ -345,12 +345,14 @@ export function SettingsClient(p: Props) {
                 }
               />
               <span>
-                Capture the 3D model (glTF) when a part is released
+                Capture the 3D model (glTF) on sync and release
                 <span style={{ display: "block", color: "var(--text-faint)", fontSize: 11.5, marginTop: 2 }}>
-                  Taken from the version the release produces, so it is the geometry
-                  as released, and kept per revision. Costs one Onshape call per
-                  released item; an assembly goes through a translation job and takes
-                  longer than a part.
+                  A first capture is taken from the workspace as soon as a part is
+                  synced, so there is something to look at right away; release then
+                  takes its own capture from the version it produces — the geometry
+                  as released, kept per revision for good. Costs one Onshape call per
+                  part synced or released; an assembly goes through a translation job
+                  and takes longer than a part.
                 </span>
               </span>
             </label>
@@ -860,6 +862,67 @@ export function SettingsClient(p: Props) {
           ))}
         </details>
       </section>
+
+      {/* ------------------------------ Danger zone --------------------------- */}
+      {isAdmin && (
+        <section className="card" style={{ display: "grid", gap: 10, borderColor: "var(--danger)" }}>
+          <h2 style={{ fontSize: 14, margin: 0, fontWeight: 650, color: "var(--danger)" }}>
+            Danger zone
+          </h2>
+
+          <Alert kind="warn">
+            <strong>Clearing the work cannot be undone in PLM.</strong> Parts, assemblies,
+            releases, drawings, 3D captures, tasks and products are removed for good — including
+            release decisions and anything captured only here. Onshape itself is never touched, so
+            a part released there keeps its revision and syncing it back in will bring it straight
+            back; what does not come back is PLM&rsquo;s own record of what happened to it.
+          </Alert>
+
+          <p style={{ fontSize: 12.5, color: "var(--text-muted)", margin: 0, lineHeight: 1.5 }}>
+            Removes every part and assembly, their iterations, BOM links, drawings, 3D captures,
+            releases, thumbnails, products, tasks and the activity log — everything that makes up
+            the work, so you can start over from a clean slate. Left alone: the attribute schema
+            and its Onshape property mapping, registered OAuth clients and tokens, numbering
+            sequences, and every login.
+          </p>
+
+          <div>
+            <button
+              className="btn btn-sm btn-danger"
+              disabled={busy != null}
+              onClick={() =>
+                run("clear-preview", async () => {
+                  const preview = await post("/api/enterprise", { action: "clear-work-data" });
+                  if (preview.total === 0) {
+                    setNotice("There is nothing to clear — PLM already has no parts, releases, drawings or tasks.");
+                    return;
+                  }
+
+                  const breakdown = preview.counts
+                    .filter((c: { label: string; count: number }) => c.count > 0)
+                    .map((c: { label: string; count: number }) => `${c.count} ${c.label}`)
+                    .join(", ");
+
+                  if (
+                    !confirm(
+                      `Clear ${preview.total} item(s) — ${breakdown}?\n\n` +
+                      "This cannot be undone in PLM. Settings and the attribute mapping are not " +
+                      "touched, and Onshape itself is untouched."
+                    )
+                  ) {
+                    return;
+                  }
+
+                  const result = await post("/api/enterprise", { action: "clear-work-data", apply: true });
+                  setNotice(`Cleared ${result.total} item(s) — ${breakdown}. PLM is now a clean slate.`);
+                })
+              }
+            >
+              {busy === "clear-preview" ? <Spinner /> : "Clear all parts, assemblies, releases, drawings and tasks…"}
+            </button>
+          </div>
+        </section>
+      )}
     </div>
   );
 }

@@ -17,6 +17,21 @@ import { mapStandardProperties, resolveEnumLabel, toDisplayString, type RawPrope
 import { classify } from "./element-type";
 import { resolveTaskCommentContext } from "./object-types";
 
+/** [r, g, b] in 0..1, for a glTF baseColorFactor derived from a part's hue. */
+function hslToRgb(h: number, s: number, l: number): [number, number, number] {
+  const c = (1 - Math.abs(2 * l - 1)) * s;
+  const x = c * (1 - Math.abs(((h / 60) % 2) - 1));
+  const m = l - c / 2;
+  const [r, g, b] =
+    h < 60 ? [c, x, 0] :
+    h < 120 ? [x, c, 0] :
+    h < 180 ? [0, c, x] :
+    h < 240 ? [0, x, c] :
+    h < 300 ? [x, 0, c] :
+    [c, 0, x];
+  return [r + m, g + m, b + m];
+}
+
 /**
  * Stand-in for Onshape, backed by the same MongoDB PLM uses.
  *
@@ -599,12 +614,20 @@ export class MockOnshapeClient implements OnshapeClient {
   }
 
   /**
-   * A glTF export, simulated.
+   * A glTF export, simulated — and a real model, not an empty scene.
    *
-   * Returns a real, minimal GLB: a valid 12-byte header plus a JSON chunk. It
-   * matters that it is well-formed rather than random bytes — the size guard,
-   * the content type and anything that later tries to render it all see the
-   * shape they would see from a live tenant.
+   * It emits an actual cube: header, JSON chunk and binary chunk, with
+   * positions and indices. An empty scene would be a valid GLB that renders as
+   * nothing, so anyone demonstrating against the simulator would see a blank
+   * viewer and reasonably conclude the feature was broken. The point of a
+   * simulator is that what works here works there.
+   *
+   * An assembly gets one cube per member part, laid out side by side rather
+   * than one shared cube — the same members getMassProperties rolls up for an
+   * assembly. A simulator that always emitted a single mesh for an assembly
+   * could never exercise the multi-node case the real glTF export produces
+   * (see gltf-package.ts), and would look identical to a single part's export
+   * in any viewer.
    */
   async exportGltf(
     c: PartCoords,
@@ -620,26 +643,112 @@ export class MockOnshapeClient implements OnshapeClient {
       );
     }
 
-    const json = Buffer.from(JSON.stringify({
-      asset: { version: "2.0", generator: "PLM Onshape simulator" },
-      scenes: [{ nodes: [] }], scene: 0, nodes: [],
-      extras: { documentId: c.documentId, elementId: c.elementId, partId: c.partId ?? "" },
-    }), "utf8");
-    /* A GLB chunk is padded to a 4-byte boundary with spaces. */
-    const pad = (4 - (json.length % 4)) % 4;
-    const chunk = Buffer.concat([json, Buffer.alloc(pad, 0x20)]);
+    const members: { key: string; name: string }[] = opts.isAssembly
+      ? await (async () => {
+          const rows: any[] = await MockOnshapePart.find({
+            companyId: this.companyId,
+            documentId: c.documentId,
+            partId: { $nin: [null, ""] },
+          }).lean();
+          return rows.length
+            ? rows.map((p) => ({ key: String(p.partId), name: String(p.partId) }))
+            : [{ key: c.elementId, name: "part" }];
+        })()
+      : [{ key: c.partId || c.elementId || "part", name: c.partId || c.elementId || "part" }];
 
+    /* A unit cube: 8 corners, 12 triangles. */
+    const h = 0.5;
+    const positions = new Float32Array([
+      -h, -h, -h,   h, -h, -h,   h,  h, -h,  -h,  h, -h,
+      -h, -h,  h,   h, -h,  h,   h,  h,  h,  -h,  h,  h,
+    ]);
+    const indices = new Uint16Array([
+      0, 1, 2,  0, 2, 3,   // back
+      4, 6, 5,  4, 7, 6,   // front
+      0, 4, 5,  0, 5, 1,   // bottom
+      3, 2, 6,  3, 6, 7,   // top
+      0, 3, 7,  0, 7, 4,   // left
+      1, 5, 6,  1, 6, 2,   // right
+    ]);
+
+    const posBytes = Buffer.from(positions.buffer, positions.byteOffset, positions.byteLength);
+    const idxBytes = Buffer.from(indices.buffer, indices.byteOffset, indices.byteLength);
+    /* Each bufferView must start on a 4-byte boundary. */
+    const idxPad = (4 - (posBytes.length % 4)) % 4;
+    const bin = Buffer.concat([posBytes, Buffer.alloc(idxPad), idxBytes]);
+
+    /* Every member reuses the one cube's geometry — only its material and its
+       node's placement differ — so the buffer holds a single copy regardless
+       of how many parts the assembly simulates. */
+    const spacing = 1.5;
+    const offset = (members.length - 1) / 2;
+    const json = {
+      asset: { version: "2.0", generator: "PLM Onshape simulator" },
+      scene: 0,
+      scenes: [{ nodes: members.map((_, i) => i) }],
+      nodes: members.map((m, i) => ({
+        mesh: i,
+        name: m.name,
+        translation: members.length > 1 ? [(i - offset) * spacing, 0, 0] : undefined,
+      })),
+      meshes: members.map((m, i) => ({
+        name: opts.isAssembly ? `Simulated part (${m.name})` : "Simulated part",
+        primitives: [{ attributes: { POSITION: 0 }, indices: 1, material: i }],
+      })),
+      materials: members.map((m) => {
+        let hue = 0;
+        for (const ch of m.key) hue = (hue * 31 + ch.charCodeAt(0)) % 360;
+        return {
+          name: "Simulated",
+          pbrMetallicRoughness: {
+            baseColorFactor: [...hslToRgb(hue, 0.35, 0.62), 1],
+            metallicFactor: 0.1,
+            roughnessFactor: 0.7,
+          },
+        };
+      }),
+      accessors: [
+        {
+          bufferView: 0, componentType: 5126, count: 8, type: "VEC3",
+          /* POSITION requires min and max; a viewer frames the camera with them. */
+          min: [-h, -h, -h], max: [h, h, h],
+        },
+        { bufferView: 1, componentType: 5123, count: indices.length, type: "SCALAR" },
+      ],
+      bufferViews: [
+        { buffer: 0, byteOffset: 0, byteLength: posBytes.length, target: 34962 },
+        { buffer: 0, byteOffset: posBytes.length + idxPad, byteLength: idxBytes.length, target: 34963 },
+      ],
+      buffers: [{ byteLength: bin.length }],
+      extras: { documentId: c.documentId, elementId: c.elementId, partId: c.partId ?? "" },
+    };
+
+    const jsonBuf = Buffer.from(JSON.stringify(json), "utf8");
+    /* The JSON chunk pads with spaces, the binary chunk with zeroes. */
+    const jsonPad = (4 - (jsonBuf.length % 4)) % 4;
+    const jsonChunk = Buffer.concat([jsonBuf, Buffer.alloc(jsonPad, 0x20)]);
+    const binPad = (4 - (bin.length % 4)) % 4;
+    const binChunk = Buffer.concat([bin, Buffer.alloc(binPad)]);
+
+    const chunkHeader = (length: number, type: string) => {
+      const b = Buffer.alloc(8);
+      b.writeUInt32LE(length, 0);
+      b.write(type, 4, "ascii");
+      return b;
+    };
+
+    const total = 12 + 8 + jsonChunk.length + 8 + binChunk.length;
     const header = Buffer.alloc(12);
     header.write("glTF", 0, "ascii");
     header.writeUInt32LE(2, 4);
-    header.writeUInt32LE(12 + 8 + chunk.length, 8);
-
-    const chunkHeader = Buffer.alloc(8);
-    chunkHeader.writeUInt32LE(chunk.length, 0);
-    chunkHeader.write("JSON", 4, "ascii");
+    header.writeUInt32LE(total, 8);
 
     return {
-      data: Buffer.concat([header, chunkHeader, chunk]),
+      data: Buffer.concat([
+        header,
+        chunkHeader(jsonChunk.length, "JSON"), jsonChunk,
+        chunkHeader(binChunk.length, "BIN\u0000"), binChunk,
+      ]),
       contentType: "model/gltf-binary",
       via: opts.isAssembly ? "translation" : "direct",
       elapsedMs: Date.now() - started,
@@ -1102,6 +1211,10 @@ export class MockOnshapeClient implements OnshapeClient {
       changeOrderId: String(d.changeOrderId ?? ""),
       items,
       properties: (d.properties ?? {}) as Record<string, unknown>,
+      propertyDefs: (d.propertyDefs ?? []).map((pr: any) => ({
+        propertyId: pr.propertyId, name: pr.name, value: pr.value ?? null,
+        valueType: pr.valueType ?? "STRING", editable: Boolean(pr.editable),
+      })),
       availableActions: this.actionsFor(String(d.state ?? "")),
       syncedWithPLM: Boolean(d.syncedWithPLM),
       raw: d as Record<string, unknown>,
@@ -1188,9 +1301,20 @@ export class MockOnshapeClient implements OnshapeClient {
       doc.state = "OBSOLETE";
     }
 
-    if (opts.properties) doc.properties = { ...(doc.properties ?? {}), ...opts.properties };
+    if (opts.properties) {
+      doc.properties = { ...(doc.properties ?? {}), ...opts.properties };
+      // Kept in step with `properties`: a caller that reads a written value
+      // back off `propertyDefs` (the way a Comment write is verified) would
+      // otherwise see the value it sent go missing.
+      doc.propertyDefs = (doc.propertyDefs ?? []).map((pr: any) =>
+        Object.prototype.hasOwnProperty.call(opts.properties, pr.propertyId)
+          ? { ...(pr.toObject ? pr.toObject() : pr), value: (opts.properties as any)[pr.propertyId] }
+          : pr
+      );
+    }
     doc.markModified("items");
     doc.markModified("properties");
+    doc.markModified("propertyDefs");
     await doc.save();
 
     return this.toPackage(doc.toObject());
@@ -1269,6 +1393,16 @@ export class MockOnshapeClient implements OnshapeClient {
       state: "PENDING",
       items,
       properties: {},
+      /*
+       * A Comment property, as a real tenant's stock release workflow has
+       * one — so the "write a comment back on release" path (PLM writes
+       * "Released by PLM" through this property; see live-client's
+       * findCommentProperty) has something to find locally, the same way
+       * MockOnshapeTaskSchema seeds one for tasks.
+       */
+      propertyDefs: [
+        { propertyId: "comment", name: "Comment", value: null, valueType: "STRING", editable: true },
+      ],
       createdByEmail: this.actingUser?.email ?? "designer@mockenterprise.test",
     });
 

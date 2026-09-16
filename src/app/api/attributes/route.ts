@@ -1,8 +1,9 @@
 import { z } from "zod";
 import { connectDb } from "@/lib/db";
-import { ActivityLog, AttributeDefinition, LIFECYCLE_STATES } from "@/lib/models";
+import { ActivityLog, AttributeDefinition, Enterprise, LIFECYCLE_STATES } from "@/lib/models";
 import { requireSession } from "@/lib/auth/session";
 import { seedAttributeDefinitions, shapeDefinition } from "@/lib/attributes";
+import { bindAttributeProperties } from "@/lib/onshape/properties";
 import { handler, ok, fail } from "@/lib/api";
 
 /** The whole attribute schema for this enterprise, both object types. */
@@ -113,12 +114,25 @@ export const POST = handler(async (req: Request) => {
 
   const created: any = await AttributeDefinition.create({ ...d, enterpriseId: s.enterpriseId });
 
+  /*
+   * Resolved against whatever was already discovered, immediately — not left
+   * for the next sync or a separate "Run discovery" click. Without this, a
+   * mapping that names a real, already-discovered property still shows
+   * "not found" the instant it is saved: the id is what makes it "found", and
+   * nothing before this filled it in. No Onshape call needed — the cached
+   * list from the last discovery is exactly what "Run discovery" itself
+   * matches against.
+   */
+  const ent: any = await Enterprise.findById(s.enterpriseId).select("onshapePropertyDefs").lean();
+  await bindAttributeProperties(s.enterpriseId, ent?.onshapePropertyDefs ?? []);
+  const bound: any = await AttributeDefinition.findById(created._id).lean();
+
   await ActivityLog.create({
     enterpriseId: s.enterpriseId, direction: "plm", action: "created", trigger: "user-edit", ok: true,
     message: `${s.email} added the ${d.objectType.toLowerCase()} attribute "${d.label}" (${d.key})`,
   });
 
-  return ok({ definition: shapeDefinition(created.toObject()) }, 201);
+  return ok({ definition: shapeDefinition(bound ?? created.toObject()) }, 201);
 });
 
 /** Create the seed schema, for an enterprise that has none or is missing parts of it. */

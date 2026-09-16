@@ -595,6 +595,18 @@ const PartSchema = new Schema(
     revision: { type: String, default: "" },
 
     /**
+     * How many star releases the CURRENT revision has had — "A*", "A**", and
+     * so on. PLM's own counter, owned entirely by PLM: a star release is by
+     * definition the thing that does NOT go to Onshape, so there is nothing
+     * for Onshape to assign here the way it assigns `revision` itself.
+     *
+     * Reset to 0 wherever `revision` is next assigned a new real letter (see
+     * release.ts) — a star only ever counts off-cycle changes since the last
+     * genuine release, never across one.
+     */
+    starCount: { type: Number, default: 0 },
+
+    /**
      * The PLM iteration counter, owned by PLM.
      *
      * Increments every time a sync brings in a real change while the part is
@@ -661,6 +673,20 @@ const PartSchema = new Schema(
      */
     writeBackBlocked: { type: String, default: null },
     lastPushError: { type: String, default: null },
+
+    /**
+     * Created by copying another part, entirely inside PLM — no Onshape
+     * object backs this one at all, not even a read-only one.
+     *
+     * `documentId`/`elementId` still hold something, because both are
+     * required and part of this schema's own uniqueness key below — but it
+     * is a synthetic value (`"plm-only"` / `"plm-only:<this part's own id>"`),
+     * never a real Onshape id. Every place that would otherwise call Onshape
+     * for this part — a sync, a push, a thumbnail, the "Open in Onshape"
+     * link — checks this flag first rather than a documentId that merely
+     * happens to be non-empty.
+     */
+    plmOnly: { type: Boolean, default: false },
   },
   { timestamps: true }
 );
@@ -757,6 +783,58 @@ const BomLinkSchema = new Schema(
   { timestamps: true }
 );
 BomLinkSchema.index({ enterpriseId: 1, parentId: 1, childId: 1 }, { unique: true });
+
+/* -------------------------------------------------------------------------- */
+/* StarRelease — an off-cycle change to an already-released part or assembly,  */
+/* recorded without moving its revision or touching Onshape at all.           */
+/*                                                                            */
+/* "A*" is PLM's own idea, not Onshape's — a form-fit-function-equivalent      */
+/* substitution (a supplier part renumbered, nothing else) or a metadata or    */
+/* cosmetic correction that does not warrant a real new revision. One document */
+/* per star event, so the reason for each is kept even once several have       */
+/* landed on the same base revision.                                          */
+/* -------------------------------------------------------------------------- */
+
+const StarReleaseSchema = new Schema(
+  {
+    enterpriseId: { type: Schema.Types.ObjectId, ref: "Enterprise", required: true, index: true },
+    /** The part or assembly this star is against — whoever "owns" the change. */
+    partId: { type: Schema.Types.ObjectId, ref: "Part", required: true, index: true },
+
+    /** The revision this star applies to, e.g. "A" — copied at the time, never recomputed. */
+    baseRevision: { type: String, required: true },
+    /** 1st, 2nd, ... star on `baseRevision` — what makes "A*" become "A**". */
+    starIndex: { type: Number, required: true },
+
+    reason: { type: String, required: true },
+
+    /**
+     * Present only when this star came from swapping a BOM component, rather
+     * than a plain metadata or cosmetic note against the part itself.
+     *
+     * Both link ids are kept, not just the parts: `oldBomLinkId` is the edge
+     * that was closed out (its `effectiveTo` set), `newBomLinkId` the one
+     * created to replace it — the actual substitution mechanism lives on
+     * BomLink's own effectivity dates (see BomLinkSchema), which is also what
+     * keeps the superseded component looking like a perfectly good part
+     * everywhere else it is used.
+     */
+    swap: {
+      type: {
+        _id: false,
+        oldBomLinkId: { type: Schema.Types.ObjectId, ref: "BomLink" },
+        newBomLinkId: { type: Schema.Types.ObjectId, ref: "BomLink" },
+        fromPartId: { type: Schema.Types.ObjectId, ref: "Part" },
+        toPartId: { type: Schema.Types.ObjectId, ref: "Part" },
+      },
+      default: null,
+    },
+
+    createdByEmail: { type: String, default: "" },
+  },
+  { timestamps: true }
+);
+StarReleaseSchema.index({ enterpriseId: 1, partId: 1, createdAt: -1 });
 
 /* -------------------------------------------------------------------------- */
 /* Drawing — a drawing document, and the versioned PDFs it holds.              */
@@ -880,7 +958,15 @@ const PartGeometrySchema = new Schema(
     revision: { type: String, default: "" },
 
     contentType: { type: String, default: "model/gltf-binary" },
+    /**
+     * The bytes, inline — but only up to INLINE_GEOMETRY_BYTES (see
+     * geometry.ts). A model larger than that is in GridFS instead, named by
+     * gridfsFileId, and this stays null; the two are never both set. Kept
+     * inline below the threshold because it is simpler and one fewer round
+     * trip to read — most captures are well under it.
+     */
     data: { type: Buffer, default: null },
+    gridfsFileId: { type: Schema.Types.ObjectId, default: null },
     size: { type: Number, default: 0 },
 
     /** The Onshape version it was taken from — the one the release produced. */
@@ -1176,6 +1262,32 @@ const ActivityLogSchema = new Schema(
 ActivityLogSchema.index({ enterpriseId: 1, createdAt: -1 });
 
 /* -------------------------------------------------------------------------- */
+/* Favorite — one user's personal shortlist of parts, assemblies and tasks.    */
+/*                                                                            */
+/* Per user, not per enterprise: what one person wants to keep an eye on is    */
+/* not a fact about the object, and two people on the same part should not     */
+/* see each other's list appear or disappear on their own dashboard.           */
+/* -------------------------------------------------------------------------- */
+
+const FavoriteSchema = new Schema(
+  {
+    enterpriseId: { type: Schema.Types.ObjectId, ref: "Enterprise", required: true, index: true },
+    userId: { type: Schema.Types.ObjectId, ref: "User", required: true, index: true },
+    /**
+     * An assembly is a Part with kind "assembly" — see PartSchema.kind — so
+     * "part" here already covers both; there is no separate "assembly" kind
+     * to store.
+     */
+    kind: { type: String, enum: ["part", "task"], required: true },
+    targetId: { type: Schema.Types.ObjectId, required: true },
+  },
+  { timestamps: true }
+);
+// One star per object per person — a second POST is a no-op, not a duplicate row.
+FavoriteSchema.index({ userId: 1, kind: 1, targetId: 1 }, { unique: true });
+FavoriteSchema.index({ userId: 1, createdAt: -1 });
+
+/* -------------------------------------------------------------------------- */
 /* SelfWrite — echo suppression.                                               */
 /*                                                                            */
 /* Writing a property back into Onshape fires onshape.model.lifecycle.metadata */
@@ -1433,6 +1545,24 @@ const MockReleasePackageSchema = new Schema(
       default: [],
     },
     properties: { type: Schema.Types.Mixed, default: {} },
+    /*
+     * The same properties, with metadata — a package's Comment property lives
+     * here, the same place a task's does (see MockOnshapeTaskSchema.properties
+     * and docs/ONSHAPE-INTEGRATION-SPEC.md T2, T6). Kept separate from
+     * `properties` above rather than replacing it: that field is the plain
+     * value map every existing caller already reads.
+     */
+    propertyDefs: {
+      type: [{
+        _id: false,
+        propertyId: String,
+        name: String,
+        value: Schema.Types.Mixed,
+        valueType: { type: String },
+        editable: Boolean,
+      }],
+      default: [],
+    },
     syncedWithPLM: { type: Boolean, default: false },
     createdByEmail: { type: String, default: "" },
   },
@@ -1475,6 +1605,7 @@ export const Task = models.Task || model("Task", TaskSchema);
 export const Part = models.Part || model("Part", PartSchema);
 export const PartIteration = models.PartIteration || model("PartIteration", PartIterationSchema);
 export const BomLink = models.BomLink || model("BomLink", BomLinkSchema);
+export const StarRelease = models.StarRelease || model("StarRelease", StarReleaseSchema);
 export const Drawing = models.Drawing || model("Drawing", DrawingSchema);
 export const DrawingFile = models.DrawingFile || model("DrawingFile", DrawingFileSchema);
 export const PartGeometry =
@@ -1486,6 +1617,7 @@ export const OAuthToken = models.OAuthToken || model("OAuthToken", OAuthTokenSch
 export const NumberingSequence = models.NumberingSequence || model("NumberingSequence", NumberingSequenceSchema);
 export const NumberIssuedLog = models.NumberIssuedLog || model("NumberIssuedLog", NumberIssuedLogSchema);
 export const ActivityLog = models.ActivityLog || model("ActivityLog", ActivityLogSchema);
+export const Favorite = models.Favorite || model("Favorite", FavoriteSchema);
 export const SelfWrite = models.SelfWrite || model("SelfWrite", SelfWriteSchema);
 export const PartThumbnail = models.PartThumbnail || model("PartThumbnail", PartThumbnailSchema);
 export const MockOnshapePart = models.MockOnshapePart || model("MockOnshapePart", MockOnshapePartSchema);

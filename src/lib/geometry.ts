@@ -1,6 +1,11 @@
 import { connectDb } from "@/lib/db";
 import { ActivityLog, Enterprise, Part, PartGeometry } from "@/lib/models";
+import { gridfsDelete, gridfsDownload, gridfsUpload } from "@/lib/gridfs";
+import { looksLikeZip, unpackGltfZip } from "@/lib/onshape/gltf-package";
 import type { OnshapeClient, PartCoords } from "@/lib/onshape/types";
+
+/** The GridFS bucket every captured model larger than INLINE_GEOMETRY_BYTES lives in. */
+const GEOMETRY_BUCKET = "part-geometry";
 
 /**
  * The 3D of a part, captured when it is released.
@@ -16,17 +21,27 @@ import type { OnshapeClient, PartCoords } from "@/lib/onshape/types";
  */
 
 /**
- * The largest glTF PLM will store, in bytes.
- *
- * MongoDB refuses a document over 16MB, and it refuses it with an error about
- * BSON size that says nothing about geometry. A part whose mesh is bigger than
- * this is a real situation — a dense assembly export easily is — so it is
- * caught here and recorded as a reason rather than thrown as a database fault.
- *
- * 12MB rather than 16: the document also carries its own fields, and Mongo
- * measures the encoded total.
+ * Below this, a captured glTF is stored inline on the PartGeometry document
+ * itself. MongoDB refuses any document over 16MB, and it refuses it with an
+ * error about BSON size that says nothing about geometry — so this stays
+ * comfortably under that, the document also carries its own fields and Mongo
+ * measures the encoded total. Above it, the bytes go to GridFS instead (see
+ * gridfs.ts), which has no such ceiling.
  */
-export const MAX_GEOMETRY_BYTES = 12 * 1024 * 1024;
+const INLINE_GEOMETRY_BYTES = 12 * 1024 * 1024;
+
+/**
+ * The largest glTF PLM will store at all, in bytes.
+ *
+ * A dense assembly export can legitimately run to tens of megabytes — the
+ * limit that used to sit at 12MB, matching MongoDB's per-document ceiling,
+ * refused real assemblies for no reason once GridFS removed the reason it
+ * existed. 100MB is not a technical ceiling — GridFS itself has none — it is
+ * a sanity bound: an Onshape export past this is far more likely to be a
+ * badly-tessellated mesh than a model worth keeping a full copy of, and PLM's
+ * own database should not grow without any bound at all.
+ */
+export const MAX_GEOMETRY_BYTES = 100 * 1024 * 1024;
 
 /**
  * The bytes of a stored geometry row, whatever shape they came back in.
@@ -46,6 +61,49 @@ export function geometryBytes(value: unknown): Buffer {
   const inner = (value as { buffer?: unknown }).buffer;
   if (inner) return Buffer.from(inner as Uint8Array);
   return Buffer.alloc(0);
+}
+
+/**
+ * The bytes of a stored geometry row, wherever they actually live.
+ *
+ * The one thing every reader of a PartGeometry row has to get right: check
+ * gridfsFileId first, and only fall back to the inline field when it is
+ * unset. geometryBytes alone is correct for a row captured before GridFS
+ * support existed, or one small enough to have stayed inline — but silently
+ * wrong for a large one, where the inline field is deliberately null and the
+ * real bytes are in GridFS. This is what the serving route and anything else
+ * that needs the actual model should call.
+ */
+export async function readGeometryBytes(
+  row: { data?: unknown; gridfsFileId?: unknown } | null | undefined
+): Promise<Buffer> {
+  if (!row) return Buffer.alloc(0);
+  if (row.gridfsFileId) {
+    return gridfsDownload(GEOMETRY_BUCKET, row.gridfsFileId as any);
+  }
+  return geometryBytes(row.data);
+}
+
+/**
+ * What the bytes Onshape sent actually are.
+ *
+ * Asked rather than assumed. The endpoint offers GLB and glTF-JSON at equal
+ * quality values and PLM requests GLB explicitly, but content negotiation is
+ * the server's to decide — and a 200 carrying an HTML error page from a
+ * gateway is a shape this integration has met before. Storing one as "a model"
+ * would put a file on a part record that no viewer can open, with nothing
+ * saying why.
+ *
+ * Returns null when it is neither, which the caller turns into a refusal.
+ */
+export function detectGltfFormat(bytes: Buffer): "glb" | "gltf-json" | null {
+  if (bytes.length >= 4 && bytes.subarray(0, 4).toString("ascii") === "glTF") return "glb";
+
+  /* The JSON form: a glTF asset object. Sniffed from the head, not parsed. */
+  const head = bytes.subarray(0, 512).toString("utf8").trimStart();
+  if (head.startsWith("{") && /"asset"\s*:/.test(head)) return "gltf-json";
+
+  return null;
 }
 
 export type CaptureResult = {
@@ -86,6 +144,13 @@ export async function captureReleasedGeometry(
   };
 
   const fail = async (reason: string): Promise<CaptureResult> => {
+    // Whatever this row previously held — inline or in GridFS — a failure
+    // must not leave it behind looking current. See the matching cleanup on
+    // the success path below for why a GridFS file needs an explicit delete
+    // that an inline field does not.
+    const existing: any = await PartGeometry.findOne(key).select("gridfsFileId").lean();
+    if (existing?.gridfsFileId) await gridfsDelete(GEOMETRY_BUCKET, existing.gridfsFileId);
+
     await PartGeometry.updateOne(
       key,
       {
@@ -96,7 +161,7 @@ export async function captureReleasedGeometry(
           releaseId: opts.releaseId ?? null,
         },
         /* No bytes, and the old ones must not linger and look current. */
-        $unset: { data: "", capturedAt: "" },
+        $unset: { data: "", gridfsFileId: "", capturedAt: "" },
         $setOnInsert: { size: 0 },
       },
       { upsert: true }
@@ -106,9 +171,35 @@ export async function captureReleasedGeometry(
 
   try {
     const out = await client.exportGltf(coords, { isAssembly: opts.isAssembly });
-    const bytes = out.data.length;
+    let data = out.data;
+    let repacked = false;
+
+    /*
+     * An assembly export goes through a translation job, and Onshape cannot
+     * always hand that back as one binary file — when it falls back to the
+     * loose glTF form (a JSON file, a separate .bin, loose textures), a
+     * translation's result can still only be one download, so the whole
+     * folder arrives zipped instead. PLM keeps one Buffer per revision, so
+     * that has to become a single GLB before anything past this point can
+     * treat it as a model at all. See gltf-package.ts for what "unpack"
+     * actually does.
+     */
+    if (looksLikeZip(data)) {
+      try {
+        data = await unpackGltfZip(data);
+        repacked = true;
+      } catch (err: any) {
+        return await fail(
+          `Onshape returned a zip instead of a glTF file, and it could not be repacked ` +
+          `into one: ${String(err?.message ?? err)}`
+        );
+      }
+    }
+
+    const bytes = data.length;
 
     if (!bytes) return await fail("Onshape returned an empty glTF.");
+
     if (bytes > MAX_GEOMETRY_BYTES) {
       return await fail(
         `The glTF is ${(bytes / 1024 / 1024).toFixed(1)}MB, over PLM's ` +
@@ -117,14 +208,52 @@ export async function captureReleasedGeometry(
       );
     }
 
+    /*
+     * Verified, not assumed — see detectGltfFormat. A gateway's HTML error
+     * page arrives with a 200 and a plausible length.
+     *
+     * After the size check, deliberately: an oversized REAL model is the
+     * common case, and "this is 18MB, over the limit" is a far more useful
+     * thing to be told than "this is not a glTF" — which is true of an
+     * oversized buffer too, and says nothing anybody can act on.
+     */
+    const format = detectGltfFormat(data);
+    if (!format) {
+      return await fail(
+        `Onshape returned ${bytes} bytes that are not a glTF file ` +
+        `(content type "${out.contentType || "unknown"}"). Nothing was stored.`
+      );
+    }
+
+    /*
+     * Whichever this capture replaces — the previous revision-"" workspace
+     * snapshot, or a retry of this same revision — its old GridFS file (if
+     * it had one) has to go before the row is overwritten, or it becomes
+     * orphaned storage nothing ever points at again.
+     */
+    const previous: any = await PartGeometry.findOne(key).select("gridfsFileId").lean();
+    if (previous?.gridfsFileId) await gridfsDelete(GEOMETRY_BUCKET, previous.gridfsFileId);
+
+    const useGridfs = bytes > INLINE_GEOMETRY_BYTES;
+    const gridfsFileId = useGridfs
+      ? await gridfsUpload(GEOMETRY_BUCKET, `${partId}-${opts.revision || "current"}.glb`, data)
+      : null;
+
     await PartGeometry.updateOne(
       key,
       {
         $set: {
           ...key,
-          data: out.data,
+          // Never both: a model living in GridFS has nothing inline, and
+          // vice versa — see the field comment on the schema.
+          data: useGridfs ? null : data,
+          gridfsFileId,
           size: bytes,
-          contentType: out.contentType || "model/gltf-binary",
+          /*
+           * The format that ARRIVED. Both are viewable, but the stored content
+           * type has to describe the bytes or the browser is handed a lie.
+           */
+          contentType: format === "glb" ? "model/gltf-binary" : "model/gltf+json",
           onshapeVersionId: coords.versionId ?? null,
           releaseId: opts.releaseId ?? null,
           translationId: out.via === "translation" ? out.translationId ?? null : null,
@@ -144,7 +273,10 @@ export async function captureReleasedGeometry(
       ok: true,
       message:
         `Captured the 3D model at revision ${opts.revision || "(none)"} ` +
-        `(${(bytes / 1024).toFixed(0)} KB${out.via === "translation" ? ", via a translation job" : ""}).`,
+        `(${format === "glb" ? "GLB" : "glTF-JSON"}, ${(bytes / 1024).toFixed(0)} KB` +
+        `${out.via === "translation" ? ", via a translation job" : ""}` +
+        `${repacked ? ", repacked from Onshape's zipped export" : ""}` +
+        `${useGridfs ? ", stored in GridFS" : ""}).`,
     });
 
     return { ok: true, bytes, reason: null };
@@ -161,6 +293,34 @@ export async function captureReleasedGeometry(
     }).catch(() => {});
     return await fail(reason);
   }
+}
+
+/**
+ * Capture what a part currently looks like, before any release exists.
+ *
+ * Stored as the empty-revision row — see the `revision` field on
+ * PartGeometry, which reserves "" for exactly this. It is what lets a demo (or
+ * anyone browsing an in-work part) see a model right away instead of a blank
+ * panel until the first release. captureReleasedGeometry then adds an
+ * immutable row per revision once the part actually is released, so this row
+ * keeps moving while those stay fixed — and once a released row exists, it
+ * sorts ahead of this one everywhere PLM lists geometry.
+ *
+ * Same never-throws contract as captureReleasedGeometry: a sync must not fail
+ * because a mesh export did.
+ */
+export async function captureWorkspaceGeometry(
+  client: OnshapeClient,
+  enterpriseId: string,
+  partId: string,
+  coords: PartCoords,
+  opts: { isAssembly?: boolean } = {}
+): Promise<CaptureResult> {
+  return captureReleasedGeometry(client, enterpriseId, partId, coords, {
+    revision: "",
+    releaseId: null,
+    isAssembly: opts.isAssembly,
+  });
 }
 
 /**

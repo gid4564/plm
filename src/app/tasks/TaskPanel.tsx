@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
-import { Alert, KV, PartThumb, RevChip, Spinner, StatusBadge, relTime } from "@/components/ui";
+import { Alert, FavoriteButton, KV, PartThumb, RevChip, Spinner, StatusBadge, relTime } from "@/components/ui";
 import { formatPropertyValue, isStructuredValue } from "@/lib/onshape/task-values";
 import { PriorityIcon } from "@/components/TaskPriority";
 
@@ -136,8 +136,11 @@ export function TaskPanel({
         {t && (
           <div style={{ display: "grid", gap: 15 }}>
             <div>
-              <h2 style={{ margin: "0 0 4px", fontSize: 16 }}>{t.name || "(untitled task)"}</h2>
-              <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <FavoriteButton kind="task" targetId={taskId} active={Boolean(t.isFavorite)} size={18} />
+                <h2 style={{ margin: 0, fontSize: 16 }}>{t.name || "(untitled task)"}</h2>
+              </div>
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center", marginTop: 4 }}>
                 <span className="badge">{t.state || "no state"}</span>
                 {/*
                   * Beside the state, because the two together are the whole

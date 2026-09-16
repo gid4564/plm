@@ -510,11 +510,69 @@ export async function importBomLines(
    * unlinked and the import quietly flattened again. Carrying the index
    * removes the lookup, and with it the assumption.
    */
+  /*
+   * Every importable row, not only the selected ones.
+   *
+   * A row PLM already tracks needs no sync — nothing changed, and spending an
+   * Onshape call to confirm that is exactly what the selection is for
+   * avoiding — but it still needs its structure edge, or the BOM view is
+   * missing every child that was not freshly selected this time. Before, the
+   * walk covered only `chosen`, so an already-tracked part left unticked
+   * (which is every one of them, by default — see the panel's "New" filter)
+   * was never linked at all: not created, because it existed; not linked,
+   * because it was not selected. It simply vanished from the structure.
+   *
+   * The cap below still applies only to what gets freshly synced — a row
+   * that is merely being looked up and linked costs one indexed Mongo read,
+   * not an Onshape call, so there is nothing here for MAX_IMPORT to protect.
+   */
+  const chosenKeys = new Set(chosen.map((c) => c.key));
   const ordered: { line: BomLine; index: number | null }[] = structure
-    ? inImportOrder(structure)
-        .filter((r) => chosen.some((c) => c.key === r.line.key))
-        .map((r) => ({ line: r.line, index: r.index }))
-    : chosen.map((line) => ({ line, index: null }));
+    ? inImportOrder(structure).map((r) => ({ line: r.line, index: r.index }))
+    : importableLines(table).map((line) => ({ line, index: null }));
+
+  /*
+   * Resolve this row's parent and record the edge to it — the one piece of
+   * work shared by a freshly synced row and an already-tracked one merely
+   * being linked back in.
+   *
+   * `plmIdByRow` is filled as the walk proceeds, and the walk is in import
+   * order — parents before children — so a child's parent is always already
+   * known by the time its edge is written. Every imported row used to be
+   * linked to the top-level assembly regardless of depth, which flattened a
+   * multi-level BOM: a bolt inside a subassembly became a direct child of the
+   * whole product, and the structured BOM view showed one level however deep
+   * the CAD went.
+   */
+  async function linkToParent(
+    rowIndex: number | null, childPartId: string, quantity: number
+  ): Promise<"linked" | "cycle" | "no-parent"> {
+    const structuredParent = rowIndex != null && structure ? structure.rows[rowIndex].parentIndex : null;
+    const linkParentId = structuredParent != null ? plmIdByRow.get(structuredParent) ?? null : parentPlmId;
+
+    if (!linkParentId) return "no-parent";
+    // A part cannot contain itself; the guard in upsertBomLink refuses it,
+    // but reaching it would mean the reconstruction produced a cycle.
+    if (String(linkParentId) === String(childPartId)) return "cycle";
+
+    const wasLinked = await BomLink.exists({
+      enterpriseId: session.enterpriseId, parentId: linkParentId, childId: childPartId,
+    });
+    if (!wasLinked || opts.updateQuantities) {
+      await upsertBomLink(
+        session.enterpriseId, linkParentId, childPartId, quantity,
+        { documentId: assembly.documentId, elementId: assembly.elementId }
+        // No find number: the BOM parser does not read an item-number
+        // column yet, and BomLink.findNumber stays empty until it does.
+      );
+    }
+
+    /* What each parent was seen to contain, for the reconciliation below. */
+    const seenFor = childrenSeen.get(String(linkParentId)) ?? new Set<string>();
+    seenFor.add(String(childPartId));
+    childrenSeen.set(String(linkParentId), seenFor);
+    return "linked";
+  }
 
   // Sequential on purpose. Onshape rate-limits per account, and a burst of
   // parallel metadata writes is the fastest way to get the whole import
@@ -526,6 +584,41 @@ export async function importBomLines(
       partNumber: line.partNumber,
       quantity: line.quantity,
     };
+
+    if (!chosenKeys.has(line.key)) {
+      /*
+       * Not selected for this import — worth something only if PLM already
+       * has it. There is nothing to create and nothing to re-read from
+       * Onshape, only the structure to bring current: the model still
+       * contains it, whether or not it was ticked this time.
+       */
+      const src = line.source!;
+      const already: any = await Part.findOne({
+        enterpriseId: session.enterpriseId,
+        documentId: src.documentId, elementId: src.elementId, partId: src.partId,
+        configuration: normalize(src.configuration),
+      }).select("_id number").lean();
+
+      // Genuinely new AND not selected — left out, exactly as before.
+      if (!already) continue;
+
+      const childPartId = String(already._id);
+      const outcome = await linkToParent(rowIndex, childPartId, line.quantity);
+      if (outcome === "cycle") continue;
+      if (rowIndex != null) plmIdByRow.set(rowIndex, childPartId);
+      if (outcome === "linked") {
+        existing++;
+        lines.push({
+          ...base,
+          outcome: "existing",
+          number: already.number ?? null,
+          partId: childPartId,
+          message: `Already in PLM as ${already.number}; linked into this assembly's structure.`,
+          warning: null,
+        });
+      }
+      continue;
+    }
 
     const clashesWith = collisions.get(line.key);
     if (clashesWith) {
@@ -603,29 +696,9 @@ export async function importBomLines(
        * what an embedded field got wrong. The edge is also what answers
        * "where is this used", read from the other end.
        */
-      /*
-       * The row's OWN parent, not always the assembly that was read.
-       *
-       * Every imported row used to be linked to the top-level assembly, which
-       * flattened a multi-level BOM: a bolt inside a subassembly became a
-       * direct child of the whole product, and the structured BOM view showed
-       * one level however deep the CAD went.
-       *
-       * `plmIdByRow` is filled as the walk proceeds, and the walk is in import
-       * order — parents before children — so a child's parent is always
-       * already known by the time its edge is written.
-       */
-      const structuredParent =
-        rowIndex != null && structure
-          ? structure.rows[rowIndex].parentIndex
-          : null;
-      const linkParentId =
-        structuredParent != null ? plmIdByRow.get(structuredParent) ?? null : parentPlmId;
-
-      if (linkParentId && sync.partId) {
-        // A part cannot contain itself; the guard in upsertBomLink refuses it,
-        // but reaching it would mean the reconstruction produced a cycle.
-        if (String(linkParentId) === String(sync.partId)) {
+      if (sync.partId) {
+        const outcome = await linkToParent(rowIndex, sync.partId, line.quantity);
+        if (outcome === "cycle") {
           lines.push({
             ...base,
             outcome: "skipped" as const, number: sync.number, partId: sync.partId,
@@ -634,28 +707,6 @@ export async function importBomLines(
           });
           continue;
         }
-
-        const wasLinked = await BomLink.exists({
-          enterpriseId: session.enterpriseId,
-          parentId: linkParentId,
-          childId: sync.partId,
-        });
-        if (!wasLinked || opts.updateQuantities) {
-          await upsertBomLink(
-            session.enterpriseId,
-            linkParentId,
-            sync.partId,
-            line.quantity,
-            { documentId: assembly.documentId, elementId: assembly.elementId }
-            // No find number: the BOM parser does not read an item-number
-            // column yet, and BomLink.findNumber stays empty until it does.
-          );
-        }
-
-        /* What each parent was seen to contain, for the reconciliation below. */
-        const seenFor = childrenSeen.get(String(linkParentId)) ?? new Set<string>();
-        seenFor.add(String(sync.partId));
-        childrenSeen.set(String(linkParentId), seenFor);
       }
 
       if (rowIndex != null && sync.partId) plmIdByRow.set(rowIndex, sync.partId);
@@ -726,14 +777,19 @@ export async function importBomLines(
    * parent observed in this read has its edges reconciled against what was
    * observed under it, and no other parent is touched.
    *
-   * Only for a full import. A partial selection says nothing about the rows
-   * left unticked, and treating "not selected" as "no longer there" would
-   * delete structure on the strength of a checkbox.
+   * Safe on a partial selection now, which it was not before: `childrenSeen`
+   * used to record only freshly synced rows, so a normal "just the new ones"
+   * import saw a handful of children and would have deleted every existing
+   * edge to everything else in the assembly. Now every already-tracked child
+   * is looked up and recorded whether or not it was selected — see the walk
+   * above — so `childrenSeen` reflects the model's true current contents
+   * regardless of the selection. A row that is neither selected nor already
+   * tracked is simply new and untouched, and a part PLM has never heard of
+   * has no edge to wrongly prune in the first place.
    */
   let removedLinks = 0;
-  const wholeAssembly = chosen.length === importableLines(table).length;
 
-  if (opts.reconcileStructure !== false && wholeAssembly && structure) {
+  if (opts.reconcileStructure !== false && structure) {
     /* The assembly itself counts as a parent, even if nothing was left under it. */
     if (parentPlmId && !childrenSeen.has(String(parentPlmId))) {
       childrenSeen.set(String(parentPlmId), new Set());

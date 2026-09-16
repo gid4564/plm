@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
-import { Alert, KV, PartThumb, RevChip, Spinner, StatusBadge, relTime } from "@/components/ui";
+import { Alert, FavoriteButton, KV, PartThumb, RevChip, Spinner, StatusBadge, relTime } from "@/components/ui";
 import { PartTasks, TaskCountBadge } from "@/components/PartTasks";
 import { AttributeInput, type Definition } from "@/components/AttributeInput";
 
@@ -206,12 +206,28 @@ export function PartPanel({
             <div style={{ display: "flex", gap: 12, alignItems: "flex-start" }}>
               <PartThumb partId={p.id} size={64} radius={8} alt="" />
               <div style={{ minWidth: 0, flex: 1 }}>
-                <div className="mono" style={{ fontSize: 15, fontWeight: 600 }}>{p.number ?? "—"}</div>
+                <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                  <div className="mono" style={{ fontSize: 15, fontWeight: 600 }}>{p.number ?? "—"}</div>
+                  <FavoriteButton kind="part" targetId={p.id} active={Boolean(p.isFavorite)} size={16} />
+                </div>
                 <div style={{ fontSize: 13, color: "var(--text-muted)" }}>{p.name}</div>
                 <div style={{ display: "flex", gap: 5, marginTop: 5, flexWrap: "wrap" }}>
-                  <RevChip revision={p.revision} iteration={p.iteration} />
+                  <RevChip
+                    revision={p.revision} iteration={p.iteration} starCount={p.starCount}
+                    starReasons={(data.starReleases ?? []).map(
+                      (s: any) => `${s.baseRevision}${"*".repeat(s.starIndex)}: ${s.reason}`
+                    )}
+                  />
                   <StatusBadge status={p.lifecycleState} />
                   {p.kind === "assembly" && <span className="badge">assembly</span>}
+                  {p.plmOnly && (
+                    <span
+                      className="badge"
+                      title="Created by copying another part — no Onshape original backs this one"
+                    >
+                      PLM only
+                    </span>
+                  )}
                 </div>
               </div>
             </div>

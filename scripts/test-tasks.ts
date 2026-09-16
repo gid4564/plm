@@ -181,6 +181,22 @@ async function main() {
     check("and it still reads a release package's shape",
       snap.state === "Pending" && snap.actions[0].id === "RELEASE",
       JSON.stringify(snap));
+
+    /*
+     * A finished task's `workflow.actions` is genuinely `[]` — Complete,
+     * frozen, nothing left to do — not an absent field. Requiring a
+     * non-empty array to count as "found" used to treat that correct answer
+     * as a miss and fall through every candidate, logging a false "NO
+     * actions found" warning (with a full shape dump) for every closed task
+     * an import brought in.
+     */
+    const finished = parseWorkflowSnapshot(
+      { workflow: { state: { displayName: "Complete" }, actions: [] } },
+      { label: "finished-task-probe" }
+    );
+    check("an empty actions array is read as the real answer, not a miss",
+      finished.actionsFrom === "workflow.actions" && finished.actions.length === 0,
+      JSON.stringify(finished));
   }
 
   console.log("\nPulling brings tasks in, with their items resolved");

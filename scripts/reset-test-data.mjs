@@ -17,8 +17,9 @@
  *
  * Groups, each off unless named (or implied by --all):
  *   (default)              parts, assemblies, iterations, BOM links, drawings,
- *                          drawing PDFs, releases, thumbnails, echo
- *                          fingerprints, activity log
+ *                          drawing PDFs, captured 3D models, releases,
+ *                          thumbnails, products, tasks, echo fingerprints,
+ *                          activity log
  *   --numbering            reset the number sequences, so PLM-000001 comes back
  *   --simulator            the mock Onshape tenant's parts, drawings, packages
  *   --oauth-sessions       issued auth codes and access tokens (Onshape and any
@@ -104,7 +105,15 @@ const client = new MongoClient(env.MONGODB_URI, { serverSelectionTimeoutMS: 1500
  * silently missed. */
 const WORK = [
   "parts", "partiterations", "bomlinks", "drawings", "drawingfiles",
-  "releases", "partthumbnails", "selfwrites", "activitylogs",
+  /* Captured glTF snapshots — see src/lib/geometry.ts. Per-revision records
+   * kept alongside a part, not configuration, so they leave with it. */
+  "partgeometries",
+  "releases", "partthumbnails",
+  /* Groupings built on top of the parts being cleared, not configuration —
+   * see ProductSchema. An empty product left behind after every part in it
+   * is gone is exactly the clutter this script exists to remove. */
+  "products",
+  "selfwrites", "activitylogs",
   /*
    * Tasks are mirrored from Onshape, so clearing them loses nothing that is
    * not re-syncable — and a task board left over from a previous demo is
