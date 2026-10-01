@@ -14,6 +14,11 @@ type Ctx = { params: Promise<{ id: string }> };
  * changes between requests.
  *
  * `?asOf=` filters by effectivity: a date, `today`, or `all` (the default).
+ * `?variantId=` filters by which named variant of an assembly is being
+ * viewed — an id from the same response's own `availableVariants`. Omitted
+ * or unset shows every component, tagged and untagged alike: the "150%"
+ * super-BOM a variant filter narrows down from.
+ * `?rootId=` shows one top-level assembly only — an id from `availableRoots`.
  * `?format=csv` returns the flattened rows as a file.
  */
 export const GET = handler(async (req: Request, ctx: Ctx) => {
@@ -22,7 +27,9 @@ export const GET = handler(async (req: Request, ctx: Ctx) => {
   const url = new URL(req.url);
 
   const asOf = parseAsOf(url.searchParams.get("asOf"));
-  const bom = await buildProductBom(s.enterpriseId, id, { asOf });
+  const variantId = url.searchParams.get("variantId") || null;
+  const rootId = url.searchParams.get("rootId") || null;
+  const bom = await buildProductBom(s.enterpriseId, id, { asOf, variantId, rootId });
 
   if (url.searchParams.get("format") === "csv") {
     /*

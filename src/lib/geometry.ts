@@ -85,6 +85,29 @@ export async function readGeometryBytes(
 }
 
 /**
+ * Delete the GridFS files behind any matching geometry rows, leaving the rows.
+ *
+ * A row's delete does not take its GridFS file with it — the file lives in its
+ * own collections and nothing cascades — so anything that removes rows has to
+ * come through here first, or the files become orphans nothing points at.
+ * Rows are left in place so the caller's own delete (and its count) is
+ * unchanged.
+ */
+export async function deleteGeometryFiles(filter: Record<string, unknown>): Promise<void> {
+  await connectDb();
+  const rows: any[] = await PartGeometry.find({ ...filter, gridfsFileId: { $ne: null } })
+    .select("gridfsFileId")
+    .lean();
+  for (const r of rows) await gridfsDelete(GEOMETRY_BUCKET, r.gridfsFileId);
+}
+
+/** Remove every captured model of one part — its rows and any GridFS files. */
+export async function deleteGeometryForPart(partId: unknown): Promise<void> {
+  await deleteGeometryFiles({ partId });
+  await PartGeometry.deleteMany({ partId });
+}
+
+/**
  * What the bytes Onshape sent actually are.
  *
  * Asked rather than assumed. The endpoint offers GLB and glTF-JSON at equal

@@ -100,11 +100,28 @@ export async function describeAssembly(
     client.getElementInfo(probe).catch(() => null),
   ]);
 
+  /*
+   * The assembly's Name property, for the configuration being read.
+   *
+   * The tab name is one string whatever the configuration, but an assembly's
+   * Name property can be driven by its configuration ("… 50 kg"), and that is
+   * the name people mean. Falls back to the tab name if Onshape will not say.
+   */
+  let configuredName = "";
+  if (coords.configuration && coords.configuration !== "default") {
+    try {
+      const md = await client.getPartMetadata({ ...probe, configuration: coords.configuration });
+      configuredName = String(md.partName || "").trim();
+    } catch {
+      // Cosmetic; the tab name below still identifies the assembly.
+    }
+  }
+
   return {
     documentId: coords.documentId,
     elementId: coords.elementId,
     documentName: doc.name,
-    elementName: el?.name ?? "",
+    elementName: configuredName || el?.name || "",
     elementType: el?.elementType || null,
     workspaceId: coords.workspaceId ?? null,
     versionId: coords.versionId ?? null,
@@ -452,7 +469,7 @@ export async function importBomLines(
         documentId: assembly.documentId,
         elementId: assembly.elementId,
         partId: "",
-        configuration: "default",
+        configuration: coords.configuration ? normalize(coords.configuration) : "default",
         workspaceId: assembly.workspaceId,
         versionId: assembly.versionId,
       },
@@ -889,7 +906,8 @@ export async function annotateTracked(
   }).lean();
 
   for (const part of parts) {
-    const id = `${part.documentId}:${part.elementId}:${part.partId}:${part.configuration}`;
+    // Stored values predate canonical spelling, so both sides are normalised.
+    const id = `${part.documentId}:${part.elementId}:${part.partId}:${normalize(part.configuration)}`;
     for (const l of byIdentity.get(id) ?? []) {
       tracked.set(l.key, {
         partId: String(part._id),
@@ -897,6 +915,21 @@ export async function annotateTracked(
         revision: part.revision ?? "",
         lifecycleState: part.lifecycleState ?? "",
       });
+    }
+  }
+
+  // A row whose part is in PLM, but under another configuration string, is
+  // the near-miss behind "saved from the Part Studio but not recognised".
+  // Logged with both spellings so the difference is visible, not guessed at.
+  for (const l of resolvable) {
+    if (tracked.has(l.key)) continue;
+    const src = l.source!;
+    const near = parts.filter((p) => p.documentId === src.documentId && p.elementId === src.elementId && p.partId === src.partId);
+    if (near.length) {
+      console.warn(
+        `[PLM] BOM row ${l.partNumber || src.partId} not matched to a tracked part. ` +
+        `BOM says configuration "${src.configuration}"; PLM holds ${near.map((p) => `"${p.configuration}"`).join(", ")}.`
+      );
     }
   }
 

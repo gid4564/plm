@@ -57,6 +57,26 @@ const ECHOED = [
   "elementType", "partId", "configuration", "resourceType", "mimeType",
 ] as const;
 
+/**
+ * The Onshape category this item carries, if any — for a category-specific
+ * numbering scheme (see CategoryNumberingSequence) to match against.
+ *
+ * Onshape's own schema for this payload (`BTNextPartNumberParam`) declares
+ * `categories` as an array of `{id, name}`, plural — an item could in
+ * principle carry more than one. Nothing published says what a second entry
+ * would mean or how they are ordered, so the first is taken as *the*
+ * category and the rest are ignored for now, rather than guessing at a
+ * combination rule with no confirmed case to test it against.
+ */
+function categoryFrom(item: Record<string, unknown>): { id: string; name: string } | null {
+  const list = Array.isArray(item.categories) ? item.categories : [];
+  const first = list.find((c: any) => c && typeof c === "object" && c.id) as
+    | { id?: unknown; name?: unknown }
+    | undefined;
+  if (!first) return null;
+  return { id: String(first.id ?? "").trim(), name: String(first.name ?? "").trim() };
+}
+
 export const POST = handler(async (req: Request) => {
   const identity = await authenticateBearer(req);
   if (!identity) {
@@ -156,9 +176,20 @@ export const POST = handler(async (req: Request) => {
   }
 
   const results: Record<string, unknown>[] = [];
+  const categoryNotes: string[] = [];
 
   for (const { item, type } of classified) {
-    const { number } = await nextNumber(String(enterprise._id), type);
+    const category = categoryFrom(item);
+    const { number, matchedCategoryId } = await nextNumber(
+      String(enterprise._id), type, { onshapeCategoryId: category?.id }
+    );
+    categoryNotes.push(
+      matchedCategoryId
+        ? `category "${category?.name || category?.id}" scheme`
+        : category
+          ? `category "${category.name || category.id}", no scheme — used the ${type} default`
+          : "no category"
+    );
 
     await NumberIssuedLog.create({
       enterpriseId: enterprise._id,
@@ -168,6 +199,11 @@ export const POST = handler(async (req: Request) => {
       documentId: String(item.documentId ?? ""),
       elementId: String(item.elementId ?? ""),
       partId: String(item.partId ?? ""),
+      // Recorded whether or not a scheme matched — an admin setting up a
+      // category override for the first time needs a real id and name to
+      // copy in, and this is where one shows up.
+      onshapeCategoryId: category?.id ?? "",
+      onshapeCategoryName: category?.name ?? "",
     });
 
     // Echo the identifying fields back beside the number — Onshape uses them to
@@ -183,7 +219,9 @@ export const POST = handler(async (req: Request) => {
 
   console.log(
     `[PLM] numbering extension out: issued ${results.length} number(s) — ` +
-    `${classified.map((c, n) => `${results[n].partNumber} (${c.type} via ${c.from})`).join(", ")}`
+    `${classified.map((c, n) =>
+      `${results[n].partNumber} (${c.type} via ${c.from}, ${categoryNotes[n]})`
+    ).join(", ")}`
   );
 
   /*

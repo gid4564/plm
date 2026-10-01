@@ -9,6 +9,8 @@ const Body = z.object({
   workspaceId: z.string().nullable().optional(),
   versionId: z.string().nullable().optional(),
   multiLevel: z.boolean().optional().default(true),
+  /** Assembly configuration to read the BOM for; default configuration when absent. */
+  configuration: z.string().nullable().optional(),
   /**
    * Row keys only.
    *
@@ -46,6 +48,7 @@ export const POST = handler(async (req: Request) => {
       elementId: b.elementId,
       workspaceId: b.workspaceId ?? null,
       versionId: b.versionId ?? null,
+      configuration: b.configuration || null,
     },
     b.keys,
     { multiLevel: b.multiLevel, updateQuantities: b.updateQuantities }

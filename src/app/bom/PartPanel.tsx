@@ -97,6 +97,7 @@ export function PartPanel({
     if (!partId) return;
     setSaving(true);
     setFieldErrors({});
+    setError(null);
     try {
       const r = await fetch(`/api/parts/${partId}`, {
         method: "PATCH",
@@ -104,7 +105,26 @@ export function PartPanel({
         body: JSON.stringify({ attributes: draft }),
       });
       const j = await r.json();
-      if (j.errors) { setFieldErrors(j.errors); return; }
+      if (j.errors) {
+        setFieldErrors(j.errors);
+        /*
+         * A refusal can be about a field this panel is not showing — the
+         * server validates the whole part, and this list is narrowed to what
+         * is still missing. Its error would land on an input that does not
+         * exist, and the save would look like it simply did nothing.
+         */
+        const labels = new Map<string, string>(
+          (data?.definitions ?? []).map((d: Definition) => [d.key, d.label] as [string, string])
+        );
+        const shown = new Set(shownDefs.map((d) => d.key));
+        const hidden = Object.entries(j.errors as Record<string, string>).filter(([k]) => !shown.has(k));
+        if (hidden.length) {
+          setError(
+            "Not saved. " + hidden.map(([k, m]) => `${labels.get(k) ?? k}: ${m}`).join(" ")
+          );
+        }
+        return;
+      }
       if (!r.ok) throw new Error(j.error || "Could not save");
       setDraft({});
       setNotice(j.message ?? "Saved.");

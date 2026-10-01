@@ -53,6 +53,7 @@ cp -R .next/static "$OUT/.next/static"
 cp ecosystem.config.cjs "$OUT/"
 # Admin tooling that must run where the database is reachable.
 cp scripts/find-duplicates.mjs "$OUT/"
+cp scripts/remove-part.mjs "$OUT/"
 # The installer, so it is to hand as soon as the tarball is extracted.
 cp scripts/deploy.sh "$OUT/"
 # OAuth diagnostic. Belongs on the server because that is where the real

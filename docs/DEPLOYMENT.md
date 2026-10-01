@@ -369,7 +369,7 @@ are both required and neither is obvious, so they are given explicitly below.
 | Location | Context to tick | URL |
 |---|---|---|
 | Element right panel | Part, Part Studio | `/panel?documentId={$documentId}&workspaceOrVersion={$workspaceOrVersion}&workspaceOrVersionId={$workspaceOrVersionId}&elementId={$elementId}&partId={$partId}&configuration={$configuration}` |
-| Element right panel | Assembly | `/panel/assembly?documentId={$documentId}&workspaceOrVersion={$workspaceOrVersion}&workspaceOrVersionId={$workspaceOrVersionId}&elementId={$elementId}` |
+| Element right panel | Assembly | `/panel/assembly?documentId={$documentId}&workspaceOrVersion={$workspaceOrVersion}&workspaceOrVersionId={$workspaceOrVersionId}&elementId={$elementId}&configuration={$configuration}` |
 
 The part panel takes **Part** *and* **Part Studio**: with a part selected it shows
 that part's record, and on the tab with nothing selected it says so rather than

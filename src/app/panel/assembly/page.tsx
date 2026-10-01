@@ -36,6 +36,9 @@ export default async function AssemblyPanelPage({
     elementId: one("elementId"),
     workspaceId: wv === "v" ? "" : (wvId || one("workspaceId")),
     versionId: wv === "v" ? wvId : "",
+    // The configuration the tab is showing. Without it the BOM is always
+    // read for the assembly's default configuration.
+    configuration: one("configuration"),
   };
 
   // Rebuilt server-side: reading window.location during render desynchronises

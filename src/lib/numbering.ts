@@ -1,5 +1,5 @@
 import { connectDb } from "@/lib/db";
-import { NumberingSequence } from "@/lib/models";
+import { CategoryNumberingSequence, NumberingSequence } from "@/lib/models";
 
 /**
  * The number generator. PLM is the number master.
@@ -61,23 +61,49 @@ export async function getOrCreateSequence(enterpriseId: string, type: NumberingT
 }
 
 /**
- * Allocate the next number for a type.
+ * Allocate the next number for a type — or, when the caller names an Onshape
+ * category and PLM has a scheme configured for that specific category, the
+ * next number from THAT scheme instead.
  *
  * $inc inside findOneAndUpdate is atomic, so two requests racing for the same
- * type cannot be handed the same number — which matters most on the path this
- * exists for: two designers raising release candidates at the same moment.
+ * scheme cannot be handed the same number — which matters most on the path
+ * this exists for: two designers raising release candidates at the same
+ * moment.
  *
  * Once allocated, a number is never reused, even if writing it into Onshape
  * afterwards fails. It may already have been read, quoted, or written down by
  * whoever requested it; reissuing it to someone else because the write failed
  * would risk two things wearing the same number, which is worse than one
  * number that looks unused.
+ *
+ * A category with no scheme of its own is not an error — it falls straight
+ * through to the type's plain scheme, the same one every part got before
+ * category overrides existed. There is no walk up a category hierarchy: this
+ * matches only the exact category id it was given.
  */
 export async function nextNumber(
   enterpriseId: string,
-  type: NumberingType
-): Promise<{ number: string; counter: number }> {
+  type: NumberingType,
+  opts: { onshapeCategoryId?: string } = {}
+): Promise<{ number: string; counter: number; matchedCategoryId: string | null }> {
   await connectDb();
+
+  const categoryId = opts.onshapeCategoryId?.trim();
+  if (categoryId) {
+    const catSeq: any = await CategoryNumberingSequence.findOneAndUpdate(
+      { enterpriseId, type, onshapeCategoryId: categoryId },
+      { $inc: { counter: 1 } },
+      { new: true }
+    );
+    if (catSeq) {
+      return {
+        number: formatNumber(catSeq.prefix, catSeq.counter, catSeq.padding, catSeq.suffix),
+        counter: catSeq.counter,
+        matchedCategoryId: categoryId,
+      };
+    }
+  }
+
   await getOrCreateSequence(enterpriseId, type);
 
   const seq: any = await NumberingSequence.findOneAndUpdate(
@@ -87,5 +113,9 @@ export async function nextNumber(
   );
   if (!seq) throw new Error("Numbering scheme not found");
 
-  return { number: formatNumber(seq.prefix, seq.counter, seq.padding, seq.suffix), counter: seq.counter };
+  return {
+    number: formatNumber(seq.prefix, seq.counter, seq.padding, seq.suffix),
+    counter: seq.counter,
+    matchedCategoryId: null,
+  };
 }

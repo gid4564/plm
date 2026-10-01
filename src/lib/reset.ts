@@ -1,4 +1,5 @@
 import { connectDb } from "@/lib/db";
+import { deleteGeometryFiles } from "@/lib/geometry";
 import {
   ActivityLog, BomLink, Drawing, DrawingFile, Enterprise, Part, PartGeometry,
   PartIteration, PartThumbnail, Product, Release, Task,
@@ -68,6 +69,10 @@ export type ClearResult = { counts: WorkCounts; total: number };
  */
 export async function clearEnterpriseWorkData(enterpriseId: string): Promise<ClearResult> {
   await connectDb();
+
+  // Models over the inline limit live in GridFS, which deleting their rows
+  // does not touch — remove those files while the rows still point at them.
+  await deleteGeometryFiles({ enterpriseId });
 
   const counts: WorkCounts = [];
   let total = 0;

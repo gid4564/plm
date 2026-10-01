@@ -6,7 +6,7 @@ import { clientForEnterprise, clientForUser } from "@/lib/onshape/factory";
 import { findCommentProperty } from "@/lib/onshape/live-client";
 import { listDefinitions, missingForRelease } from "@/lib/attributes";
 import { nextNumber } from "@/lib/numbering";
-import { plainAttributes, syncPartFromOnshape } from "@/lib/sync";
+import { plainAttributes, resolveHeldConfiguration, syncPartFromOnshape } from "@/lib/sync";
 import { captureReleasedGeometry, geometryCaptureEnabled } from "@/lib/geometry";
 import { captureDrawingPdf, coordsForStage, upsertDrawingFromPackageItem } from "@/lib/drawings";
 import type { OnshapeClient, ReleasePackage, WorkflowAction } from "@/lib/onshape/types";
@@ -455,13 +455,28 @@ export async function takeOverReleasePackage(
     if (item.elementType === "DRAWING") continue;
 
     try {
+      /*
+       * Which configuration this item is. Hardcoding "default" here looked up
+       * the wrong identity for any part PLM holds under a specific
+       * configuration, so the release created a second copy of it — released,
+       * numbered, and attached to no BOM.
+       *
+       * When the package does not say, reuse the part PLM already has for this
+       * document/tab/part, if there is exactly one; otherwise it is "default".
+       */
+      const configuration = await resolveHeldConfiguration(
+        enterpriseId,
+        { documentId: item.documentId, elementId: item.elementId, partId: item.partId },
+        item.configuration
+      );
+
       const sync = await syncPartFromOnshape(
         enterpriseId,
         {
           documentId: item.documentId,
           elementId: item.elementId,
           partId: item.partId || "",
-          configuration: "default",
+          configuration,
           workspaceId: null,
           versionId: item.versionId || null,
         },
@@ -479,6 +494,12 @@ export async function takeOverReleasePackage(
       );
 
       if (!sync.partId) continue;
+
+      console.log(
+        `[PLM] release ${number}: "${item.name || item.id}" doc=${item.documentId} el=${item.elementId} ` +
+        `part=${item.partId || "-"} itemConfig=${JSON.stringify(item.configuration ?? "")} ` +
+        `lookedUpAs=${JSON.stringify(configuration)} -> ${sync.action} ${sync.number ?? ""}`
+      );
 
       release.items.push({
         kind: "part",
@@ -1315,6 +1336,60 @@ export function cancelDrawingRefresh(releaseId: string): boolean {
   clearTimeout(chain.timer);
   refreshChains.delete(releaseId);
   return true;
+}
+
+/**
+ * How far back to look for an interrupted drawing refresh at startup.
+ *
+ * `scheduleDrawingRefresh`'s chain lives only in this process's memory — a
+ * `setTimeout` tracked in `refreshChains` — so a deploy or a crash partway
+ * through one drops it with nothing logged: `drawingRefreshPending` stays
+ * true, and nothing tries again until a `revision.created` redelivery
+ * happens to land this release in the handler's 5-release window, or a
+ * person notices the release page still says "outstanding" and presses
+ * Collect drawings by hand. Given how often this process gets redeployed,
+ * that silent loss — not a genuine Onshape failure — is a likely cause of a
+ * released drawing that "sometimes" never shows up.
+ *
+ * Bounded to a day rather than every pending release ever: one that has sat
+ * outstanding longer than that already earned its own "gave up" activity-log
+ * entry telling somebody to use Collect drawings, or was abandoned for a
+ * reason a silent retry on every future restart would not fix. Resurrecting
+ * those on every boot would only spend Onshape calls on releases nobody is
+ * waiting on any more.
+ */
+const DRAWING_REFRESH_RESUME_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Resume the drawing-refresh chains a process restart interrupted.
+ *
+ * Meant to be called once, at process startup — see `instrumentation.ts`.
+ * Global rather than per-enterprise: `refreshReleasedDrawings` resolves its
+ * own enterprise and Onshape client from the release document it is given,
+ * so one sweep across every tenant this process serves is enough.
+ */
+export async function resumePendingDrawingRefreshes(): Promise<{ resumed: number; found: number }> {
+  await connectDb();
+
+  const cutoff = new Date(Date.now() - DRAWING_REFRESH_RESUME_WINDOW_MS);
+  const pending: any[] = await Release.find({
+    drawingRefreshPending: true,
+    updatedAt: { $gte: cutoff },
+  }).select("_id number").lean();
+
+  let resumed = 0;
+  for (const rel of pending) {
+    if (scheduleDrawingRefresh(String(rel._id), { trigger: "startup" }).scheduled) resumed++;
+  }
+
+  if (pending.length) {
+    console.log(
+      `[PLM] startup: resumed ${resumed}/${pending.length} drawing-refresh chain(s) left ` +
+      `outstanding by the previous process (release(s): ${pending.map((r) => r.number).join(", ")}).`
+    );
+  }
+
+  return { resumed, found: pending.length };
 }
 
 export async function refreshReleasedDrawings(

@@ -1,5 +1,5 @@
 import { connectDb } from "@/lib/db";
-import { Drawing, Part } from "@/lib/models";
+import { BomLink, Drawing, Part } from "@/lib/models";
 import { requireSession } from "@/lib/auth/session";
 import { kindForElementType, normalizeConfiguration, plainAttributes, syncPartFromOnshape } from "@/lib/sync";
 import { clientForUser } from "@/lib/onshape/factory";
@@ -125,8 +125,33 @@ export const GET = handler(async (req: Request) => {
    */
   const tasks = await tasksForPart(s.enterpriseId, String(part._id));
 
+  /*
+   * How much of this assembly's structure PLM already holds.
+   *
+   * Counted from the structure itself, not searched for by element id: an
+   * assembly's parts live in Part Studio tabs, so none of them carries the
+   * assembly's elementId, and a lookup on it can never find them.
+   */
+  let structureParts = 0;
+  if (part.kind === "assembly") {
+    const seen = new Set<string>([String(part._id)]);
+    let frontier = [String(part._id)];
+    while (frontier.length) {
+      const links: any[] = await BomLink.find({
+        enterpriseId: s.enterpriseId, parentId: { $in: frontier },
+      }).select("childId").lean();
+      frontier = [];
+      for (const l of links) {
+        const c = String(l.childId);
+        if (!seen.has(c)) { seen.add(c); frontier.push(c); }
+      }
+    }
+    structureParts = seen.size - 1;
+  }
+
   return ok({
     known: true,
+    structureParts,
     tasks,
     openTaskCount: tasks.filter((t) => t.open).length,
     part: {

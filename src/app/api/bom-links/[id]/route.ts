@@ -2,6 +2,7 @@ import { z } from "zod";
 import { requireSession } from "@/lib/auth/session";
 import { connectDb } from "@/lib/db";
 import { ActivityLog, BomLink, Part } from "@/lib/models";
+import { setLinkVariants } from "@/lib/variants";
 import { handler, ok, fail } from "@/lib/api";
 
 type Ctx = { params: Promise<{ id: string }> };
@@ -29,6 +30,8 @@ const PatchSchema = z.object({
   effectiveFrom: DateOrNull.optional(),
   effectiveTo: DateOrNull.optional(),
   quantity: z.number().int().positive().max(100000).optional(),
+  /** Full replacement of which variants this edge belongs to. Empty = every variant. */
+  variantIds: z.array(z.string()).optional(),
 });
 
 /**
@@ -80,6 +83,22 @@ export const PATCH = handler(async (req: Request, ctx: Ctx) => {
   if (parsed.data.quantity != null) link.quantity = parsed.data.quantity;
   await link.save();
 
+  /*
+   * A separate save, in its own function: setLinkVariants also has to check
+   * every given id is actually a variant of THIS link's own parent, which
+   * needs its own read. Two saves on one PATCH is a small cost for not
+   * duplicating that check here.
+   */
+  let variantIds: string[] = (link.variantIds ?? []).map(String);
+  if (parsed.data.variantIds !== undefined) {
+    try {
+      const result = await setLinkVariants(s.enterpriseId, id, parsed.data.variantIds);
+      variantIds = result.variantIds;
+    } catch (err: any) {
+      return fail(String(err?.message ?? err), 422);
+    }
+  }
+
   const [parent, child]: any[] = await Promise.all([
     Part.findById(link.parentId).select("number name").lean(),
     Part.findById(link.childId).select("number name").lean(),
@@ -101,6 +120,9 @@ export const PATCH = handler(async (req: Request, ctx: Ctx) => {
       (parsed.data.quantity != null && parsed.data.quantity !== before.quantity
         ? `, quantity ${before.quantity} → ${parsed.data.quantity}`
         : "") +
+      (parsed.data.variantIds !== undefined
+        ? `, variants: ${variantIds.length ? variantIds.length : "all"}`
+        : "") +
       ".",
   });
 
@@ -108,6 +130,7 @@ export const PATCH = handler(async (req: Request, ctx: Ctx) => {
     link: {
       id: String(link._id),
       quantity: link.quantity,
+      variantIds,
       effectiveFrom: link.effectiveFrom ? new Date(link.effectiveFrom).toISOString() : null,
       effectiveTo: link.effectiveTo ? new Date(link.effectiveTo).toISOString() : null,
     },

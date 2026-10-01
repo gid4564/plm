@@ -786,7 +786,7 @@ export function SettingsClient(p: Props) {
               ["Element right panel", "iFrame", "—", "Part, Part Studio",
                "/panel?documentId={$documentId}&workspaceOrVersion={$workspaceOrVersion}&workspaceOrVersionId={$workspaceOrVersionId}&elementId={$elementId}&partId={$partId}&configuration={$configuration}"],
               ["Element right panel", "iFrame", "—", "Assembly",
-               "/panel/assembly?documentId={$documentId}&workspaceOrVersion={$workspaceOrVersion}&workspaceOrVersionId={$workspaceOrVersionId}&elementId={$elementId}"],
+               "/panel/assembly?documentId={$documentId}&workspaceOrVersion={$workspaceOrVersion}&workspaceOrVersionId={$workspaceOrVersionId}&elementId={$elementId}&configuration={$configuration}"],
               ["Part number generator", "Action", "POST", "—",
                "/api/numbering/onshape-extension"],
               ["Element context menu", "Action", "POST", "Part Studio, Assembly",

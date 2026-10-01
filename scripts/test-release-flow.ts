@@ -85,7 +85,11 @@ async function main() {
     partId: "JHD", configuration: "default",
     properties: {
       "57f3fb8efa3416c06701d60d": "Gearbox Housing",
-      "57f3fb8efa3416c06701d60e": "GB-1001",
+      // No Part number seeded here on purpose: this is meant to be an
+      // unnumbered CAD part, so PLM issuing its own — asserted below — is
+      // actually exercised. A pre-set value here would make PLM correctly
+      // adopt it instead (see test-number-adoption.ts), which is a different
+      // scenario from the one this test is about.
       "57f3fb8efa3416c06701d610": "Cast aluminium main housing",
       "57f3fb8efa3416c06701d611": { displayName: "Aluminium 6061-T6" },
       "57f3fb8efa3416c06701d613": "Precision Castings Ltd",

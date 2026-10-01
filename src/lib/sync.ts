@@ -8,7 +8,7 @@ import { clientForEnterprise } from "@/lib/onshape/factory";
 import { bindAttributeProperties } from "@/lib/onshape/properties";
 import { listDefinitions, mapInbound, mapOutbound, type AttrDef } from "@/lib/attributes";
 import { nextNumber } from "@/lib/numbering";
-import { captureWorkspaceGeometry, geometryCaptureEnabled } from "@/lib/geometry";
+import { captureWorkspaceGeometry, deleteGeometryForPart, geometryCaptureEnabled } from "@/lib/geometry";
 import type { OnshapeClient, PartCoords, PartMetadata } from "@/lib/onshape/types";
 
 /* -------------------------------------------------------------------------- */
@@ -40,6 +40,60 @@ export async function normalizeConfiguration(
  * re-reading the enterprise per row is wasted work, and reimplementing the rule
  * locally to avoid that is how the identity keys drift apart again.
  */
+/**
+ * One spelling for a configuration string.
+ *
+ * Onshape hands the same configuration over as "Size=Large;Kind=A" from a
+ * panel, "Kind=A;Size=Large" or a URL-encoded "Size=Large%3BKind=A" from the
+ * BOM. Decoded and sorted so those compare equal; otherwise a part saved from
+ * its Part Studio is not recognised when an assembly BOM names it.
+ */
+export function canonicalConfiguration(v: string): string {
+  const dec = (t: string) => {
+    const x = t.replace(/\+/g, " ");
+    try { return decodeURIComponent(x); } catch { return x; }
+  };
+  return dec(v)
+    .split(";")
+    .map((p) => p.trim())
+    .filter(Boolean)
+    .map((p) => {
+      const i = p.indexOf("=");
+      return i < 0 ? p : `${p.slice(0, i).trim()}=${p.slice(i + 1).trim()}`;
+    })
+    .sort()
+    .join(";");
+}
+
+/**
+ * The configuration to look a part up under when the caller only knows which
+ * CAD part it is.
+ *
+ * Release packages and webhooks often do not say which configuration they mean,
+ * and assuming "default" looks up an identity PLM does not hold for any part
+ * saved under a real configuration — so a release created a second copy, and
+ * a metadata edit was dropped. A stated configuration wins; otherwise, when
+ * PLM holds exactly one part for this document, tab and part, that part's
+ * configuration is used; otherwise "default".
+ */
+export async function resolveHeldConfiguration(
+  enterpriseId: string,
+  c: { documentId: string; elementId: string; partId?: string | null },
+  stated?: string | null
+): Promise<string> {
+  const given = String(stated ?? "").trim();
+  if (given && given !== "default" && !/^\{\$.*\}$/.test(given)) return given;
+
+  const held: any[] = await Part.find({
+    enterpriseId,
+    documentId: c.documentId,
+    elementId: c.elementId,
+    partId: c.partId || "",
+  }).select("configuration").limit(2).lean();
+
+  return held.length === 1 ? String(held[0].configuration || "default") : (given || "default");
+}
+
 export async function configurationNormalizer(
   enterpriseId: string
 ): Promise<(raw?: string | null) => string> {
@@ -50,7 +104,7 @@ export async function configurationNormalizer(
     const v = String(raw ?? "").trim();
     if (ignore) return "default";
     if (!v || /^\{\$.*\}$/.test(v)) return "default";
-    return v;
+    return canonicalConfiguration(v) || "default";
   };
 }
 
@@ -489,9 +543,26 @@ async function syncPartFromOnshapeOnce(
   let isNewResolved = isNew;
   const changes: SyncResult["changes"] = {};
   let numberPushed = false;
+  /** Whether this part's number came from Onshape's own existing value rather than PLM's counter. */
+  let numberAdopted = false;
 
   if (isNew) {
-    const number = await allocatePartNumber(enterpriseId, kind);
+    /*
+     * A part that already carries a Part Number in Onshape keeps it.
+     *
+     * PLM is the number master going forward, but "going forward" is the
+     * operative word: a legacy part, or one somebody numbered by hand before
+     * it was ever synced, is not PLM's to renumber the instant it first sees
+     * it. Overwriting a real, pre-existing number on first contact is
+     * indistinguishable — from the CAD side — from PLM getting it wrong, and
+     * it does exactly that unconditionally today. From here on, once PLM has
+     * adopted or minted a number for a part, this part is PLM's to number and
+     * the usual push-what-differs logic below applies as it always has —
+     * this only changes the very first sync.
+     */
+    const existingNumber = meta.partNumber.trim();
+    numberAdopted = Boolean(existingNumber);
+    const number = existingNumber || await allocatePartNumber(enterpriseId, kind);
     const state = opts.initialState || "In Work";
 
     // Seed defaults, then fold in what Onshape says. Defaults first so an
@@ -500,7 +571,7 @@ async function syncPartFromOnshapeOnce(
     for (const d of defs) if (d.defaultValue != null) seeded[d.key] = d.defaultValue;
     seeded.number = number;
 
-    const inbound = mapInbound(defs, meta.properties ?? [], seeded, state);
+    const inbound = mapInbound(defs, meta.properties ?? [], seeded, state, { name: meta.partName });
 
     /*
      * Every part belongs to a product, so this is resolved before the part
@@ -588,7 +659,7 @@ async function syncPartFromOnshapeOnce(
   if (!isNewResolved) {
     const state = String(part.lifecycleState ?? "In Work");
     const current = plainAttributes(part.attributes);
-    const inbound = mapInbound(defs, meta.properties ?? [], current, state);
+    const inbound = mapInbound(defs, meta.properties ?? [], current, state, { name: meta.partName });
 
     for (const [k, [from, to]] of Object.entries(inbound.changed)) changes[k] = { from, to };
     if (Object.keys(inbound.changed).length) {
@@ -640,8 +711,12 @@ async function syncPartFromOnshapeOnce(
     part.lastSyncedFromOnshapeAt = new Date();
 
     // Backfill for records that predate numbering, or whose allocation failed.
+    // Same rule as a first sync: Onshape's own existing value wins over a
+    // freshly minted one, for the same reason — see the isNew branch above.
     if (!part.number) {
-      part.number = await allocatePartNumber(enterpriseId, part.kind ?? kind);
+      const existingNumber = meta.partNumber.trim();
+      numberAdopted = Boolean(existingNumber);
+      part.number = existingNumber || await allocatePartNumber(enterpriseId, part.kind ?? kind);
       changes.number = { from: null, to: part.number };
     }
 
@@ -741,7 +816,8 @@ async function syncPartFromOnshapeOnce(
     ok: !part.pushPending,
     message:
       (isNewResolved
-        ? `Created ${part.number} from Onshape ${kind} "${part.name || coords.partId}"`
+        ? `Created ${part.number} from Onshape ${kind} "${part.name || coords.partId}"` +
+          (numberAdopted ? " — kept the number already set in Onshape" : "")
         : action === "updated"
           ? `Updated ${Object.keys(changes).length} field(s) at iteration ${part.iteration}`
           : "No changes") +
@@ -986,6 +1062,7 @@ export async function deletePart(
 
   await PartThumbnail.deleteOne({ partId: part._id }).catch(() => {});
   await PartIteration.deleteMany({ partId: part._id }).catch(() => {});
+  await deleteGeometryForPart(part._id).catch(() => {});
   await Part.deleteOne({ _id: part._id });
 
   await ActivityLog.create({

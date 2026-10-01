@@ -779,10 +779,48 @@ const BomLinkSchema = new Schema(
     sourceDocumentId: { type: String, default: "" },
     sourceElementId: { type: String, default: "" },
     lastImportedAt: { type: Date, default: Date.now },
+
+    /*
+     * Which named variants of the parent assembly this edge belongs to.
+     *
+     * Empty is the common case and means "every variant" — most of a BOM does
+     * not change between models, and a component nobody has narrowed should
+     * never quietly vanish from a variant just because variants exist. Only a
+     * component explicitly tagged is filtered: three sizes of the same
+     * bracket, each configured in Onshape and each its own PLM part (see
+     * Part's own configuration-in-identity), sit as three sibling edges under
+     * one assembly, and tagging is what says which model actually uses which
+     * one. See Variant below.
+     */
+    variantIds: { type: [{ type: Schema.Types.ObjectId, ref: "Variant" }], default: [] },
   },
   { timestamps: true }
 );
 BomLinkSchema.index({ enterpriseId: 1, parentId: 1, childId: 1 }, { unique: true });
+
+/**
+ * A named variant of one assembly's BOM — "Model A", "Model B" — against
+ * which BomLink edges are tagged.
+ *
+ * Scoped to the assembly it varies (`parentPartId`), not to a Product: a
+ * product can hold several independent top-level assemblies, and a variant
+ * set only means something against the one BOM it actually branches. Onshape
+ * has no equivalent object PLM could mirror this from — a CAD BOM has no
+ * notion of "which model" any more than it has a notion of a date — so this
+ * is PLM's own, entered by hand, the same way effectivity dates are.
+ */
+const VariantSchema = new Schema(
+  {
+    enterpriseId: { type: Schema.Types.ObjectId, ref: "Enterprise", required: true, index: true },
+    parentPartId: { type: Schema.Types.ObjectId, ref: "Part", required: true, index: true },
+    name: { type: String, required: true },
+    description: { type: String, default: "" },
+    /** Display order, since a model list has a natural order a name sort loses. */
+    order: { type: Number, default: 0 },
+  },
+  { timestamps: true }
+);
+VariantSchema.index({ enterpriseId: 1, parentPartId: 1, name: 1 }, { unique: true });
 
 /* -------------------------------------------------------------------------- */
 /* StarRelease — an off-cycle change to an already-released part or assembly,  */
@@ -1211,6 +1249,47 @@ const NumberingSequenceSchema = new Schema(
 NumberingSequenceSchema.index({ enterpriseId: 1, type: 1 }, { unique: true });
 
 /**
+ * A numbering scheme for one specific Onshape category, overriding the plain
+ * type-level scheme above for anything assigned that category.
+ *
+ * A separate collection rather than an extra field on NumberingSequence: that
+ * schema's unique index is `{enterpriseId, type}`, which every deployment
+ * already has built. Widening it to include a category id is the one kind of
+ * schema change this project's own deployment notes say does need a
+ * migration — an index change, not an additive field — and a live server
+ * would refuse the second scheme for a type until that index was dropped by
+ * hand. A new collection with its own index needs nothing done to the old one.
+ *
+ * `onshapeCategoryId` is typed in by an admin rather than picked from a live
+ * list: Onshape's public API does not document whether categories nest, or
+ * what an unfiltered read of them returns, so there is nothing here yet to
+ * browse with confidence. The id and name an admin has to hand come from
+ * Onshape's own category admin screen, or from `onshapeCategoryId`/
+ * `onshapeCategoryName` on a recent NumberIssuedLog row — Onshape sends both
+ * on every part-number-generator request that carries a category, whether or
+ * not a scheme exists for it yet.
+ */
+const CategoryNumberingSequenceSchema = new Schema(
+  {
+    enterpriseId: { type: Schema.Types.ObjectId, ref: "Enterprise", required: true, index: true },
+    type: { type: String, enum: ["PART", "ASSEMBLY", "DRAWING", "RELEASE"], required: true },
+    /** Onshape's id for the category. Opaque to PLM — matched, never interpreted. */
+    onshapeCategoryId: { type: String, required: true },
+    /** Onshape's own label, kept only for display. PLM does not rename this. */
+    onshapeCategoryName: { type: String, default: "" },
+    prefix: { type: String, default: "" },
+    suffix: { type: String, default: "" },
+    padding: { type: Number, default: 5 },
+    counter: { type: Number, default: 0 },
+  },
+  { timestamps: true }
+);
+CategoryNumberingSequenceSchema.index(
+  { enterpriseId: 1, type: 1, onshapeCategoryId: 1 },
+  { unique: true }
+);
+
+/**
  * A record of every number this system has handed out.
  *
  * A number is never reused, even when the write that follows it fails: a number
@@ -1228,6 +1307,14 @@ const NumberIssuedLogSchema = new Schema(
     documentId: { type: String, default: "" },
     elementId: { type: String, default: "" },
     partId: { type: String, default: "" },
+    /*
+     * The category Onshape sent with this request, if any — whether or not a
+     * scheme for it existed yet. Recorded on every issue, not only a matched
+     * one, so an admin setting up category schemes for the first time has
+     * real ids and names to pick from instead of hunting for them in Onshape.
+     */
+    onshapeCategoryId: { type: String, default: "" },
+    onshapeCategoryName: { type: String, default: "" },
   },
   { timestamps: true }
 );
@@ -1359,6 +1446,18 @@ const MockOnshapePartSchema = new Schema(
      * sits rather than a property of the element.
      */
     isSubassembly: { type: Boolean, default: false },
+    /**
+     * How many instances of this part the assembly's BOM reports.
+     *
+     * `null` means the simulator makes one up (a hash of the part id, stable
+     * across calls) — every part seeded before this field existed relied on
+     * that, and a real assembly's own BOM would not give an explicit answer
+     * for a part nobody has occasion to duplicate. Setting it is how a test
+     * changes an assembly's instance count between two BOM reads, which a
+     * hash of a fixed id could never do — the whole point being to prove a
+     * re-import with "update quantities" actually picks up the new count.
+     */
+    quantity: { type: Number, default: null },
     // propertyId -> value, mirroring Onshape's metadata property bag.
     properties: { type: Schema.Types.Mixed, default: {} },
     /** Revisions the mock tenant has created, so a released part reads back correctly. */
@@ -1605,6 +1704,7 @@ export const Task = models.Task || model("Task", TaskSchema);
 export const Part = models.Part || model("Part", PartSchema);
 export const PartIteration = models.PartIteration || model("PartIteration", PartIterationSchema);
 export const BomLink = models.BomLink || model("BomLink", BomLinkSchema);
+export const Variant = models.Variant || model("Variant", VariantSchema);
 export const StarRelease = models.StarRelease || model("StarRelease", StarReleaseSchema);
 export const Drawing = models.Drawing || model("Drawing", DrawingSchema);
 export const DrawingFile = models.DrawingFile || model("DrawingFile", DrawingFileSchema);
@@ -1615,6 +1715,8 @@ export const OAuthClient = models.OAuthClient || model("OAuthClient", OAuthClien
 export const OAuthAuthCode = models.OAuthAuthCode || model("OAuthAuthCode", OAuthAuthCodeSchema);
 export const OAuthToken = models.OAuthToken || model("OAuthToken", OAuthTokenSchema);
 export const NumberingSequence = models.NumberingSequence || model("NumberingSequence", NumberingSequenceSchema);
+export const CategoryNumberingSequence =
+  models.CategoryNumberingSequence || model("CategoryNumberingSequence", CategoryNumberingSequenceSchema);
 export const NumberIssuedLog = models.NumberIssuedLog || model("NumberIssuedLog", NumberIssuedLogSchema);
 export const ActivityLog = models.ActivityLog || model("ActivityLog", ActivityLogSchema);
 export const Favorite = models.Favorite || model("Favorite", FavoriteSchema);

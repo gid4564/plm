@@ -126,6 +126,14 @@ export type DocumentInfo = {
 };
 
 /** An assembly tab, addressed for a BOM read. */
+export type ConfigurationDefinition = {
+  parameters: {
+    id: string;
+    name: string;
+    options: { value: string; label: string }[];
+  }[];
+};
+
 export type AssemblyCoords = {
   documentId: string;
   elementId: string;
@@ -227,6 +235,8 @@ export type ReleasePackageItem = {
   revision: string;
   /** The version the release produced, needed to export the released drawing. */
   versionId: string;
+  /** The configuration of the item being released; empty when Onshape does not say. */
+  configuration?: string;
 };
 
 export type ReleasePackage = {
@@ -491,6 +501,13 @@ export interface OnshapeClient {
    * offered for assemblies that are bought or built as units.
    */
   getAssemblyBom(coords: AssemblyCoords, opts?: { multiLevel?: boolean }): Promise<BomTable>;
+
+  /**
+   * The configuration dropdowns an element offers, so a caller can build a
+   * valid `configuration` string rather than asking a person to type one.
+   * Empty when the element is not configurable.
+   */
+  getConfigurationDefinition(coords: AssemblyCoords): Promise<ConfigurationDefinition>;
 
   /** Parts in an element, used to resolve a part number to a part id. */
   listElementParts(coords: PartCoords): Promise<ElementPart[]>;

@@ -315,6 +315,43 @@ its type and its placeholder tokens. **[confirmed]**
 | Document list info panel | iFrame | `documentId`, `elementId`, `partId` | PLM status beside the document list |
 | Element tab | iFrame | `documentId`, `workspaceId`, `versionId`, `elementId` as plain query params, **no token substitution** | Full PLM browser inside a document. One per application |
 
+### Per-configuration part numbers — why the same number shows on every instance
+
+A part's custom properties, Part Number included, are **not configuration-aware by
+default**. Onshape stores one shared value per property unless it is explicitly
+turned into a *configured property* — every configuration then reads that one
+value, and every instance inserted into an assembly, whichever configuration it
+is, shows the same number. This is not a PLM gap: there is no control over a
+configured instance's part number at the point of inserting it into an
+assembly — the control point is the source Part Studio. **[confirmed]** —
+Onshape's own forum: "I dont think you can do it when the part is configured at
+the assembly level, it needs to be done in the part document for each
+configuration." (forum.onshape.com/discussion/19024)
+
+The fix is in the Part Studio, not the assembly: Configuration panel →
+**Configured properties** → set "Properties for" to the part → add **Part
+number** as a property → each configuration gets its own cell. Right-clicking a
+cell offers **Generate next part number**, which calls whichever part-number
+generator is registered for the tenant — PLM, once the extension below is set
+up — the same mechanism the Release candidate dialog uses. **[confirmed]** —
+`cad.onshape.com/help/Content/PartStudio/configured_properties.htm`: "If
+automatic part number generation is enabled, you can right-click the Part
+number column to 'Generate next part number.'"
+
+**Caveat for PLM's category-scoped numbering (R8-adjacent, see numbering.ts):**
+Onshape's own app-dev documentation is explicit that `categories` — the field
+PLM's category-based schemes match against — **is only populated when the
+extension is called from the Release candidate dialog or a properties
+dialog**. "Categories are only passed from the Release dialog and properties
+dialogs for now. They are empty when part number generation is called from the
+BOM table or configuration table." **[confirmed]** —
+`onshape-public.github.io/docs/app-dev/extensions/`. So generating a number
+from the Configured Properties table — the per-configuration workflow above —
+will **not** carry a category, and PLM falls back to the plain type-level
+default scheme for that call, never a category-specific one. A category-scoped
+number for a configured part still has to come from the Release candidate
+dialog or a properties dialog.
+
 Two carry-overs from MOS that matter here:
 
 - **Unsubstituted tokens must be stripped.** Onshape does not fill every `{$token}`
@@ -430,6 +467,64 @@ package and the OpenAPI definition, U3 by
 decision. None of the rest block progress: the mock client
 implements the flow end to end, and each remaining unknown is one live call away
 from being pinned down.
+
+---
+
+## 7. Documentation gaps — an index
+
+Where Onshape's published documentation is missing, wrong or incomplete, in
+one place. It restates rather than replaces the entries above: each row points
+at the entry that holds the evidence. Three groups, ordered by how much each
+has cost.
+
+Confidence tags follow the rest of this document. **[confirmed]** was seen on a
+live tenant or read from the OpenAPI definition; **[unconfirmed]** is inferred.
+
+### 7a. Not in the public OpenAPI definition at all
+
+| Call | What is missing | Ref | Status |
+|---|---|---|---|
+| `POST /tasks/find` | Whole endpoint (`x-BTVisibility: INTERNAL`). Paging is in the **body** (`from`, `size`); the `next` URL's `offset`/`limit` are ignored. `query` is self-referential and cannot be constructed from the definition, so PLM sends none. A browser session needs a CSRF header; OAuth callers do not. | T8 | [confirmed] |
+| `DELETE /tasks/{tid}` | Present only in the authenticated definition. `deletable` is `false` for nearly every real task, so the workflow's DELETE-type transition is the practical route. | T7, T7b | [confirmed] |
+| `POST /tasks/{tid}/close`, `GET /tasks/object/{id}` | Present only in the authenticated definition. Neither is used. | T8 notes | [confirmed] present, unused |
+| `GET /metadataschema` | `objectTypeOrdinal` is **required** (a live 400 says so) but the definition does not list the endpoint. The ordinal PLM sends (PART = 2) is inferred. | M1 | [unconfirmed] value |
+| Task comment | There is no working `/comments` route for a task. A comment is a **workflow property write** on `POST /tasks/{tid}`, found only by reading Onshape's own UI traffic. | T5 | [confirmed] |
+
+### 7b. Documented, but wrong or incomplete
+
+| Call | What the documentation gets wrong or leaves out | Ref | Status |
+|---|---|---|---|
+| `POST /releasepackages/{rpid}` | The workflow action is the **`wfaction`** query parameter. The similarly named `action` means `UPDATE \| ADD_ITEMS \| REMOVE_ITEMS \| SAVE_DRAFT`; a workflow action sent there, or in the body, earns a 200 and an empty update. The action's `type` (`APPROVE`) and the id to send (`RELEASE`) **differ**, and nothing says so. The body is only `BTUpdateReleasePackageParams`. | R5, U2 | [confirmed] |
+| `POST /releasepackages/release/{wfid}` | The request body is thinly documented. `changeOrderId` and `addAllDrawingsActive` are **read-only** yet read as settable. Onshape adds drawings to a package raised in its UI but **not** to one created through the API. | U6, "Onshape publishes its OpenAPI definition" | [confirmed] |
+| `GET /releasepackages/{rpid}` | Response shape: `workflow.state` and `workflowId` are **objects**; `properties` is an **array**; `syncedWithPLM` is per **item**, with `workflow.usesExternalPlm` at package level; actions are at `workflow.actions`. A completed package's actions are a genuine empty array, not a missing field. | U2, U4 | [confirmed] |
+| `POST /releasepackages/{rpid}` (response) | An **assembly** item can come back with a blank `revision` after a successful release, while its child parts carry theirs. One live occurrence. | R9 | [unconfirmed] scope |
+| `GET /releasepackages/{rpid}` | The id format inside `manuallyRemovedChildrenIds` is not documented. The client logs a warning when none match a child. | live-client `flattenPackageItems` | [unconfirmed] |
+| `elementType` (several types) | An **integer** everywhere, and no enum is documented. Only 0 = Part Studio is observed; 1 = Assembly and 2 = Drawing are inferred. | "`elementType` arrives as an integer" | 0 [confirmed]; 1, 2 [unconfirmed] |
+| Comment `objectType` | The codes are undocumented. A task comment carries **10**, not the 14 that `BTMetadataObjectType`'s ordinals suggest. | T5 | [confirmed] |
+| `GET /tasks` | `status` is an undocumented integer. `limit` has a hard cap of 100, enforced. Only a company admin sees tasks they neither created nor were assigned. | T1 | [confirmed] |
+| Task workflow | The stock workflow has **no start transition**. Progress is the editable "Task State" property (`0=New, 1=Assigned, 2=In Work, 3=Completed, 5=Closed, 6=Canceled`, a gap at 4), so an in-progress column is a property write. | T9 | [confirmed] |
+| Task properties | They live in **two** places (`properties` and `workflowInfo.properties`) and must both be read. | T6 | [confirmed] |
+
+### 7c. Still inferred — needs one real payload
+
+| Question | Why it matters | Ref | Status |
+|---|---|---|---|
+| Which field of an `onshape.workflow.transition` payload says *release package* rather than *revision* | The receiver routes the whole release takeover off this event. | U1 | open |
+| Whether `syncedWithPLM` is writable by a third-party app | It would be the correct way to mark packages PLM owns. | U4 | open |
+| Whether a released drawing must be exported against `versionId` or the revision id is addressable directly | Decides the post-release PDF re-pull. | U5 | open |
+| **Where a release package keeps its workflow property definitions** (`workflowInfo.properties` or `workflow.properties`), and whether the tenant's release workflow has a Comment property | Decides whether "Released by PLM" is written back. PLM tries both paths and never blocks a release; the activity log says whether the comment went out. | R8 | [unconfirmed] |
+| **The layout of an assembly glTF export's zip** (G2 documents the request, not the result): one `.gltf` per part or one scene, external `.bin` files or embedded | `gltf-package.ts` handles every layout it can think of and combines multi-file zips into one scene, but this has only been tested against synthetic zips. | G2 | [unconfirmed] |
+
+### How to settle the open ones
+
+Every open item is one live call away, and the client already logs what it
+needs when it cannot read a shape. Grep the server log for these, and paste the
+line into this document with a **[confirmed]** tag:
+
+- `[PLM] release package … workflow property definitions from "…"` — settles the R8 path.
+- `[PLM] release package shape:` and `[PLM] release package … NO state/actions found` — the package shape.
+- `[PLM] <label>: … NO state found` from `workflow-snapshot.ts` — a task or package whose snapshot is unreadable. A completed task's empty actions no longer logs.
+- For the glTF zip: the capture error in the part's 3D row, or fetch a real export and list its entries.
 
 ---
 

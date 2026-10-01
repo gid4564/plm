@@ -3,7 +3,7 @@ import {
   MockOnshapeDrawing, MockOnshapePart, MockPropertyDef, MockReleasePackage, MockOnshapeTask,
 } from "@/lib/models";
 import type {
-  OnshapeClient, PartCoords, PartMetadata, PropertyDef, OnshapeUser, WebhookRegistration, ElementInfo, Thumbnail, WebhookSummary, ElementPart, DocumentInfo, AssemblyCoords,
+  OnshapeClient, PartCoords, PartMetadata, PropertyDef, OnshapeUser, WebhookRegistration, ElementInfo, Thumbnail, WebhookSummary, ElementPart, DocumentInfo, AssemblyCoords, ConfigurationDefinition,
   OnshapeTask, OnshapeComment, CommentContext,
   FoundTask,} from "./types";
 import type { BomLine, BomTable } from "./bom";
@@ -222,6 +222,10 @@ export class MockOnshapeClient implements OnshapeClient {
    * quantities — against the same interface the live client implements, not to
    * simulate assembly structure.
    */
+  async getConfigurationDefinition(): Promise<ConfigurationDefinition> {
+    return { parameters: [] };
+  }
+
   async getAssemblyBom(
     c: AssemblyCoords,
     opts: { multiLevel?: boolean; indented?: boolean } = {}
@@ -298,7 +302,10 @@ export class MockOnshapeClient implements OnshapeClient {
 
       return {
         key: `${p.documentId}:${p.elementId}:${p.partId}:${p.configuration || "default"}`,
-        quantity: 1 + (h % 4),
+        // A test-set instance count wins; otherwise a stable stand-in derived
+        // from the part id, unchanged since nothing here asked for control
+        // over it.
+        quantity: typeof p.quantity === "number" ? p.quantity : 1 + (h % 4),
         partNumber: toDisplayString(props[numId]),
         name: toDisplayString(props[nameId]) || p.partId,
         description: toDisplayString(props[descId]),
@@ -1190,6 +1197,7 @@ export class MockOnshapeClient implements OnshapeClient {
       revisionId: String(it.revisionId ?? ""),
       revision: String(it.revision ?? ""),
       versionId: String(it.versionId ?? ""),
+      configuration: String(it.configuration ?? ""),
     }));
 
     return {

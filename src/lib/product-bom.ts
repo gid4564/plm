@@ -5,6 +5,7 @@ import { plainAttributes } from "@/lib/sync";
 import { listDefinitions, missingForRelease } from "@/lib/attributes";
 import { taskCountsForParts } from "@/lib/tasks";
 import { starReasonsForParts } from "@/lib/star-release";
+import { listVariantsFor, type VariantDoc } from "@/lib/variants";
 
 /**
  * A product's bill of materials, structured and flattened.
@@ -55,6 +56,11 @@ export type BomNode = {
   /** Effectivity of this component *in this parent*, distinct from the part's. */
   linkEffectiveFrom: string | null;
   linkEffectiveTo: string | null;
+  /**
+   * Which variants of the parent assembly this position belongs to. Empty
+   * means every variant — see BomLink.variantIds and Variant's own comment.
+   */
+  linkVariantIds: string[];
   children: BomNode[];
   /**
    * Release-required attributes this part still lacks, by label.
@@ -101,6 +107,13 @@ export type BomResult = {
   /** The date the BOM was resolved at, or null when unfiltered. */
   asOf: string | null;
   roots: BomNode[];
+  /**
+   * Every top-level assembly in the product, whatever `rootId` narrowed the
+   * result to — the choices for the "show one assembly" filter. Each
+   * configuration of an Onshape assembly is its own PLM assembly, so this is
+   * how a product with several of them is narrowed to one.
+   */
+  availableRoots: { id: string; number: string | null; name: string; configuration: string; kind: string }[];
   flat: BomRow[];
   totals: {
     /** Distinct parts, and total pieces. */
@@ -142,6 +155,12 @@ export type BomResult = {
   }[];
   /** Cycles found, which are data faults worth naming rather than hiding. */
   cycles: { partId: string; number: string | null; path: string[] }[];
+  /**
+   * Every variant defined anywhere in this product's BOM, across every
+   * top-level assembly that has any — so a picker can be built without a
+   * second request. Empty on a product with no variants defined at all.
+   */
+  availableVariants: (VariantDoc & { parentNumber: string | null; parentName: string })[];
   /**
    * Parts in the product that no root reaches, shown as extra roots.
    *
@@ -205,12 +224,13 @@ export function isEffectiveAt(
 export async function buildProductBom(
   enterpriseId: string,
   productId: string,
-  opts: { asOf?: Date | null } = {}
+  opts: { asOf?: Date | null; variantId?: string | null; rootId?: string | null } = {}
 ): Promise<BomResult> {
   await connectDb();
 
   const product: any = await Product.findOne({ _id: productId, enterpriseId }).lean();
   const asOf = opts.asOf ?? null;
+  const variantId = opts.variantId ?? null;
 
   /*
    * Every part in the product, and every edge in the enterprise.
@@ -233,7 +253,7 @@ export async function buildProductBom(
   const defs = await listDefinitions(enterpriseId, "PART");
 
   const links: any[] = await BomLink.find({ enterpriseId })
-    .select("parentId childId quantity findNumber effectiveFrom effectiveTo")
+    .select("parentId childId quantity findNumber effectiveFrom effectiveTo variantIds")
     .lean();
 
   /* Children by parent, and the set of parts that are somebody's child. */
@@ -279,6 +299,20 @@ export async function buildProductBom(
   );
 
   /*
+   * Every variant defined anywhere in this BOM, fetched once so the walk
+   * below can filter by id without a query per link, and so the response can
+   * hand a picker its options without a second round trip.
+   */
+  const variantRows = await listVariantsFor(enterpriseId, [...byId.keys()]);
+  const availableVariants: BomResult["availableVariants"] = variantRows.map((v) => {
+    const parent = byId.get(v.parentPartId);
+    return { ...v, parentNumber: parent?.number ?? null, parentName: parent?.name ?? "" };
+  });
+  const variantName = variantId
+    ? availableVariants.find((v) => v.id === variantId)?.name ?? null
+    : null;
+
+  /*
    * The roots: parts in this product that nothing in the structure contains.
    *
    * A part that is somebody's child appears under its parent instead, so
@@ -286,9 +320,20 @@ export async function buildProductBom(
    * view. A product of loose parts with no structure at all has every part as a
    * root, which is correct — that is what its BOM is.
    */
-  const roots = own
+  const allRoots = own
     .filter((p) => !isChild.has(String(p._id)))
     .sort((a, b) => String(a.number ?? "").localeCompare(String(b.number ?? "")));
+  const availableRoots: BomResult["availableRoots"] = allRoots.map((p: any) => ({
+    id: String(p._id),
+    number: p.number ?? null,
+    name: p.name ?? "",
+    configuration: p.configuration && p.configuration !== "default" ? String(p.configuration) : "",
+    kind: p.kind ?? "part",
+  }));
+  // Narrowing to one assembly. An id that is no longer a root is ignored
+  // rather than emptying the BOM.
+  const rootId = opts.rootId && allRoots.some((p: any) => String(p._id) === opts.rootId) ? opts.rootId : null;
+  const roots = rootId ? allRoots.filter((p: any) => String(p._id) === rootId) : allRoots;
 
   const excludedByDate: BomResult["excludedByDate"] = [];
   const excludedLinks: BomResult["excludedLinks"] = [];
@@ -364,6 +409,7 @@ export async function buildProductBom(
       linkId: viaLink ? String(viaLink._id) : null,
       linkEffectiveFrom: asDate(viaLink?.effectiveFrom)?.toISOString() ?? null,
       linkEffectiveTo: asDate(viaLink?.effectiveTo)?.toISOString() ?? null,
+      linkVariantIds: (viaLink?.variantIds ?? []).map(String),
       missingForRelease: missingForRelease(defs, attrs),
       children: [],
       alsoUsedElsewhere: false,
@@ -421,6 +467,35 @@ export async function buildProductBom(
           });
         }
         continue;
+      }
+
+      /*
+       * Is this component tagged for the variant being viewed?
+       *
+       * An untagged edge (the common case — most of a BOM does not vary) is
+       * never filtered. A tagged one is shown only when its tags include the
+       * requested variant — that is the whole mechanism: three sibling edges
+       * under one assembly, each a different sized part, each tagged with the
+       * one or more models that use it.
+       */
+      if (variantId) {
+        const tags: string[] = (l.variantIds ?? []).map(String);
+        if (tags.length && !tags.includes(variantId)) {
+          const lid = String(l._id);
+          if (!seenExcludedLink.has(lid)) {
+            seenExcludedLink.add(lid);
+            excludedLinks.push({
+              linkId: lid,
+              parentId: id,
+              parentNumber: partRow.number ?? null,
+              childId: String(l.childId),
+              childNumber: child.number ?? null,
+              childName: child.name ?? "",
+              reason: `not part of the "${variantName ?? variantId}" variant`,
+            });
+          }
+          continue;
+        }
       }
 
       const childNode = walk(
@@ -510,6 +585,9 @@ export async function buildProductBom(
   for (const r of own) {
     const id = String(r._id);
     if (structurallyReachable.has(id)) continue;
+    // Reachability is judged from the chosen assembly, so every other
+    // assembly's parts would read as orphans. Not a fault — skip.
+    if (rootId) continue;
     unreachable.push({ partId: id, number: r.number ?? null, name: r.name ?? "" });
     const node = walk(r, 1, 1, 0, [], "");
     if (node) {
@@ -565,6 +643,7 @@ export async function buildProductBom(
     product: { id: String(product._id), name: product.name },
     asOf: asOf ? asOf.toISOString() : null,
     roots: builtRoots,
+    availableRoots,
     flat: rows,
     totals: {
       distinctParts: rows.length,
@@ -583,6 +662,7 @@ export async function buildProductBom(
     excludedLinks,
     cycles,
     unreachable,
+    availableVariants,
   };
 }
 
@@ -594,6 +674,7 @@ function emptyResult(
     product,
     asOf: asOf ? asOf.toISOString() : null,
     roots: [],
+    availableRoots: [],
     flat: [],
     totals: {
       distinctParts: 0, totalPieces: 0, assemblies: 0, released: 0, inWork: 0,
@@ -604,5 +685,6 @@ function emptyResult(
     excludedLinks: [],
     cycles: [],
     unreachable: [],
+    availableVariants: [],
   };
 }

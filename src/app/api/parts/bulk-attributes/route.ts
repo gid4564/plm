@@ -3,7 +3,7 @@ import { requireSession } from "@/lib/auth/session";
 import { connectDb } from "@/lib/db";
 import { ActivityLog, Part, PartIteration } from "@/lib/models";
 import { listDefinitions, validateAttributes } from "@/lib/attributes";
-import { plainAttributes } from "@/lib/sync";
+import { plainAttributes, pushPartToOnshape } from "@/lib/sync";
 import { handler, ok, fail } from "@/lib/api";
 
 const Body = z.object({
@@ -55,6 +55,8 @@ export const POST = handler(async (req: Request) => {
     changed: string[];
     errors: Record<string, string>;
     reason?: string;
+    /** Set when the value saved in PLM but could not be written to Onshape. */
+    pushError?: string;
   }[] = [];
 
   for (const part of parts) {
@@ -119,8 +121,28 @@ export const POST = handler(async (req: Request) => {
       createdByEmail: s.email,
     }).catch(() => {});
 
+    /*
+     * Written to Onshape, exactly as a single-part edit does (PATCH /api/parts/[id]
+     * defaults push to true). Without this the value existed only in PLM, and
+     * for any attribute mapped to Onshape the next inbound sync put Onshape's
+     * old value back — which looked like the edit had never saved.
+     *
+     * Only when a changed attribute is actually mapped outbound: a PLM-only
+     * field (Make/Buy, unit of measure…) has nothing to write, and pushing
+     * anyway would spend an Onshape call per part and flag it pushPending.
+     *
+     * A failed write does not undo the save: the value is kept and the part is
+     * marked pushPending so it can be retried, the same as a single edit.
+     */
+    const outbound = changed.some((k) => {
+      const d = defs.find((x) => x.key === k);
+      return d && d.onshapePropertyId && (d.syncDirection === "to-onshape" || d.syncDirection === "both");
+    });
+    const push = outbound ? await pushPartToOnshape(String(part._id), { trigger: "bulk-edit" }) : null;
+
     results.push({
       partId: String(part._id), number: part.number ?? null, ok: true, changed, errors: {},
+      ...(!push || push.ok ? {} : { pushError: push.error ?? "Onshape was not updated." }),
     });
   }
 
@@ -135,26 +157,29 @@ export const POST = handler(async (req: Request) => {
   const saved = results.filter((r) => r.ok && r.changed.length).length;
   const untouched = results.filter((r) => r.ok && !r.changed.length).length;
   const refused = results.filter((r) => !r.ok);
+  const pushFailed = results.filter((r) => r.ok && r.changed.length && r.pushError);
 
   await ActivityLog.create({
     enterpriseId: s.enterpriseId,
     direction: "plm",
     action: "updated",
     trigger: "bulk-edit",
-    ok: refused.length === 0,
+    ok: refused.length === 0 && pushFailed.length === 0,
     message:
       `${s.email} set ${Object.keys(attributes).join(", ")} on ${saved} part(s)` +
       (untouched ? `; ${untouched} already held the value` : "") +
-      (refused.length ? `; ${refused.length} refused` : "") + ".",
+      (refused.length ? `; ${refused.length} refused` : "") +
+      (pushFailed.length ? `; ${pushFailed.length} saved but not written to Onshape` : "") + ".",
   });
 
   return ok({
     saved,
     untouched,
     refused: refused.length,
+    pushFailed: pushFailed.length,
     results,
     message:
-      refused.length === 0
+      (refused.length === 0
         ? saved === 0
           ? `Nothing to change — all ${untouched} already held those values.`
           : `Set on ${saved} part(s)` + (untouched ? `, ${untouched} already matched` : "") + "."
@@ -162,6 +187,13 @@ export const POST = handler(async (req: Request) => {
           refused
             .slice(0, 3)
             .map((r) => `${r.number ?? r.partId}: ${r.reason ?? Object.values(r.errors)[0] ?? "refused"}`)
-            .join("; "),
+            .join("; ")) +
+      (pushFailed.length
+        ? ` ${pushFailed.length} saved in PLM but not written to Onshape: ` +
+          pushFailed
+            .slice(0, 3)
+            .map((r) => `${r.number ?? r.partId}: ${r.pushError}`)
+            .join("; ")
+        : ""),
   });
 });

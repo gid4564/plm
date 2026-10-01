@@ -41,7 +41,7 @@
  */
 import fs from "node:fs";
 import path from "node:path";
-import { MongoClient } from "mongodb";
+import { GridFSBucket, MongoClient } from "mongodb";
 
 const argv = process.argv.slice(2);
 const APPLY = argv.includes("--apply");
@@ -217,6 +217,14 @@ try {
       if (n === 0) { console.log(`  ${name.padEnd(22)} 0`); continue; }
 
       if (APPLY) {
+        /* Models over 12MB live in GridFS, and deleting their rows leaves the
+         * files behind — remove those first, while the rows still name them. */
+        if (name === "partgeometries") {
+          const bucket = new GridFSBucket(db, { bucketName: "part-geometry" });
+          const withFiles = await col.find({ ...filter, gridfsFileId: { $ne: null } }).project({ gridfsFileId: 1 }).toArray();
+          for (const r of withFiles) await bucket.delete(r.gridfsFileId).catch(() => {});
+          if (withFiles.length) console.log(`  ${"(GridFS models)".padEnd(22)} ${String(withFiles.length).padStart(6)}  removed`);
+        }
         const res = await col.deleteMany(filter);
         console.log(`  ${name.padEnd(22)} ${String(n).padStart(6)}  removed ${res.deletedCount}`);
       } else {

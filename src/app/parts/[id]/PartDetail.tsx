@@ -24,6 +24,7 @@ type Data = {
   definitions: Definition[];
   missingForRelease: string[];
   structure: { children: any[]; usedIn: any[] };
+  variants: { id: string; parentPartId: string; name: string; description: string; order: number }[];
   iterations: any[];
   drawings: any[];
   release: { id: string; number: string; state: string } | null;
@@ -674,6 +675,14 @@ export function PartDetail({ id, isAdmin }: { id: string; isAdmin: boolean }) {
                         row={c}
                         showQty
                         /*
+                         * Only "Contains" rows can be tagged — this assembly's
+                         * own variants are what they are tagged against.
+                         * "Used in" rows belong to a different parent's
+                         * variants, which this page has not loaded.
+                         */
+                        variants={data.variants}
+                        onVariantsChanged={load}
+                        /*
                          * Swapping only makes sense once this assembly itself
                          * has a revision to keep — see the disabled reason
                          * below, which is what registerStarRelease enforces
@@ -703,6 +712,16 @@ export function PartDetail({ id, isAdmin }: { id: string; isAdmin: boolean }) {
               </>
             )}
           </div>
+
+          {/* ------------------------------ Variants ---------------------------
+            * Named variants of THIS assembly's BOM — "Model A", "Model B" —
+            * that a "Contains" row above can be tagged against. PLM's own
+            * concept; Onshape has nothing to sync it from. Only meaningful
+            * for an assembly, which is the whole reason a BOM branches.
+            */}
+          {p.kind === "assembly" && (
+            <VariantsCard parentPartId={p.id} variants={data.variants} onChanged={load} />
+          )}
 
           {/* --------------------------- Star releases -------------------------
             * Only once there is a revision to star, and only once one has
@@ -927,14 +946,17 @@ export function PartDetail({ id, isAdmin }: { id: string; isAdmin: boolean }) {
 }
 
 function StructureRow({
-  row, showQty, onSwap,
+  row, showQty, onSwap, variants, onVariantsChanged,
 }: {
   row: any; showQty?: boolean;
   /** Present only for a child row of an assembly that can be starred. */
   onSwap?: () => void;
+  /** The parent assembly's own variants — present only for a "Contains" row. */
+  variants?: { id: string; name: string }[];
+  onVariantsChanged?: () => void;
 }) {
   return (
-    <div style={{ display: "flex", gap: 8, alignItems: "center", padding: "4px 0", fontSize: 12.5 }}>
+    <div style={{ display: "flex", gap: 8, alignItems: "center", padding: "4px 0", fontSize: 12.5, flexWrap: "wrap" }}>
       {showQty && (
         <span className="mono" style={{ color: "var(--text-faint)", minWidth: 26 }}>
           ×{row.quantity}
@@ -946,6 +968,14 @@ function StructureRow({
       </span>
       {row.revision && <span className="badge">{row.revision}</span>}
       <StatusBadge status={row.lifecycleState} />
+      {!!variants?.length && (
+        <LinkVariantTags
+          linkId={row.linkId}
+          variants={variants}
+          selected={row.variantIds ?? []}
+          onSaved={onVariantsChanged ?? (() => {})}
+        />
+      )}
       {onSwap && (
         <button
           className="btn btn-sm"
@@ -954,6 +984,194 @@ function StructureRow({
         >
           Swap…
         </button>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Which of the parent assembly's variants this one component belongs to.
+ *
+ * Empty (the default for every edge) means every variant — this is only
+ * about narrowing a specific position down to the model(s) that actually use
+ * it, most often one of several sibling positions for the same slot, each a
+ * different configured size or option.
+ */
+function LinkVariantTags({
+  linkId, variants, selected, onSaved,
+}: {
+  linkId: string; variants: { id: string; name: string }[]; selected: string[]; onSaved: () => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [picked, setPicked] = useState<Set<string>>(new Set(selected));
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => setPicked(new Set(selected)), [selected]);
+
+  async function save() {
+    setBusy(true); setErr(null);
+    try {
+      const res = await fetch(`/api/bom-links/${linkId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ variantIds: [...picked] }),
+      });
+      const j = await res.json();
+      if (!res.ok) throw new Error(j.error || "Could not save");
+      setEditing(false);
+      onSaved();
+    } catch (e: any) {
+      setErr(String(e.message ?? e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (!editing) {
+    const names = variants.filter((v) => selected.includes(v.id)).map((v) => v.name);
+    return (
+      <button
+        className="btn btn-sm"
+        onClick={() => setEditing(true)}
+        title="Which variants of this assembly use this component — empty means all of them"
+      >
+        {names.length ? names.join(", ") : "All variants"}
+      </button>
+    );
+  }
+
+  return (
+    <div
+      style={{
+        display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap",
+        border: "1px solid var(--border)", borderRadius: 6, padding: "4px 8px",
+      }}
+    >
+      {variants.map((v) => (
+        <label key={v.id} style={{ display: "flex", alignItems: "center", gap: 3, fontSize: 11.5 }}>
+          <input
+            type="checkbox"
+            checked={picked.has(v.id)}
+            onChange={(e) => {
+              const next = new Set(picked);
+              if (e.target.checked) next.add(v.id); else next.delete(v.id);
+              setPicked(next);
+            }}
+          />
+          {v.name}
+        </label>
+      ))}
+      {err && <span style={{ color: "var(--danger)", fontSize: 11 }}>{err}</span>}
+      <button className="btn btn-sm btn-primary" onClick={save} disabled={busy}>
+        {busy && <Spinner />} Save
+      </button>
+      <button className="btn btn-sm" onClick={() => { setEditing(false); setPicked(new Set(selected)); }}>
+        Cancel
+      </button>
+    </div>
+  );
+}
+
+/** Manage the named variants of one assembly's BOM. See BomLink.variantIds. */
+function VariantsCard({
+  parentPartId, variants, onChanged,
+}: {
+  parentPartId: string;
+  variants: { id: string; parentPartId: string; name: string; description: string; order: number }[];
+  onChanged: () => void;
+}) {
+  const [adding, setAdding] = useState(false);
+  const [name, setName] = useState("");
+  const [busy, setBusy] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+
+  async function add() {
+    if (!name.trim()) return;
+    setBusy("add"); setErr(null);
+    try {
+      const res = await fetch("/api/variants", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ parentPartId, name: name.trim() }),
+      });
+      const j = await res.json();
+      if (!res.ok) throw new Error(j.error || "Could not add this variant");
+      setName(""); setAdding(false);
+      onChanged();
+    } catch (e: any) {
+      setErr(String(e.message ?? e));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function remove(id: string, label: string) {
+    if (!confirm(
+      `Remove the variant "${label}"? Components tagged with it are not removed from the BOM — ` +
+      `they simply stop being narrowed to it.`
+    )) return;
+    setBusy(id);
+    try {
+      await fetch(`/api/variants/${id}`, { method: "DELETE" });
+      onChanged();
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  return (
+    <div className="card">
+      <h2 style={{ margin: "0 0 4px", fontSize: 15 }}>Variants</h2>
+      <p style={{ margin: "0 0 10px", fontSize: 11.5, color: "var(--text-faint)", lineHeight: 1.5 }}>
+        Named versions of this assembly&rsquo;s BOM — different models built from the same
+        structure, differing only in which of a few alternate components each one uses. Tag a
+        component under &ldquo;Components&rdquo; above with one or more of these; anything left
+        untagged is in every variant.
+      </p>
+      {variants.length === 0 && !adding && (
+        <p style={{ margin: "0 0 8px", color: "var(--text-faint)", fontSize: 12.5 }}>
+          No variants defined — every component applies to this assembly as a whole.
+        </p>
+      )}
+      {variants.length > 0 && (
+        <div style={{ display: "grid", gap: 1, marginBottom: 8 }}>
+          {variants.map((v) => (
+            <div
+              key={v.id}
+              style={{
+                display: "flex", alignItems: "center", gap: 8, padding: "6px 0",
+                borderBottom: "1px solid var(--border)", fontSize: 12.5,
+              }}
+            >
+              <span style={{ fontWeight: 600 }}>{v.name}</span>
+              <span style={{ flex: 1 }} />
+              <button
+                className="btn btn-sm btn-danger" onClick={() => remove(v.id, v.name)}
+                disabled={busy === v.id}
+              >
+                {busy === v.id ? <Spinner size={12} /> : "Remove"}
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+      {err && <Alert kind="error" onDismiss={() => setErr(null)}>{err}</Alert>}
+      {adding ? (
+        <div style={{ display: "flex", gap: 6 }}>
+          <input
+            className="input" style={{ maxWidth: 220 }} value={name} placeholder="e.g. Model A"
+            onChange={(e) => setName(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter") add(); }}
+            autoFocus
+          />
+          <button className="btn btn-primary btn-sm" onClick={add} disabled={busy === "add" || !name.trim()}>
+            {busy === "add" && <Spinner />} Add
+          </button>
+          <button className="btn btn-sm" onClick={() => { setAdding(false); setName(""); }}>Cancel</button>
+        </div>
+      ) : (
+        <button className="btn btn-sm" onClick={() => setAdding(true)}>Add a variant</button>
       )}
     </div>
   );

@@ -310,7 +310,13 @@ export function mapInbound(
   defs: AttrDef[],
   incoming: IncomingProperty[],
   current: Record<string, unknown>,
-  state: LifecycleState | string
+  state: LifecycleState | string,
+  /**
+   * Values Onshape reports outside its property list, keyed by attribute key.
+   * Used only when the attribute has no matching property — e.g. Name, whose
+   * property id is per-tenant and may not have been discovered yet.
+   */
+  fallbacks: Record<string, unknown> = {}
 ): MappedInbound {
   const byId = new Map(incoming.map((p) => [p.propertyId, p]));
   const values: Record<string, unknown> = { ...current };
@@ -321,9 +327,11 @@ export function mapInbound(
   for (const def of defs) {
     const dir = def.syncDirection ?? "from-onshape";
     if (dir === "none" || dir === "to-onshape") continue;
-    if (!def.onshapePropertyId) continue;
-
-    const prop = byId.get(def.onshapePropertyId);
+    const matched = def.onshapePropertyId ? byId.get(def.onshapePropertyId) : undefined;
+    const fallback = fallbacks[def.key];
+    const prop = matched ?? (
+      fallback != null && String(fallback) !== "" ? { propertyId: "", value: fallback } as IncomingProperty : undefined
+    );
     if (!prop) continue;
 
     // A frozen attribute on a released object is not updated from CAD either.

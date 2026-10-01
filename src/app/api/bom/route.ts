@@ -38,6 +38,7 @@ export const GET = handler(async (req: Request) => {
       elementId,
       workspaceId: p.get("workspaceId") || null,
       versionId: p.get("versionId") || null,
+      configuration: p.get("configuration") || null,
     };
   }
 

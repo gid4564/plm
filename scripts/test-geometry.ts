@@ -26,7 +26,7 @@ import { ActivityLog, Enterprise, MockOnshapePart, Part, PartGeometry } from "..
 import { MockOnshapeClient } from "../src/lib/onshape/mock-client";
 import {
   captureReleasedGeometry, detectGltfFormat, geometryBytes, geometryCaptureEnabled,
-  geometryForPart, MAX_GEOMETRY_BYTES, readGeometryBytes,
+  geometryForPart, MAX_GEOMETRY_BYTES, deleteGeometryForPart, readGeometryBytes,
 } from "../src/lib/geometry";
 import { syncPartFromOnshape } from "../src/lib/sync";
 import type { OnshapeClient } from "../src/lib/onshape/types";
@@ -442,6 +442,62 @@ async function main() {
     /* The old file is actually gone, not just unlinked. */
     const orphan = await readGeometryBytes({ gridfsFileId: oldFileId });
     check("the old GridFS file was deleted, not left as an orphan", orphan.length === 0);
+  }
+
+  console.log("\nDeleting a part's captures also removes their GridFS files");
+  {
+    const smallGlb = (await client.exportGltf(coords, {})).data;
+    const big = Buffer.concat([smallGlb, Buffer.alloc(13 * 1024 * 1024)]);
+    const bigClient = {
+      ...client,
+      exportGltf: async () => ({
+        data: big, contentType: "model/gltf-binary", via: "direct" as const, elapsedMs: 1,
+      }),
+    } as unknown as OnshapeClient;
+
+    const doomed: any = await Part.create({
+      enterpriseId: ent._id, documentId: "dDel", elementId: "eDel", partId: "PDel",
+      number: "PN-DEL-001", name: "Doomed", kind: "part", lifecycleState: "In Work",
+    });
+    await captureReleasedGeometry(bigClient, eid, String(doomed._id), coords, { revision: "" });
+    const row: any = await PartGeometry.findOne({ partId: doomed._id }).lean();
+    check("a GridFS-backed capture exists", !!row?.gridfsFileId);
+    check("and can be read back", (await readGeometryBytes(row)).length === big.length);
+
+    await deleteGeometryForPart(doomed._id);
+    check("the rows are gone", (await PartGeometry.countDocuments({ partId: doomed._id })) === 0);
+    check("and so is the GridFS file, not orphaned",
+      (await readGeometryBytes({ gridfsFileId: row.gridfsFileId })).length === 0);
+    await Part.deleteOne({ _id: doomed._id });
+  }
+
+  console.log("\nA clean-slate reset also removes GridFS files");
+  {
+    const smallGlb = (await client.exportGltf(coords, {})).data;
+    const big = Buffer.concat([smallGlb, Buffer.alloc(13 * 1024 * 1024)]);
+    const bigClient = {
+      ...client,
+      exportGltf: async () => ({
+        data: big, contentType: "model/gltf-binary", via: "direct" as const, elapsedMs: 1,
+      }),
+    } as unknown as OnshapeClient;
+    await captureReleasedGeometry(bigClient, eid, String(part._id), coords, { revision: "RS1" });
+    const row: any = await PartGeometry.findOne({
+      enterpriseId: ent._id, partId: part._id, revision: "RS1",
+    }).lean();
+    check("a GridFS-backed capture exists", !!row?.gridfsFileId);
+
+    const { clearEnterpriseWorkData } = await import("../src/lib/reset");
+    await clearEnterpriseWorkData(eid);
+    check("the rows are gone", (await PartGeometry.countDocuments({ enterpriseId: ent._id })) === 0);
+    check("and the GridFS file is not left behind",
+      (await readGeometryBytes({ gridfsFileId: row.gridfsFileId })).length === 0);
+
+    // Later sections need the part back.
+    await Part.create({
+      _id: part._id, enterpriseId: ent._id, documentId: "dG", elementId: "eG", partId: "PG1",
+      number: "PN-3D-001", name: "Bracket", kind: "part", lifecycleState: "Released", revision: "A",
+    });
   }
 
   console.log("\nAn empty answer is not mistaken for a model");

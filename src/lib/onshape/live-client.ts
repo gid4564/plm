@@ -1,5 +1,5 @@
 import type {
-  OnshapeClient, PartCoords, PartMetadata, PropertyDef, OnshapeUser, WebhookRegistration, ElementInfo, Thumbnail, WebhookSummary, ElementPart, DocumentInfo, AssemblyCoords,
+  OnshapeClient, PartCoords, PartMetadata, PropertyDef, OnshapeUser, WebhookRegistration, ElementInfo, Thumbnail, WebhookSummary, ElementPart, DocumentInfo, AssemblyCoords, ConfigurationDefinition,
   OnshapeTask, OnshapeComment, CommentContext,
   FoundTask,} from "./types";
 import type {
@@ -648,6 +648,25 @@ export class LiveOnshapeClient implements OnshapeClient {
     }
 
     return table;
+  }
+
+  async getConfigurationDefinition(c: AssemblyCoords): Promise<ConfigurationDefinition> {
+    const wv = c.workspaceId ? `w/${c.workspaceId}` : `v/${c.versionId}`;
+    const payload = await this.req<Record<string, any>>(
+      `/elements/d/${c.documentId}/${wv}/e/${c.elementId}/configuration`
+    );
+    const parameters = (Array.isArray(payload?.configurationParameters) ? payload.configurationParameters : [])
+      .map((p: any) => ({
+        id: String(p.parameterId ?? ""),
+        name: String(p.parameterName ?? p.parameterId ?? ""),
+        options: (Array.isArray(p.options) ? p.options : []).map((o: any) => ({
+          value: String(o.option ?? ""),
+          label: String(o.optionName ?? o.option ?? ""),
+        })),
+      }))
+      // Quantity, boolean and string parameters have no option list to pick from.
+      .filter((p: any) => p.id && p.options.length > 0);
+    return { parameters };
   }
 
   async getElementInfo(c: PartCoords): Promise<ElementInfo | null> {
@@ -1334,6 +1353,16 @@ export class LiveOnshapeClient implements OnshapeClient {
       }
     }
 
+    // What Onshape actually names the fields on an item, which is the part of
+    // this payload that has been guessed at rather than confirmed.
+    if (rawItems[0]) {
+      console.log(
+        `[PLM] release package item keys: ${Object.keys(rawItems[0]).join(", ")} ` +
+        `| configuration=${JSON.stringify(rawItems[0].configuration ?? null)} ` +
+        `fullConfiguration=${JSON.stringify(rawItems[0].fullConfiguration ?? null)}`
+      );
+    }
+
     const items: ReleasePackageItem[] = rawItems.map((it: any) => ({
       id: String(it?.id ?? ""),
       documentId: String(it?.documentId ?? it?.document?.id ?? ""),
@@ -1361,6 +1390,7 @@ export class LiveOnshapeClient implements OnshapeClient {
       revisionId: String(it?.revisionId ?? ""),
       revision: String(it?.revision ?? ""),
       versionId: String(it?.versionId ?? it?.version?.id ?? ""),
+      configuration: String(it?.fullConfiguration ?? it?.configuration ?? ""),
     }));
 
     /*

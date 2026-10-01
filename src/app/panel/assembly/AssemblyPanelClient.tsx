@@ -5,7 +5,7 @@ import { Alert, RevChip, Spinner, StatusBadge } from "@/components/ui";
 import { ProductField } from "@/components/ProductField";
 import { PanelHeader, SignedOut, panelWrap } from "../shared";
 
-type Ctx = { documentId: string; elementId: string; workspaceId: string; versionId: string };
+type Ctx = { documentId: string; elementId: string; workspaceId: string; versionId: string; configuration?: string };
 
 type Tracked = { partId: string; number: string | null; revision: string; lifecycleState: string };
 
@@ -45,8 +45,16 @@ export function AssemblyPanelClient({
   const [bom, setBom] = useState<Bom | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [multiLevel, setMultiLevel] = useState(true);
+  // Starts as whatever Onshape handed over; editable because the panel does
+  // not necessarily reload when the configuration dropdown changes.
+  const [configuration, setConfiguration] = useState(ctx.configuration ?? "");
+  // The dropdowns the assembly defines, when Onshape will tell us.
+  const [cfgDef, setCfgDef] = useState<{ id: string; name: string; options: { value: string; label: string }[] }[]>([]);
   const [reading, setReading] = useState(false);
   const [importing, setImporting] = useState(false);
+  // Off by default on the server; on here so re-importing a changed assembly
+  // brings its instance counts across.
+  const [updateQuantities, setUpdateQuantities] = useState(true);
   const [currentProductId, setCurrentProductId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<ImportResult | null>(null);
@@ -71,28 +79,6 @@ export function AssemblyPanelClient({
     return p;
   }, [ctx]);
 
-  /**
-   * How much of this assembly PLM already holds.
-   *
-   * A local query, so opening the panel is instant and costs Onshape nothing.
-   * Reading the BOM itself is a real API call against a shared rate limit and
-   * stays behind a button — clicking through assembly tabs should not spend
-   * anyone's quota.
-   */
-  const loadTracked = useCallback(async () => {
-    if (!signedIn || !ctx.elementId) return;
-    try {
-      const res = await fetch(`/api/parts?q=${encodeURIComponent(ctx.elementId)}`);
-      const data = await res.json();
-      // The parts list answers under `parts`; reading `items` here counted
-      // nothing and the panel always claimed the assembly was un-imported.
-      if (res.ok) setAlreadyHere((data.parts ?? []).length);
-    } catch {
-      // Cosmetic; the panel works without it.
-    }
-  }, [ctx.elementId, signedIn]);
-
-  useEffect(() => { loadTracked(); }, [loadTracked]);
 
   /**
    * Whether the assembly ELEMENT itself — not its children — is in PLM.
@@ -107,7 +93,12 @@ export function AssemblyPanelClient({
     try {
       const res = await fetch(`/api/parts/lookup?${params()}`);
       const data = await res.json();
-      if (res.ok) setAssemblyPart(data.part ?? null);
+      if (res.ok) {
+        setAssemblyPart(data.part ?? null);
+        // Counted from the assembly's own structure in PLM. Its parts live in
+        // Part Studio tabs, so a search on this tab's element id finds none.
+        setAlreadyHere(data.part ? (data.structureParts ?? 0) : 0);
+      }
     } catch {
       // Cosmetic; the sync button below still works from a stale read.
     } finally {
@@ -116,6 +107,41 @@ export function AssemblyPanelClient({
   }, [ctx.elementId, params, signedIn]);
 
   useEffect(() => { loadAssembly(); }, [loadAssembly]);
+
+  useEffect(() => {
+    if (!signedIn || !ctx.elementId) return;
+    let alive = true;
+    void (async () => {
+      try {
+        const res = await fetch(`/api/bom/configuration?${params()}`);
+        const data = await res.json();
+        if (alive && res.ok) setCfgDef(data.parameters ?? []);
+      } catch {
+        // The free-text field below still works.
+      }
+    })();
+    return () => { alive = false; };
+  }, [ctx.elementId, params, signedIn]);
+
+  /** "Weight=50 kg;Size=L" -> { Weight: "50 kg", Size: "L" } */
+  const cfgValues = useMemo(() => {
+    const out: Record<string, string> = {};
+    for (const part of configuration.split(";")) {
+      const i = part.indexOf("=");
+      if (i > 0) out[part.slice(0, i).trim()] = decodeURIComponent(part.slice(i + 1).trim());
+    }
+    return out;
+  }, [configuration]);
+
+  function pickOption(paramId: string, value: string) {
+    const next = { ...cfgValues, [paramId]: value };
+    setConfiguration(
+      cfgDef
+        .filter((d) => next[d.id])
+        .map((d) => `${d.id}=${next[d.id]}`)
+        .join(";")
+    );
+  }
 
   async function syncAssembly() {
     setAssemblySyncing(true);
@@ -132,7 +158,7 @@ export function AssemblyPanelClient({
       );
       // The BOM view's own "already tracked" badges read stale otherwise —
       // this assembly may itself be a line in a BOM read a moment ago.
-      await Promise.all([loadTracked(), bom ? readBom() : Promise.resolve()]);
+      await Promise.all([loadAssembly(), bom ? readBom() : Promise.resolve()]);
     } catch (err: any) {
       setError(String(err.message ?? err));
     } finally {
@@ -145,6 +171,7 @@ export function AssemblyPanelClient({
     try {
       const p = params();
       p.set("multiLevel", multiLevel ? "1" : "0");
+      if (configuration.trim()) p.set("configuration", configuration.trim());
       const res = await fetch(`/api/bom?${p}`);
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Could not read the BOM");
@@ -164,7 +191,7 @@ export function AssemblyPanelClient({
     } finally {
       setReading(false);
     }
-  }, [params, multiLevel]);
+  }, [params, multiLevel, configuration]);
 
   /*
    * The product this import will be filed into.
@@ -213,8 +240,10 @@ export function AssemblyPanelClient({
           workspaceId: ctx.workspaceId || null,
           versionId: ctx.versionId || null,
           multiLevel,
+          configuration: configuration.trim() || null,
           keys: [...selected],
-                  }),
+          updateQuantities,
+        }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Import failed");
@@ -224,7 +253,7 @@ export function AssemblyPanelClient({
       // was selected below — see importBomLines' parentSync. Without this,
       // the card at the top kept saying "not in PLM" for an assembly the
       // import had just tracked.
-      await Promise.all([readBom(), loadTracked(), loadAssembly()]);
+      await Promise.all([readBom(), loadAssembly()]);
     } catch (err: any) {
       setError(String(err.message ?? err));
     } finally {
@@ -429,6 +458,32 @@ export function AssemblyPanelClient({
             </div>
           </div>
 
+          {cfgDef.map((d) => (
+            <label key={d.id} style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 11.5, color: "var(--text-muted)" }}>
+              <span style={{ minWidth: 70 }}>{d.name}</span>
+              <select
+                value={cfgValues[d.id] ?? ""}
+                onChange={(e) => pickOption(d.id, e.target.value)}
+                style={{ flex: 1, minWidth: 0, fontSize: 11.5 }}
+              >
+                <option value="">Default</option>
+                {d.options.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+              </select>
+            </label>
+          ))}
+          <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 11.5, color: "var(--text-muted)" }}>
+            Configuration
+            <input
+              className="mono" value={configuration} placeholder="default"
+              onChange={(e) => setConfiguration(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") readBom(); }}
+              style={{ flex: 1, minWidth: 0, fontSize: 11 }}
+            />
+            <button className="btn btn-sm" type="button" onClick={readBom} disabled={reading}>
+              {reading && <Spinner />} Read
+            </button>
+          </label>
+
           {bom.lines.length === 0 && (
             <Alert kind="warn">
               {bom.shape === "unrecognised"
@@ -523,6 +578,19 @@ export function AssemblyPanelClient({
                 together, so asking afterwards would mean moving a whole
                 assembly by hand.
               */}
+              <label style={{ display: "flex", gap: 6, alignItems: "flex-start", fontSize: 12, lineHeight: 1.4 }}>
+                <input
+                  type="checkbox" checked={updateQuantities}
+                  onChange={(e) => setUpdateQuantities(e.target.checked)}
+                  style={{ marginTop: 2 }}
+                />
+                <span>
+                  Update quantities of items already in PLM
+                  <span style={{ display: "block", color: "var(--text-faint)", fontSize: 10.5 }}>
+                    Select "All" first to refresh the whole assembly after changing instance counts.
+                  </span>
+                </span>
+              </label>
               <ProductField
                 label="File into product"
                 compact

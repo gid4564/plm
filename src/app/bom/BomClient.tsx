@@ -32,6 +32,7 @@ type Node = {
   linkId: string | null;
   linkEffectiveFrom: string | null;
   linkEffectiveTo: string | null;
+  linkVariantIds: string[];
   children: Node[];
   missingForRelease: string[];
   alsoUsedElsewhere: boolean;
@@ -62,6 +63,10 @@ type Bom = {
     childId: string; childNumber: string | null; childName: string; reason: string;
   }[];
   unreachable: { partId: string; number: string | null; name: string }[];
+  availableRoots: { id: string; number: string | null; name: string; configuration: string; kind: string }[];
+  availableVariants: {
+    id: string; parentPartId: string; parentNumber: string | null; parentName: string; name: string;
+  }[];
 };
 
 type Product = { id: string; name: string; total: number };
@@ -89,6 +94,10 @@ export function BomClient({
    */
   const [dateMode, setDateMode] = useState<"all" | "today" | "on">("all");
   const [onDate, setOnDate] = useState(today());
+  /** Empty string means the unfiltered "150%" view — every component, tagged or not. */
+  const [variantId, setVariantId] = useState("");
+  /** Empty means every top-level assembly. One id narrows to that assembly (one configuration). */
+  const [rootId, setRootId] = useState("");
 
   const [bom, setBom] = useState<Bom | null>(null);
   const [loading, setLoading] = useState(false);
@@ -141,16 +150,25 @@ export function BomClient({
     setLoading(true);
     setError(null);
     try {
-      const r = await fetch(`/api/products/${product}/bom?asOf=${encodeURIComponent(asOfParam)}`);
+      const params = new URLSearchParams({ asOf: asOfParam });
+      if (variantId) params.set("variantId", variantId);
+      if (rootId) params.set("rootId", rootId);
+      const r = await fetch(`/api/products/${product}/bom?${params}`);
       const j = await r.json();
       if (!r.ok) throw new Error(j.error || "Could not load the BOM");
       setBom(j);
+      // A variant that no longer exists (deleted elsewhere) falls back to the
+      // unfiltered view rather than silently keeping an id nothing can match.
+      if (variantId && !(j.availableVariants ?? []).some((v: any) => v.id === variantId)) {
+        setVariantId("");
+      }
+      if (rootId && !(j.availableRoots ?? []).some((r: any) => r.id === rootId)) setRootId("");
     } catch (e: any) {
       setError(String(e?.message ?? e));
     } finally {
       setLoading(false);
     }
-  }, [product, asOfParam]);
+  }, [product, asOfParam, variantId, rootId]);
 
   useEffect(() => { void load(); }, [load]);
 
@@ -196,6 +214,20 @@ export function BomClient({
     () => (bom ? bom.flat.filter(matches) : []),
     [bom, matches]
   );
+
+  const variantNames = useMemo(
+    () => new Map((bom?.availableVariants ?? []).map((v) => [v.id, v.name])),
+    [bom]
+  );
+
+  /** An assembly's own selectable variants — what a tag editor under it offers. */
+  const variantsByParent = useMemo(() => {
+    const m = new Map<string, { id: string; name: string }[]>();
+    for (const v of bom?.availableVariants ?? []) {
+      m.set(v.parentPartId, [...(m.get(v.parentPartId) ?? []), { id: v.id, name: v.name }]);
+    }
+    return m;
+  }, [bom]);
 
   function toggleSelect(partId: string) {
     setSelected((prev) => {
@@ -325,7 +357,9 @@ export function BomClient({
         {product && (
           <a
             className="btn btn-sm"
-            href={`/api/products/${product}/bom?asOf=${encodeURIComponent(asOfParam)}&format=csv`}
+            href={`/api/products/${product}/bom?asOf=${encodeURIComponent(asOfParam)}` +
+              `${variantId ? `&variantId=${encodeURIComponent(variantId)}` : ""}` +
+              `${rootId ? `&rootId=${encodeURIComponent(rootId)}` : ""}&format=csv`}
           >
             Export CSV
           </a>
@@ -340,7 +374,7 @@ export function BomClient({
             className="select"
             style={{ width: "100%" }}
             value={product ?? ""}
-            onChange={(e) => { setProduct(e.target.value || null); setCollapsed(new Set()); }}
+            onChange={(e) => { setProduct(e.target.value || null); setCollapsed(new Set()); setVariantId(""); setRootId(""); }}
           >
             {products.length === 0 && <option value="">No products yet</option>}
             {products.map((p) => (
@@ -350,6 +384,49 @@ export function BomClient({
             ))}
           </select>
         </div>
+
+        {(bom?.availableRoots ?? []).filter((r) => r.kind === "assembly").length > 1 && (
+          <div style={{ minWidth: 200 }}>
+            <label className="label">Assembly</label>
+            <select
+              className="select"
+              style={{ width: "100%" }}
+              value={rootId}
+              onChange={(e) => { setRootId(e.target.value); setCollapsed(new Set()); }}
+              title="Each configuration of an Onshape assembly is its own assembly here — show just one"
+            >
+              <option value="">All assemblies</option>
+              {bom!.availableRoots.filter((r) => r.kind === "assembly").map((r) => (
+                <option key={r.id} value={r.id}>
+                  {[r.number, r.name].filter(Boolean).join(" — ") || "Assembly"}
+                  {r.configuration ? ` [${r.configuration}]` : ""}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
+
+        {!!bom?.availableVariants?.length && (
+          <div style={{ minWidth: 180 }}>
+            <label className="label">Variant</label>
+            <select
+              className="select"
+              style={{ width: "100%" }}
+              value={variantId}
+              onChange={(e) => setVariantId(e.target.value)}
+              title="Narrow the BOM to one named variant — everything untagged still shows"
+            >
+              <option value="">All components</option>
+              {bom.availableVariants.map((v) => (
+                <option key={v.id} value={v.id}>
+                  {v.name}{bom.availableVariants.length > 1 &&
+                    new Set(bom.availableVariants.map((x) => x.parentPartId)).size > 1
+                      ? ` (${v.parentNumber ?? v.parentName})` : ""}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
 
         <div>
           <label className="label">View</label>
@@ -576,7 +653,7 @@ export function BomClient({
 
       {bom && bom.excludedLinks.length > 0 && (
         <Alert kind="info">
-          {bom.excludedLinks.length} component position(s) are not in use on this date:{" "}
+          {bom.excludedLinks.length} component position(s) are hidden in this view:{" "}
           {bom.excludedLinks.slice(0, 5).map((x, i) => (
             <span key={x.linkId}>
               {i > 0 && ", "}
@@ -590,8 +667,8 @@ export function BomClient({
             </span>
           ))}
           {bom.excludedLinks.length > 5 && `, and ${bom.excludedLinks.length - 5} more`}.
-          {" "}These parts are not retired — this assembly simply does not use them on that date.
-          Each may still appear elsewhere in the BOM.
+          {" "}These parts are not retired — this assembly simply does not use them here. Each may
+          still appear elsewhere in the BOM.
         </Alert>
       )}
 
@@ -664,6 +741,8 @@ export function BomClient({
                   selected={selected}
                   onSelect={toggleSelect}
                   onSwap={setSwapTarget}
+                  variantNames={variantNames}
+                  variantsByParent={variantsByParent}
                 />
               ))}
             </tbody>
@@ -690,7 +769,12 @@ export function BomClient({
                     />
                   </td>
                   <td style={{ width: 46 }}><PartThumb partId={r.partId} size={34} alt="" /></td>
-                  <td><NumberCell row={r} onOpen={setOpenPart} /></td>
+                  <td>
+                    <NumberCell
+                      row={r} onOpen={setOpenPart}
+                      variantTags={r.linkVariantIds.map((id) => variantNames.get(id)).filter(Boolean) as string[]}
+                    />
+                  </td>
                   <td style={{ fontSize: 12.5 }}>{r.name}</td>
                   <td style={{ fontSize: 12.5, color: "var(--text-muted)" }}>{r.description || "—"}</td>
                   <td style={{ fontSize: 12.5 }}>{r.material || "—"}</td>
@@ -773,6 +857,7 @@ function Head({
 /** One node and its descendants, as table rows so the columns stay aligned. */
 function TreeRows({
   node, parentId, collapsed, onToggle, onOpen, onChanged, selected, onSelect, onSwap,
+  variantNames, variantsByParent,
 }: {
   node: Node;
   /** This node's own parent — null at the root, where there is no edge to swap. */
@@ -784,9 +869,15 @@ function TreeRows({
   selected: Set<string>;
   onSelect: (partId: string) => void;
   onSwap: (target: { parentId: string; bomLinkId: string; number: string | null; name: string }) => void;
+  /** id → name, for turning a node's linkVariantIds into a readable badge. */
+  variantNames: Map<string, string>;
+  /** parentPartId → its own variants, for the tag editor under it. */
+  variantsByParent: Map<string, { id: string; name: string }[]>;
 }) {
   const isCollapsed = collapsed.has(node.key);
   const hasKids = node.children.length > 0;
+  const variantTags = node.linkVariantIds.map((id) => variantNames.get(id)).filter(Boolean) as string[];
+  const parentVariants = parentId ? variantsByParent.get(parentId) ?? [] : [];
 
   return (
     <>
@@ -816,7 +907,7 @@ function TreeRows({
             ) : (
               <span style={{ width: 16, display: "inline-block" }} />
             )}
-            <NumberCell row={node} onOpen={onOpen} />
+            <NumberCell row={node} onOpen={onOpen} variantTags={variantTags} />
           </div>
         </td>
         <td style={{ fontSize: 12.5 }}>{node.name}</td>
@@ -838,6 +929,14 @@ function TreeRows({
                 to={node.linkEffectiveTo}
                 onSaved={onChanged}
               />
+              {!!parentVariants.length && (
+                <LinkVariantEditor
+                  linkId={node.linkId}
+                  options={parentVariants}
+                  selected={node.linkVariantIds}
+                  onSaved={onChanged}
+                />
+              )}
               <button
                 className="btn btn-sm"
                 title="Swap this component for a form-fit-function equivalent, without a new revision"
@@ -857,6 +956,7 @@ function TreeRows({
         <TreeRows
           key={c.key} node={c} parentId={node.partId} collapsed={collapsed} onToggle={onToggle}
           onOpen={onOpen} onChanged={onChanged} selected={selected} onSelect={onSelect} onSwap={onSwap}
+          variantNames={variantNames} variantsByParent={variantsByParent}
         />
       ))}
     </>
@@ -865,7 +965,7 @@ function TreeRows({
 
 /** The part number, as the control that opens the panel. */
 function NumberCell({
-  row, onOpen,
+  row, onOpen, variantTags,
 }: {
   row: {
     partId: string; number: string | null; name: string; kind: string;
@@ -875,6 +975,8 @@ function NumberCell({
     openTaskCount?: number; taskCount?: number; plmOnly?: boolean;
   };
   onOpen: (partId: string) => void;
+  /** Named variants this position is narrowed to. Empty/absent means every variant. */
+  variantTags?: string[];
 }) {
   return (
     <span style={{ display: "inline-flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
@@ -902,6 +1004,15 @@ function NumberCell({
       {row.alsoUsedElsewhere && (
         <span className="badge" title="This part appears in more than one place in this BOM">
           shared
+        </span>
+      )}
+      {!!variantTags?.length && (
+        <span
+          className="badge"
+          style={{ background: "var(--accent-soft, var(--surface-2))", color: "var(--accent)" }}
+          title={`Only in: ${variantTags.join(", ")} — everything else here applies to every variant`}
+        >
+          {variantTags.join(", ")}
         </span>
       )}
       {/*
@@ -1048,6 +1159,88 @@ function LinkWindow({
         )}
       </div>
       {err && <div style={{ fontSize: 11, color: "var(--danger)" }}>{err}</div>}
+    </div>
+  );
+}
+
+/**
+ * Which of the parent assembly's variants this one position belongs to.
+ *
+ * Only rendered when the parent has any variants defined — most assemblies
+ * never will, and the control would be noise with nothing to select.
+ */
+function LinkVariantEditor({
+  linkId, options, selected, onSaved,
+}: {
+  linkId: string; options: { id: string; name: string }[]; selected: string[]; onSaved: () => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [picked, setPicked] = useState<Set<string>>(new Set(selected));
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => setPicked(new Set(selected)), [selected]);
+
+  async function save() {
+    setBusy(true); setErr(null);
+    try {
+      const res = await fetch(`/api/bom-links/${linkId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ variantIds: [...picked] }),
+      });
+      const j = await res.json();
+      if (!res.ok) throw new Error(j.error || "Could not save");
+      setEditing(false);
+      onSaved();
+    } catch (e: any) {
+      setErr(String(e?.message ?? e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (!editing) {
+    const names = options.filter((o) => selected.includes(o.id)).map((o) => o.name);
+    return (
+      <button
+        className="btn btn-sm"
+        onClick={() => setEditing(true)}
+        title="Which of this assembly's variants use this component — none picked means every variant"
+      >
+        {names.length ? names.join(", ") : "All variants"}
+      </button>
+    );
+  }
+
+  return (
+    <div
+      style={{
+        display: "flex", alignItems: "center", gap: 5, flexWrap: "wrap",
+        border: "1px solid var(--border)", borderRadius: 6, padding: "3px 6px",
+      }}
+    >
+      {options.map((o) => (
+        <label key={o.id} style={{ display: "flex", alignItems: "center", gap: 3, fontSize: 11 }}>
+          <input
+            type="checkbox"
+            checked={picked.has(o.id)}
+            onChange={(e) => {
+              const next = new Set(picked);
+              if (e.target.checked) next.add(o.id); else next.delete(o.id);
+              setPicked(next);
+            }}
+          />
+          {o.name}
+        </label>
+      ))}
+      {err && <span style={{ color: "var(--danger)", fontSize: 11 }}>{err}</span>}
+      <button className="btn btn-sm btn-primary" onClick={save} disabled={busy}>
+        {busy ? <Spinner size={11} /> : "Save"}
+      </button>
+      <button className="btn btn-sm" onClick={() => { setEditing(false); setPicked(new Set(selected)); }}>
+        Cancel
+      </button>
     </div>
   );
 }

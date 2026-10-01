@@ -4,6 +4,9 @@ import { useCallback, useEffect, useState } from "react";
 import { Alert, Spinner } from "@/components/ui";
 
 type NumberingType = "PART" | "ASSEMBLY" | "DRAWING" | "RELEASE";
+// A plain local copy, not imported from lib/numbering — that module pulls in
+// the Mongoose models, which a "use client" file must never bundle.
+const NUMBERING_TYPES: NumberingType[] = ["PART", "ASSEMBLY", "DRAWING", "RELEASE"];
 
 const LABELS: Record<NumberingType, string> = {
   PART: "Part", ASSEMBLY: "Assembly", DRAWING: "Drawing", RELEASE: "Release",
@@ -34,9 +37,20 @@ type LogEntry = {
   issuedByEmail: string; documentId: string; elementId: string; partId: string; createdAt: string;
 };
 
+type CategoryScheme = {
+  id: string; type: NumberingType; onshapeCategoryId: string; onshapeCategoryName: string;
+  prefix: string; suffix: string; padding: number; counter: number; next: string;
+};
+
+type SeenCategory = {
+  type: NumberingType; onshapeCategoryId: string; onshapeCategoryName: string; lastSeenAt: string;
+};
+
 export function NumberingClient({ isAdmin }: { isAdmin: boolean }) {
   const [sequences, setSequences] = useState<Sequence[]>([]);
   const [log, setLog] = useState<LogEntry[]>([]);
+  const [categorySchemes, setCategorySchemes] = useState<CategoryScheme[]>([]);
+  const [seenCategories, setSeenCategories] = useState<SeenCategory[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -44,11 +58,20 @@ export function NumberingClient({ isAdmin }: { isAdmin: boolean }) {
 
   const load = useCallback(async () => {
     try {
-      const res = await fetch("/api/numbering");
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Failed to load");
+      const [main, cats] = await Promise.all([
+        fetch("/api/numbering"),
+        fetch("/api/numbering/categories"),
+      ]);
+      const data = await main.json();
+      if (!main.ok) throw new Error(data.error || "Failed to load");
       setSequences(data.sequences ?? []);
       setLog(data.log ?? []);
+
+      const catData = await cats.json();
+      if (cats.ok) {
+        setCategorySchemes(catData.schemes ?? []);
+        setSeenCategories(catData.seen ?? []);
+      }
     } catch (err: any) {
       setError(String(err.message ?? err));
     } finally {
@@ -118,6 +141,13 @@ export function NumberingClient({ isAdmin }: { isAdmin: boolean }) {
           />
         ))}
       </div>
+
+      <CategoryOverrides
+        isAdmin={isAdmin}
+        schemes={categorySchemes}
+        seen={seenCategories}
+        onChanged={load}
+      />
 
       <div className="card" style={{ padding: 18 }}>
         <h2 style={{ fontSize: 14, margin: "0 0 4px", fontWeight: 650 }}>Recently issued</h2>
@@ -286,6 +316,276 @@ function TypeCard({
       <button className="btn btn-primary" onClick={generate} disabled={generating}>
         {generating && <Spinner />} Generate
       </button>
+    </div>
+  );
+}
+
+/**
+ * Numbering schemes scoped to one Onshape category, on top of the plain
+ * per-type schemes above.
+ *
+ * The category id is typed in, not picked from a live Onshape list — Onshape
+ * does not publish whether categories nest or what an unfiltered read of them
+ * returns, so there is nothing here yet to browse with confidence. What helps
+ * instead: every category Onshape has actually sent on a real numbering
+ * request is remembered, whether or not a scheme existed for it at the time —
+ * "Recently seen" below turns into real candidates to assign a scheme to,
+ * without hunting through Onshape's own admin screens for an id.
+ */
+function CategoryOverrides({
+  isAdmin, schemes, seen, onChanged,
+}: {
+  isAdmin: boolean; schemes: CategoryScheme[]; seen: SeenCategory[]; onChanged: () => void;
+}) {
+  const [adding, setAdding] = useState(false);
+  const [type, setType] = useState<NumberingType>("PART");
+  const [categoryId, setCategoryId] = useState("");
+  const [categoryName, setCategoryName] = useState("");
+  const [prefix, setPrefix] = useState("");
+  const [suffix, setSuffix] = useState("");
+  const [padding, setPadding] = useState(5);
+  const [saving, setSaving] = useState(false);
+  const [formError, setFormError] = useState<string | null>(null);
+
+  function useSeen(s: SeenCategory) {
+    setAdding(true);
+    setType(s.type);
+    setCategoryId(s.onshapeCategoryId);
+    setCategoryName(s.onshapeCategoryName);
+  }
+
+  async function addScheme() {
+    if (!categoryId.trim()) {
+      setFormError("A category id is required.");
+      return;
+    }
+    setSaving(true); setFormError(null);
+    try {
+      const res = await fetch("/api/numbering/categories", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          type, onshapeCategoryId: categoryId.trim(), onshapeCategoryName: categoryName.trim(),
+          prefix, suffix, padding: Number(padding),
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Could not add this scheme");
+      setAdding(false);
+      setCategoryId(""); setCategoryName(""); setPrefix(""); setSuffix(""); setPadding(5);
+      onChanged();
+    } catch (err: any) {
+      setFormError(String(err.message ?? err));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="card" style={{ padding: 18, display: "grid", gap: 12 }}>
+      <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between" }}>
+        <div>
+          <h2 style={{ fontSize: 14, margin: "0 0 4px", fontWeight: 650 }}>Category overrides</h2>
+          <p style={{ fontSize: 11.5, color: "var(--text-faint)", margin: 0, lineHeight: 1.55, maxWidth: 640 }}>
+            A part, assembly or drawing whose Onshape category matches one below is numbered from
+            that scheme instead of the plain one above. A category with no scheme of its own falls
+            back to the type&rsquo;s default — nothing here is inherited between categories.
+          </p>
+        </div>
+        {isAdmin && !adding && (
+          <button className="btn btn-sm" onClick={() => setAdding(true)}>Add</button>
+        )}
+      </div>
+
+      {adding && (
+        <div style={{ border: "1px solid var(--border)", borderRadius: 8, padding: 12, display: "grid", gap: 8 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "110px 1fr 1fr", gap: 8 }}>
+            <div>
+              <label className="label">Type</label>
+              <select className="input" value={type} onChange={(e) => setType(e.target.value as NumberingType)}>
+                {NUMBERING_TYPES.map((t) => <option key={t} value={t}>{LABELS[t]}</option>)}
+              </select>
+            </div>
+            <div>
+              <label className="label">Onshape category id</label>
+              <input
+                className="input mono" value={categoryId}
+                onChange={(e) => setCategoryId(e.target.value)}
+                placeholder="from Onshape's category admin screen"
+              />
+            </div>
+            <div>
+              <label className="label">Category name (display only)</label>
+              <input className="input" value={categoryName} onChange={(e) => setCategoryName(e.target.value)} />
+            </div>
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 70px", gap: 8 }}>
+            <div>
+              <label className="label">Prefix</label>
+              <input className="input mono" value={prefix} onChange={(e) => setPrefix(e.target.value)} />
+            </div>
+            <div>
+              <label className="label">Suffix</label>
+              <input className="input mono" value={suffix} onChange={(e) => setSuffix(e.target.value)} />
+            </div>
+            <div>
+              <label className="label">Digits</label>
+              <input
+                className="input" type="number" min={0} max={10} value={padding}
+                onChange={(e) => setPadding(Number(e.target.value))}
+              />
+            </div>
+          </div>
+          {formError && <Alert kind="error" onDismiss={() => setFormError(null)}>{formError}</Alert>}
+          <div style={{ display: "flex", gap: 8 }}>
+            <button className="btn btn-primary btn-sm" onClick={addScheme} disabled={saving}>
+              {saving && <Spinner />} Add scheme
+            </button>
+            <button className="btn btn-sm" onClick={() => { setAdding(false); setFormError(null); }}>Cancel</button>
+          </div>
+        </div>
+      )}
+
+      {schemes.length > 0 && (
+        <div style={{ display: "grid", gap: 1 }}>
+          {schemes.map((sc) => (
+            <CategorySchemeRow key={sc.id} scheme={sc} isAdmin={isAdmin} onChanged={onChanged} />
+          ))}
+        </div>
+      )}
+
+      {schemes.length === 0 && !adding && (
+        <p style={{ color: "var(--text-muted)", fontSize: 12.5, margin: 0 }}>
+          No category-specific schemes yet — every part, assembly and drawing uses the plain scheme
+          for its type above.
+        </p>
+      )}
+
+      {seen.length > 0 && (
+        <div>
+          <div style={{ fontSize: 11.5, color: "var(--text-faint)", margin: "6px 0 6px", fontWeight: 600 }}>
+            Recently seen, not yet configured
+          </div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+            {seen.slice(0, 20).map((s) => (
+              <button
+                key={`${s.type}:${s.onshapeCategoryId}`}
+                type="button"
+                className="badge"
+                disabled={!isAdmin}
+                onClick={() => useSeen(s)}
+                style={{
+                  background: "var(--surface-2)", color: "var(--text-muted)", borderColor: "var(--border)",
+                  cursor: isAdmin ? "pointer" : "default", fontSize: 11,
+                }}
+                title={`Onshape id: ${s.onshapeCategoryId}`}
+              >
+                {LABELS[s.type]} · {s.onshapeCategoryName || s.onshapeCategoryId}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CategorySchemeRow({
+  scheme, isAdmin, onChanged,
+}: {
+  scheme: CategoryScheme; isAdmin: boolean; onChanged: () => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [prefix, setPrefix] = useState(scheme.prefix);
+  const [suffix, setSuffix] = useState(scheme.suffix);
+  const [padding, setPadding] = useState(scheme.padding);
+  const [saving, setSaving] = useState(false);
+  const [rowError, setRowError] = useState<string | null>(null);
+
+  async function save() {
+    setSaving(true); setRowError(null);
+    try {
+      const res = await fetch("/api/numbering/categories", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: scheme.id, prefix, suffix, padding: Number(padding) }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Could not save");
+      setEditing(false);
+      onChanged();
+    } catch (err: any) {
+      setRowError(String(err.message ?? err));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  function remove() {
+    if (!confirm(
+      `Remove the ${LABELS[scheme.type]} scheme for "${scheme.onshapeCategoryName || scheme.onshapeCategoryId}"? ` +
+      `Numbers already issued under it are unaffected — this category just falls back to the ` +
+      `${LABELS[scheme.type]} default from now on.`
+    )) return;
+    fetch("/api/numbering/categories", {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: scheme.id }),
+    }).then(onChanged);
+  }
+
+  return (
+    <div style={{ padding: "10px 0", borderBottom: "1px solid var(--border)", display: "grid", gap: 8 }}>
+      <div style={{ display: "flex", gap: 10, alignItems: "baseline", flexWrap: "wrap" }}>
+        <span
+          className="badge"
+          style={{ background: "var(--surface-2)", color: "var(--text-muted)", borderColor: "var(--border)", minWidth: 70, justifyContent: "center" }}
+        >
+          {LABELS[scheme.type]}
+        </span>
+        <span style={{ fontSize: 13, fontWeight: 600 }}>
+          {scheme.onshapeCategoryName || <span className="mono">{scheme.onshapeCategoryId}</span>}
+        </span>
+        {scheme.onshapeCategoryName && (
+          <span className="mono" style={{ fontSize: 10.5, color: "var(--text-faint)" }}>{scheme.onshapeCategoryId}</span>
+        )}
+        <span style={{ flex: 1 }} />
+        <span className="mono" style={{ fontSize: 13, fontWeight: 700 }}>{scheme.next}</span>
+        {isAdmin && (
+          <>
+            <button className="btn btn-sm" onClick={() => setEditing((e) => !e)}>{editing ? "Cancel" : "Edit"}</button>
+            <button className="btn btn-sm btn-danger" onClick={remove}>Remove</button>
+          </>
+        )}
+      </div>
+
+      {editing && (
+        <div style={{ display: "grid", gap: 8 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 70px", gap: 8 }}>
+            <div>
+              <label className="label">Prefix</label>
+              <input className="input mono" value={prefix} onChange={(e) => setPrefix(e.target.value)} />
+            </div>
+            <div>
+              <label className="label">Suffix</label>
+              <input className="input mono" value={suffix} onChange={(e) => setSuffix(e.target.value)} />
+            </div>
+            <div>
+              <label className="label">Digits</label>
+              <input
+                className="input" type="number" min={0} max={10} value={padding}
+                onChange={(e) => setPadding(Number(e.target.value))}
+              />
+            </div>
+          </div>
+          {rowError && <Alert kind="error" onDismiss={() => setRowError(null)}>{rowError}</Alert>}
+          <div>
+            <button className="btn btn-primary btn-sm" onClick={save} disabled={saving}>
+              {saving && <Spinner />} Save
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

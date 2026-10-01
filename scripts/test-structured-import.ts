@@ -353,6 +353,93 @@ async function main() {
       after.iteration === (before as any)?.iteration, `${(before as any)?.iteration} -> ${after.iteration}`);
   }
 
+  console.log(
+    "\nChanging an instance count in Onshape and re-importing updates the BOM"
+  );
+  {
+    /*
+     * The scenario this section exists for: someone bumps a part's instance
+     * count in an Onshape assembly — 2 brackets becomes 5 — and re-imports.
+     * `linkToParent` only overwrites an existing edge's quantity when
+     * `updateQuantities` is asked for (see upsertBomLink's comment: a
+     * deliberate correction in PLM must survive an ordinary re-import), so
+     * this both proves the opt-in path works and that leaving it off really
+     * does leave the old count alone.
+     */
+    await MockOnshapePart.create({
+      companyId: COMPANY, documentId: DOC, documentName: "Gearbox Assembly",
+      elementId: "e1a2b3c4d5e6f70819206666", elementName: "Quantity Tab",
+      elementType: "PARTSTUDIO", partId: "QTYP", configuration: "default",
+      workspaceId: "w1a2b3c4d5e6f70819202199", quantity: 2,
+      properties: { "57f3fb8efa3416c06701d60d": "Bracket, Qty Test" },
+    });
+
+    const t6 = await client.getAssemblyBom(coords, { multiLevel: true });
+    const row6 = t6.lines.find((l) => l.source?.partId === "QTYP");
+    check("the new part starts at the seeded instance count",
+      row6?.quantity === 2, String(row6?.quantity));
+
+    const keys6 = importableLines(t6).map((l) => l.key);
+    await importBomLines(session, coords, keys6, { multiLevel: true });
+
+    const part6: any = await Part.findOne({ enterpriseId: ent._id, partId: "QTYP" }).lean();
+    const linkBefore: any = await BomLink.findOne({
+      enterpriseId: ent._id, childId: part6._id,
+    }).lean();
+    check("the edge was recorded at the seeded quantity",
+      linkBefore?.quantity === 2, String(linkBefore?.quantity));
+
+    // The instance count changes in Onshape — the same kind of edit that
+    // prompted this: someone adds three more of the same bracket.
+    await MockOnshapePart.updateOne(
+      { companyId: COMPANY, partId: "QTYP" }, { $set: { quantity: 5 } }
+    );
+
+    const t7 = await client.getAssemblyBom(coords, { multiLevel: true });
+    const keys7 = importableLines(t7).map((l) => l.key);
+
+    await importBomLines(session, coords, keys7, { multiLevel: true });
+    const linkNoUpdate: any = await BomLink.findOne({
+      enterpriseId: ent._id, childId: part6._id,
+    }).lean();
+    check("without asking to update quantities, the old count is left alone",
+      linkNoUpdate?.quantity === 2, String(linkNoUpdate?.quantity));
+
+    await importBomLines(
+      session, coords, keys7, { multiLevel: true, updateQuantities: true }
+    );
+    const linkUpdated: any = await BomLink.findOne({
+      enterpriseId: ent._id, childId: part6._id,
+    }).lean();
+    check("asking to update quantities picks up the new instance count",
+      linkUpdated?.quantity === 5, String(linkUpdated?.quantity));
+
+    /*
+     * The panel's own default: an already-tracked row is unticked, yet its
+     * quantity still has to refresh. Otherwise "update quantities" would only
+     * ever work for rows somebody happened to select, which is every new
+     * part and none of the ones whose count is the reason to re-import.
+     */
+    await MockOnshapePart.updateOne(
+      { companyId: COMPANY, partId: "QTYP" }, { $set: { quantity: 8 } }
+    );
+    const t8 = await client.getAssemblyBom(coords, { multiLevel: true });
+    const keys8 = importableLines(t8)
+      .filter((l) => l.source?.partId !== "QTYP")
+      .map((l) => l.key);
+    check("this time QTYP itself is not among the selected keys",
+      !keys8.includes(row6!.key));
+
+    await importBomLines(
+      session, coords, keys8, { multiLevel: true, updateQuantities: true }
+    );
+    const linkUnselected: any = await BomLink.findOne({
+      enterpriseId: ent._id, childId: part6._id,
+    }).lean();
+    check("an unselected but already-tracked row's quantity still refreshes",
+      linkUnselected?.quantity === 8, String(linkUnselected?.quantity));
+  }
+
   for (const M of [BomLink, Part, PartIteration, Product, AttributeDefinition, User,
     NumberingSequence, NumberIssuedLog, ActivityLog]) {
     await (M as any).deleteMany({ enterpriseId: ent._id });

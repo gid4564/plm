@@ -19,6 +19,7 @@ import { captureReleasedGeometry, geometryForPart } from "@/lib/geometry";
 import { isFavorited } from "@/lib/favorites";
 import { registerStarRelease, setInitialRevision, starHistory, starLabel } from "@/lib/star-release";
 import { copyPart } from "@/lib/part-copy";
+import { listVariants } from "@/lib/variants";
 
 type Ctx = { params: Promise<{ id: string }> };
 
@@ -121,8 +122,17 @@ export const GET = handler(async (_req: Request, ctx: Ctx) => {
       quantity: l.quantity ?? 1,
       findNumber: l.findNumber ?? "",
       lastImportedAt: l.lastImportedAt,
+      variantIds: (l.variantIds ?? []).map((v: unknown) => String(v)),
     };
   };
+
+  /*
+   * This part's own variants, when it is an assembly — the set a "Contains"
+   * row's tag editor picks from. Empty for a plain part: nothing here is
+   * ever tagged, since variants are defined against the BOM they branch, not
+   * against a leaf that has none.
+   */
+  const variants = part.kind === "assembly" ? await listVariants(s.enterpriseId, id) : [];
 
   return ok({
     part: {
@@ -191,6 +201,7 @@ export const GET = handler(async (_req: Request, ctx: Ctx) => {
       children: children.map((l: any) => describe(l, "childId")),
       usedIn: parents.map((l: any) => describe(l, "parentId")),
     },
+    variants,
     starReleases: stars,
     iterations: iterations.map((i: any) => ({
       iteration: i.iteration,

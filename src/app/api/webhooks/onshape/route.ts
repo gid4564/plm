@@ -1,7 +1,7 @@
 import { connectDb } from "@/lib/db";
 import { ActivityLog, Enterprise, Part, Release, Task } from "@/lib/models";
 import { clientForEnterprise } from "@/lib/onshape/factory";
-import { consumeSelfWriteMarker, syncPartFromOnshape } from "@/lib/sync";
+import { consumeSelfWriteMarker, resolveHeldConfiguration, syncPartFromOnshape } from "@/lib/sync";
 import { refreshReleasedDrawings, scheduleDrawingRefresh, takeOverReleasePackage } from "@/lib/release";
 import { upsertTask } from "@/lib/tasks";
 import { objectTypeCode, objectTypeName } from "@/lib/onshape/object-types";
@@ -546,7 +546,11 @@ export const POST = handler(async (req: Request) => {
     documentId: String(payload.documentId ?? ""),
     elementId: String(payload.elementId ?? ""),
     partId,
-    configuration: String(payload.configuration ?? "default"),
+    configuration: await resolveHeldConfiguration(
+      enterpriseId,
+      { documentId: String(payload.documentId ?? ""), elementId: String(payload.elementId ?? ""), partId },
+      payload.configuration ? String(payload.configuration) : null
+    ),
     workspaceId,
     versionId: payload.versionId ? String(payload.versionId) : null,
   };
@@ -648,7 +652,11 @@ async function syncReleasedPart(
   try {
     return await syncPartFromOnshape(
       enterpriseId,
-      { documentId, elementId, partId, configuration: "default", workspaceId, versionId },
+      {
+        documentId, elementId, partId,
+        configuration: await resolveHeldConfiguration(enterpriseId, { documentId, elementId, partId }),
+        workspaceId, versionId,
+      },
       {
         trigger: event,
         client,
