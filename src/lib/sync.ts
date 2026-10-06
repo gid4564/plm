@@ -718,6 +718,23 @@ async function syncPartFromOnshapeOnce(
       numberAdopted = Boolean(existingNumber);
       part.number = existingNumber || await allocatePartNumber(enterpriseId, part.kind ?? kind);
       changes.number = { from: null, to: part.number };
+    } else {
+      /*
+       * A number present in Onshape wins over the one PLM has stored.
+       *
+       * The number originated in PLM — Onshape's number generator extension
+       * asked for it — so whatever sits in Onshape's Part number property is
+       * the number PLM issued for this part, even when it is a newer one than
+       * the record holds (the part was renumbered in Onshape by asking PLM
+       * again). Pushing the stored number back over it would silently undo
+       * that. Only an empty Onshape value falls through to the push below.
+       */
+      const onshapeNumber = meta.partNumber.trim();
+      if (onshapeNumber && onshapeNumber !== part.number) {
+        changes.number = { from: part.number, to: onshapeNumber };
+        part.number = onshapeNumber;
+        numberAdopted = true;
+      }
     }
 
     await part.save();

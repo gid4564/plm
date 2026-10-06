@@ -100,20 +100,20 @@ async function main() {
   check("this one did spend PLM's counter",
     seqAfterMint?.counter === 1, String(seqAfterMint?.counter));
 
-  console.log("\nOnce adopted, PLM is authoritative — a later hand-edit in Onshape is overwritten again");
+  console.log("\nA number present in Onshape always wins — a renumber pulled in Onshape is kept, not undone");
   await MockOnshapePart.updateOne(
     { companyId: COMPANY, partId: "LEG1" },
-    { $set: { [`properties.${NUMBER_ID}`]: "SOMEONE-CHANGED-THIS" } }
+    { $set: { [`properties.${NUMBER_ID}`]: "RENUMBERED-001" } }
   );
   await syncPartFromOnshape(entId, legacyCoords, { client, create: false });
 
   const legacyAfterEdit: any = await Part.findById(first.partId).lean();
-  check("PLM's own number (the adopted one) did not change",
-    legacyAfterEdit?.number === "LEGACY-042", legacyAfterEdit?.number);
+  check("PLM adopted the number now in Onshape",
+    legacyAfterEdit?.number === "RENUMBERED-001", legacyAfterEdit?.number);
 
   const onshapeAfterSync: any = await MockOnshapePart.findOne({ companyId: COMPANY, partId: "LEG1" }).lean();
-  check("and the hand-edit in Onshape was pushed back over — same as any other field PLM owns",
-    onshapeAfterSync?.properties?.[NUMBER_ID] === "LEGACY-042",
+  check("and Onshape's value was left alone",
+    onshapeAfterSync?.properties?.[NUMBER_ID] === "RENUMBERED-001",
     String(onshapeAfterSync?.properties?.[NUMBER_ID]));
 
   console.log("\nThe same rule applies to the backfill path — a record synced before numbering existed");
