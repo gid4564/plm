@@ -230,11 +230,15 @@ export function PartDetail({ id, isAdmin }: { id: string; isAdmin: boolean }) {
     }
   }
 
-  async function remove() {
-    if (!confirm(`Remove ${p.number} from PLM? Its PLM values will be cleared in Onshape.`)) return;
+  async function remove(force = false) {
+    const msg = force
+      ? `Permanently delete ${p.number} (${p.lifecycleState}${p.revision ? `, revision ${p.revision}` : ""}) from PLM? ` +
+        `This bypasses obsoleting, removes its history and its structure links in every assembly, and cannot be undone.`
+      : `Remove ${p.number} from PLM? Its PLM values will be cleared in Onshape.`;
+    if (!confirm(msg)) return;
     setBusy("delete");
     try {
-      const r = await fetch(`/api/parts/${id}`, { method: "DELETE" });
+      const r = await fetch(`/api/parts/${id}${force ? "?force=1" : ""}`, { method: "DELETE" });
       const j = await r.json();
       if (!r.ok) throw new Error(j.error || "Could not remove this part");
       router.push("/dashboard");
@@ -364,8 +368,16 @@ export function PartDetail({ id, isAdmin }: { id: string; isAdmin: boolean }) {
             </button>
           )}
           {p.lifecycleState !== "Released" && p.lifecycleState !== "Obsolete" && (
-            <button className="btn btn-danger" onClick={remove} disabled={busy === "delete"}>
+            <button className="btn btn-danger" onClick={() => remove()} disabled={busy === "delete"}>
               {busy === "delete" ? <Spinner /> : "Remove"}
+            </button>
+          )}
+          {isAdmin && (p.lifecycleState === "Released" || p.lifecycleState === "Obsolete") && (
+            <button
+              className="btn btn-danger" onClick={() => remove(true)} disabled={busy === "delete"}
+              title="Admin only — delete this part outright, without obsoleting it"
+            >
+              {busy === "delete" ? <Spinner /> : "Delete permanently"}
             </button>
           )}
         </div>

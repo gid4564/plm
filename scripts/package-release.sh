@@ -128,7 +128,7 @@ On the server:
   /tmp/plm/deploy.sh              # shows what would change, changes nothing
   /tmp/plm/deploy.sh --apply
 
-deploy.sh rsyncs into /home/gid/apps/plm (override with PLM_DEST), keeps
+deploy.sh rsyncs into /home/ubuntu/apps/plm (override with PLM_DEST), keeps
 .env.local and .pm2, restarts pm2, and then checks that the build answering on
 port 3005 is the one just deployed. It refuses a relative destination and a
 directory that does not look like a PLM deployment — the rsync it wraps carries
@@ -136,7 +136,7 @@ directory that does not look like a PLM deployment — the rsync it wraps carrie
 
 First deploy only, once it tells you .env.local is missing:
 
-  cd /home/gid/apps/plm
+  cd /home/ubuntu/apps/plm
   cp env.example .env.local && $EDITOR .env.local   # APP_BASE_URL=https://plm.gidpaull.com
   pm2 start ecosystem.config.cjs && pm2 save
 NEXT

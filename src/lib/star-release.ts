@@ -90,21 +90,45 @@ export async function registerStarRelease(
     const newPart: any = await Part.findOne({ _id: opts.swap.newPartId, enterpriseId });
     if (!newPart) throw new Error("The replacement part was not found in this enterprise.");
 
+    /*
+     * The (parent, child) pair is unique, so a part that was swapped out
+     * earlier still has its ended edge on file. Swapping it back in reopens
+     * that edge rather than inserting a second one.
+     */
+    const existing: any = await BomLink.findOne({
+      enterpriseId, parentId: oldLink.parentId, childId: newPart._id,
+    });
+    if (existing && (!existing.effectiveTo || new Date(existing.effectiveTo) > new Date())) {
+      throw new Error(
+        `${newPart.number || newPart.name} is already a component of this assembly.`
+      );
+    }
+
     const now = new Date();
     oldLink.effectiveTo = now;
     await oldLink.save();
 
-    const newLink = await BomLink.create({
-      enterpriseId, parentId: oldLink.parentId, childId: newPart._id,
-      quantity: oldLink.quantity, findNumber: oldLink.findNumber,
-      effectiveFrom: now, effectiveTo: null,
-      /*
-       * Blank, not copied from the old edge — this one was never read from
-       * an Onshape assembly. Leaving the provenance fields empty is what
-       * marks it, honestly, as PLM's own.
-       */
-      sourceDocumentId: "", sourceElementId: "",
-    });
+    let newLink: any;
+    if (existing) {
+      existing.quantity = oldLink.quantity;
+      existing.findNumber = oldLink.findNumber;
+      existing.effectiveFrom = now;
+      existing.effectiveTo = null;
+      await existing.save();
+      newLink = existing;
+    } else {
+      newLink = await BomLink.create({
+        enterpriseId, parentId: oldLink.parentId, childId: newPart._id,
+        quantity: oldLink.quantity, findNumber: oldLink.findNumber,
+        effectiveFrom: now, effectiveTo: null,
+        /*
+         * Blank, not copied from the old edge — this one was never read from
+         * an Onshape assembly. Leaving the provenance fields empty is what
+         * marks it, honestly, as PLM's own.
+         */
+        sourceDocumentId: "", sourceElementId: "",
+      });
+    }
 
     swapResult = {
       fromPartId: String(oldLink.childId), toPartId: String(newPart._id),

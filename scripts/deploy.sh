@@ -15,7 +15,7 @@
 # have emptied it.
 set -euo pipefail
 
-DEST="${PLM_DEST:-/home/gid/apps/plm}"
+DEST="${PLM_DEST:-/home/ubuntu/apps/plm}"
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APPLY=0
 [ "${1:-}" = "--apply" ] && APPLY=1
