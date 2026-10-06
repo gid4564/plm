@@ -12,7 +12,7 @@ type Ctx = { params: Promise<{ id: string }> };
  * what a viewer on the part page wants.
  *
  * Deliberately not wrapped in the JSON `handler` used elsewhere: this returns
- * bytes, and a JSON envelope around a binary is no use to a <model-viewer> or
+ * bytes, and a JSON envelope around a binary is no use to a 3D viewer or
  * to somebody saving the file.
  */
 export async function GET(req: Request, ctx: Ctx) {
