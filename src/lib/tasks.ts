@@ -1,3 +1,4 @@
+import { withApiProcess } from "@/lib/api-log";
 import { connectDb } from "@/lib/db";
 import { ActivityLog, Enterprise, Part, Task, User } from "@/lib/models";
 import { clientForEnterprise, clientForUser } from "@/lib/onshape/factory";
@@ -400,7 +401,7 @@ export async function upsertTask(
  * nothing else — which is a setup fact worth reporting rather than a shortfall
  * to paper over.
  */
-export async function pullTasks(
+async function pullTasksImpl(
   enterpriseId: string,
   opts: { client?: OnshapeClient; documentId?: string; trigger?: string } = {}
 ): Promise<TaskSyncResult> {
@@ -582,7 +583,7 @@ export async function pullTasks(
  * a pending comment shown in the thread with a marker is more honest than an
  * error that discards what they wrote.
  */
-export async function commentOnTask(
+async function commentOnTaskImpl(
   enterpriseId: string,
   taskId: string,
   message: string,
@@ -708,7 +709,7 @@ export async function commentOnTask(
  * this tenant's workflow calls it, and the refusal names what *was* on offer,
  * which is the difference between a dead end and something a person can act on.
  */
-export async function transitionTask(
+async function transitionTaskImpl(
   enterpriseId: string,
   taskId: string,
   opts: { transition?: string; intent?: "complete" | "reject" | "reopen" | "start"; actor: { email: string } }
@@ -848,7 +849,7 @@ export async function transitionTask(
  * editable; PLM offers what it is told and refuses the rest rather than
  * sending a write that will bounce.
  */
-export async function updateTaskFields(
+async function updateTaskFieldsImpl(
   enterpriseId: string,
   taskId: string,
   patch: { name?: string; description?: string; propertyValues?: Record<string, unknown> },
@@ -918,7 +919,7 @@ export async function updateTaskFields(
  * whether there is one. Refusing names what IS available, because a card that
  * springs back with no explanation is the worst version of this interaction.
  */
-export async function moveTaskToColumn(
+async function moveTaskToColumnImpl(
   enterpriseId: string,
   taskId: string,
   column: TaskColumn,
@@ -1066,7 +1067,7 @@ export type RemoveTaskResult = {
  * and "nine deleted, one refused because Onshape says it is not deletable" is
  * the useful outcome.
  */
-export async function removeTasks(
+async function removeTasksImpl(
   enterpriseId: string,
   taskIds: string[],
   opts: { alsoOnshape: boolean; actor: { email: string } }
@@ -1255,7 +1256,7 @@ function willTheyReturn(removed: any[]): string {
 }
 
 /** Bring one task up to date from Onshape, by PLM id. */
-export async function refreshTask(
+async function refreshTaskImpl(
   enterpriseId: string,
   taskId: string
 ): Promise<{ ok: boolean; message: string }> {
@@ -1520,4 +1521,33 @@ export async function taskCountsForParts(
   }
 
   return out;
+}
+
+/* Named for the API-usage log — see lib/api-log.ts. */
+export function pullTasks(...args: Parameters<typeof pullTasksImpl>): ReturnType<typeof pullTasksImpl> {
+  return withApiProcess("Task pull", () => pullTasksImpl(...args));
+}
+
+export function commentOnTask(...args: Parameters<typeof commentOnTaskImpl>): ReturnType<typeof commentOnTaskImpl> {
+  return withApiProcess("Task comment", () => commentOnTaskImpl(...args));
+}
+
+export function transitionTask(...args: Parameters<typeof transitionTaskImpl>): ReturnType<typeof transitionTaskImpl> {
+  return withApiProcess("Task transition", () => transitionTaskImpl(...args));
+}
+
+export function updateTaskFields(...args: Parameters<typeof updateTaskFieldsImpl>): ReturnType<typeof updateTaskFieldsImpl> {
+  return withApiProcess("Task edit", () => updateTaskFieldsImpl(...args));
+}
+
+export function moveTaskToColumn(...args: Parameters<typeof moveTaskToColumnImpl>): ReturnType<typeof moveTaskToColumnImpl> {
+  return withApiProcess("Task move", () => moveTaskToColumnImpl(...args));
+}
+
+export function removeTasks(...args: Parameters<typeof removeTasksImpl>): ReturnType<typeof removeTasksImpl> {
+  return withApiProcess("Task remove", () => removeTasksImpl(...args));
+}
+
+export function refreshTask(...args: Parameters<typeof refreshTaskImpl>): ReturnType<typeof refreshTaskImpl> {
+  return withApiProcess("Task refresh", () => refreshTaskImpl(...args));
 }

@@ -62,6 +62,10 @@ const NAV: NavItem[] = [
             hint: "Pull a BOM in by hand — normally parts arrive from Onshape",
           },
           {
+            href: "/api-usage", label: "API Usage", adminOnly: true,
+            hint: "Live log of Onshape API calls, counted per process",
+          },
+          {
             href: "/simulator", label: "Onshape Simulator", adminOnly: true,
             hint: "A stand-in Onshape, for demonstrating PLM without a tenant",
           },

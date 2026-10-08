@@ -1,3 +1,4 @@
+import { withApiProcess } from "@/lib/api-log";
 import { connectDb } from "@/lib/db";
 import { ActivityLog, Enterprise, Part, PartGeometry } from "@/lib/models";
 import { gridfsDelete, gridfsDownload, gridfsUpload } from "@/lib/gridfs";
@@ -151,7 +152,7 @@ export async function geometryCaptureEnabled(enterpriseId: string): Promise<bool
  * failure reason is stored rather than logged and dropped: "Onshape refused
  * this" and "nobody captured it yet" look identical on a part page otherwise.
  */
-export async function captureReleasedGeometry(
+async function captureReleasedGeometryImpl(
   client: OnshapeClient,
   enterpriseId: string,
   partId: string,
@@ -332,7 +333,7 @@ export async function captureReleasedGeometry(
  * Same never-throws contract as captureReleasedGeometry: a sync must not fail
  * because a mesh export did.
  */
-export async function captureWorkspaceGeometry(
+async function captureWorkspaceGeometryImpl(
   client: OnshapeClient,
   enterpriseId: string,
   partId: string,
@@ -369,4 +370,13 @@ export async function geometryForPart(enterpriseId: string, partId: string) {
     capturedAt: g.capturedAt ?? null,
     failureReason: g.failureReason ?? null,
   }));
+}
+
+/* Named for the API-usage log — see lib/api-log.ts. */
+export function captureReleasedGeometry(...args: Parameters<typeof captureReleasedGeometryImpl>): ReturnType<typeof captureReleasedGeometryImpl> {
+  return withApiProcess("3D capture (release)", () => captureReleasedGeometryImpl(...args));
+}
+
+export function captureWorkspaceGeometry(...args: Parameters<typeof captureWorkspaceGeometryImpl>): ReturnType<typeof captureWorkspaceGeometryImpl> {
+  return withApiProcess("3D capture", () => captureWorkspaceGeometryImpl(...args));
 }

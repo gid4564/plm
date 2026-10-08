@@ -1,3 +1,4 @@
+import { withApiProcess } from "@/lib/api-log";
 import { connectDb } from "@/lib/db";
 import {
   ActivityLog, Drawing, Enterprise, Part, PartIteration, Release, User,
@@ -366,7 +367,7 @@ export type TakeoverResult = {
  * than once for the same package, and creating a second release for it would
  * split the approval record in two.
  */
-export async function takeOverReleasePackage(
+async function takeOverReleasePackageImpl(
   enterpriseId: string,
   rpid: string,
   opts: { trigger?: string; client?: OnshapeClient } = {}
@@ -661,7 +662,7 @@ export type DecisionResult = {
  * would leave Onshape released against a PLM release that says nothing, which
  * is not recoverable by anything except a person noticing.
  */
-export async function decideRelease(
+async function decideReleaseImpl(
   releaseId: string,
   decision: {
     intent: "approve" | "reject";
@@ -1392,7 +1393,7 @@ export async function resumePendingDrawingRefreshes(): Promise<{ resumed: number
   return { resumed, found: pending.length };
 }
 
-export async function refreshReleasedDrawings(
+async function refreshReleasedDrawingsImpl(
   releaseId: string,
   opts: { client?: OnshapeClient; trigger?: string } = {}
 ): Promise<RefreshResult> {
@@ -1507,7 +1508,7 @@ export async function refreshReleasedDrawings(
  * release does not exist yet, so a missing release-required attribute can
  * genuinely block it rather than merely being reported to an approver.
  */
-export async function submitReleaseFromPlm(
+async function submitReleaseFromPlmImpl(
   enterpriseId: string,
   partIds: string[],
   submitter: { userId: string; email: string },
@@ -1715,4 +1716,21 @@ export async function submitReleaseFromPlm(
     validationFailures: [],
     message: `Raised release ${number}.`,
   };
+}
+
+/* Named for the API-usage log — see lib/api-log.ts. */
+export function takeOverReleasePackage(...args: Parameters<typeof takeOverReleasePackageImpl>): ReturnType<typeof takeOverReleasePackageImpl> {
+  return withApiProcess("Release takeover", () => takeOverReleasePackageImpl(...args));
+}
+
+export function decideRelease(...args: Parameters<typeof decideReleaseImpl>): ReturnType<typeof decideReleaseImpl> {
+  return withApiProcess("Release decision", () => decideReleaseImpl(...args));
+}
+
+export function submitReleaseFromPlm(...args: Parameters<typeof submitReleaseFromPlmImpl>): ReturnType<typeof submitReleaseFromPlmImpl> {
+  return withApiProcess("Release submit", () => submitReleaseFromPlmImpl(...args));
+}
+
+export function refreshReleasedDrawings(...args: Parameters<typeof refreshReleasedDrawingsImpl>): ReturnType<typeof refreshReleasedDrawingsImpl> {
+  return withApiProcess("Drawing refresh", () => refreshReleasedDrawingsImpl(...args), { newRun: true });
 }

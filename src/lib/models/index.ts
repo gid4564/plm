@@ -1349,6 +1349,62 @@ const ActivityLogSchema = new Schema(
 ActivityLogSchema.index({ enterpriseId: 1, createdAt: -1 });
 
 /* -------------------------------------------------------------------------- */
+/* ApiCall — one row per HTTP request PLM makes to Onshape.                    */
+/*                                                                            */
+/* Exists to answer "where is the API budget going". Every call is tagged with  */
+/* the process that caused it (a BOM import, a single part sync, a webhook) and */
+/* the run that process belonged to, so calls can be counted per process and    */
+/* per run. See lib/api-log.ts, which writes these, and /api-usage, which reads */
+/* them.                                                                        */
+/*                                                                            */
+/* A retry is a call of its own: Onshape counts the request that was made, not  */
+/* the one that was meant.                                                      */
+/*                                                                            */
+/* Expires on its own — the volume is one document per request. Retention is    */
+/* API_LOG_RETENTION_DAYS (default 35). A TTL index's lifetime is fixed when    */
+/* the index is built, so changing the setting means dropping the index.        */
+/* -------------------------------------------------------------------------- */
+
+const ApiCallSchema = new Schema(
+  {
+    enterpriseId: { type: Schema.Types.ObjectId, ref: "Enterprise", default: null, index: true },
+    at: { type: Date, default: Date.now },
+
+    /** One run = everything a single top-level process did. */
+    runId: { type: String, required: true, index: true },
+    /** The outermost named process: "BOM import", "Webhook", "Bulk re-sync"... */
+    process: { type: String, required: true },
+    /** The innermost named step that made this call: "Part sync", "Part write-back"... */
+    step: { type: String, default: "" },
+    /** What it was about — a part number, an assembly name, a release number. */
+    subject: { type: String, default: "" },
+    /** Where the process started: an API route, or "background". */
+    origin: { type: String, default: "" },
+
+    method: { type: String, required: true },
+    /** The path with ids collapsed to :id, so equal calls group together. */
+    endpoint: { type: String, required: true },
+    /** The real path, for the detail view. */
+    path: { type: String, default: "" },
+    status: { type: Number, default: 0 },
+    ok: { type: Boolean, default: true },
+    ms: { type: Number, default: 0 },
+    bytes: { type: Number, default: 0 },
+    /** 0 for the first attempt; counts gateway and token-refresh retries. */
+    attempt: { type: Number, default: 0 },
+    error: { type: String, default: "" },
+  },
+  { timestamps: false }
+);
+ApiCallSchema.index({ at: -1 });
+ApiCallSchema.index({ enterpriseId: 1, at: -1 });
+ApiCallSchema.index({ process: 1, at: -1 });
+ApiCallSchema.index(
+  { at: 1 },
+  { expireAfterSeconds: Math.max(1, Number(process.env.API_LOG_RETENTION_DAYS) || 35) * 86400 }
+);
+
+/* -------------------------------------------------------------------------- */
 /* Favorite — one user's personal shortlist of parts, assemblies and tasks.    */
 /*                                                                            */
 /* Per user, not per enterprise: what one person wants to keep an eye on is    */
@@ -1719,6 +1775,7 @@ export const CategoryNumberingSequence =
   models.CategoryNumberingSequence || model("CategoryNumberingSequence", CategoryNumberingSequenceSchema);
 export const NumberIssuedLog = models.NumberIssuedLog || model("NumberIssuedLog", NumberIssuedLogSchema);
 export const ActivityLog = models.ActivityLog || model("ActivityLog", ActivityLogSchema);
+export const ApiCall = models.ApiCall || model("ApiCall", ApiCallSchema);
 export const Favorite = models.Favorite || model("Favorite", FavoriteSchema);
 export const SelfWrite = models.SelfWrite || model("SelfWrite", SelfWriteSchema);
 export const PartThumbnail = models.PartThumbnail || model("PartThumbnail", PartThumbnailSchema);

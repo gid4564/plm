@@ -113,7 +113,8 @@ export async function clientForUser(userId: string): Promise<OnshapeClient> {
     fresh.onshapeAccessToken,
     undefined,
     () => refreshFor(userId),
-    enterprise.onshapeCompanyId
+    enterprise.onshapeCompanyId,
+    String(enterprise._id)
   );
 }
 

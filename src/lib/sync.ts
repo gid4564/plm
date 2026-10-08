@@ -1,3 +1,4 @@
+import { setApiSubject, withApiProcess } from "@/lib/api-log";
 import { connectDb } from "@/lib/db";
 import { resolveProductById, resolveUnassignedProduct } from "@/lib/products";
 import { classify } from "@/lib/onshape/element-type";
@@ -308,6 +309,14 @@ export async function syncPartFromOnshape(
   coords: PartCoords,
   opts: Parameters<typeof syncPartFromOnshapeOnce>[2] = {}
 ): Promise<SyncResult> {
+  return withApiProcess("Part sync", () => syncPartWithRetry(enterpriseId, coords, opts));
+}
+
+async function syncPartWithRetry(
+  enterpriseId: string,
+  coords: PartCoords,
+  opts: Parameters<typeof syncPartFromOnshapeOnce>[2]
+): Promise<SyncResult> {
   try {
     return await syncPartFromOnshapeOnce(enterpriseId, coords, opts);
   } catch (err: any) {
@@ -539,6 +548,7 @@ async function syncPartFromOnshapeOnce(
   const defs = await listDefinitions(enterpriseId, "PART");
 
   let part: any = existing;
+  setApiSubject(existing?.number || meta.partNumber || meta.partName || coords.partId);
   const isNew = !part;
   let isNewResolved = isNew;
   const changes: SyncResult["changes"] = {};
@@ -919,7 +929,7 @@ export type PushResult = { ok: boolean; written: Record<string, unknown>; error?
  * PLM field that Onshape should carry is a configuration change, not a code
  * change.
  */
-export async function pushPartToOnshape(
+async function pushPartToOnshapeImpl(
   partId: string,
   opts: { trigger?: string; client?: OnshapeClient } = {}
 ): Promise<PushResult> {
@@ -1026,7 +1036,7 @@ export type DeleteResult = {
  * records decision, and PLM's whole purpose is that released history does not
  * simply disappear.
  */
-export async function deletePart(
+async function deletePartImpl(
   partId: string,
   opts: { trigger?: string; client?: OnshapeClient; force?: boolean } = {}
 ): Promise<DeleteResult> {
@@ -1098,4 +1108,13 @@ export async function deletePart(
   });
 
   return { ok: true, cleared, clearError };
+}
+
+/* Named for the API-usage log — see lib/api-log.ts. */
+export function pushPartToOnshape(...args: Parameters<typeof pushPartToOnshapeImpl>): ReturnType<typeof pushPartToOnshapeImpl> {
+  return withApiProcess("Part write-back", () => pushPartToOnshapeImpl(...args));
+}
+
+export function deletePart(...args: Parameters<typeof deletePartImpl>): ReturnType<typeof deletePartImpl> {
+  return withApiProcess("Part delete", () => deletePartImpl(...args));
 }

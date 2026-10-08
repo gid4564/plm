@@ -6,6 +6,7 @@ import type {
   PartExport, ReleasePackage, ReleasePackageItem, ReleaseWorkflow, WorkflowAction,
   CreateReleasePackageInput, DrawingCoords, FileExport,
 } from "./types";
+import { recordApiCall } from "@/lib/api-log";
 import { parseBom, type BomTable } from "./bom";
 import { describeShape } from "./describe-payload";
 import { classify } from "./element-type";
@@ -205,8 +206,43 @@ export class LiveOnshapeClient implements OnshapeClient {
      * named from the tenant's own definitions. Optional: without it, coded
      * values are shown as codes rather than guessed at.
      */
-    private companyId?: string
+    private companyId?: string,
+    /**
+     * PLM's own enterprise id, only so the API-call log can say whose budget a
+     * call spent. Optional for the same reason as the one above.
+     */
+    private enterpriseId?: string
   ) {}
+
+  /**
+   * Send one request and account for it.
+   *
+   * Every call to Onshape — JSON or binary, first attempt or retry — passes
+   * through here, which is what makes the API-usage page a count of what was
+   * really sent rather than of what was meant to be. A request that never got
+   * an answer is recorded too, with status 0: it was still sent.
+   */
+  private async send(path: string, init: RequestInit, attempt: number): Promise<Response> {
+    const started = performance.now();
+    const method = String(init.method ?? "GET");
+    try {
+      const res = await fetch(`${this.apiUrl}${path}`, init);
+      recordApiCall({
+        enterpriseId: this.enterpriseId ?? null, method, path, status: res.status,
+        ms: performance.now() - started,
+        bytes: Number(res.headers.get("content-length")) || 0,
+        attempt,
+      });
+      return res;
+    } catch (err: any) {
+      recordApiCall({
+        enterpriseId: this.enterpriseId ?? null, method, path, status: 0,
+        ms: performance.now() - started, bytes: 0, attempt,
+        error: String(err?.message ?? err),
+      });
+      throw err;
+    }
+  }
 
   private headersFor(init: RequestInit): HeadersInit {
     return {
@@ -223,11 +259,11 @@ export class LiveOnshapeClient implements OnshapeClient {
     isRetry = false,
     gatewayAttempt = 0
   ): Promise<T> {
-    const res = await fetch(`${this.apiUrl}${path}`, {
+    const res = await this.send(path, {
       ...init,
       headers: this.headersFor(init),
       cache: "no-store",
-    });
+    }, gatewayAttempt + (isRetry ? 1 : 0));
 
     /*
      * A gateway error is not an answer, so it is retried.
@@ -751,10 +787,10 @@ export class LiveOnshapeClient implements OnshapeClient {
      */
     accept = "*/*"
   ): Promise<{ data: Buffer; contentType: string }> {
-    const res = await fetch(`${this.apiUrl}${path}`, {
+    const res = await this.send(path, {
       headers: { Authorization: `Bearer ${this.accessToken}`, Accept: accept },
       cache: "no-store",
-    });
+    }, isRetry ? 1 : 0);
 
     // Same single reactive refresh as req(); binary downloads are how
     // thumbnails and exports leave, and they fail the same way.

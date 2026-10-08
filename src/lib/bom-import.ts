@@ -1,3 +1,4 @@
+import { withApiProcess } from "@/lib/api-log";
 import { connectDb } from "@/lib/db";
 import { inImportOrder, structureFromIndent } from "@/lib/bom-structure";
 import { currentProductFor } from "@/lib/products";
@@ -82,7 +83,7 @@ export type AssemblyInfo = {
 };
 
 /** Name the assembly for provenance and for the page heading. */
-export async function describeAssembly(
+async function describeAssemblyImpl(
   client: OnshapeClient,
   coords: AssemblyCoords
 ): Promise<AssemblyInfo> {
@@ -351,7 +352,7 @@ export function importableLines(table: BomTable): BomLine[] {
  * reach, or one whose element has been deleted, is recorded against its own
  * line and the rest of the assembly still imports.
  */
-export async function importBomLines(
+async function importBomLinesImpl(
   session: { userId: string; email: string; enterpriseId: string },
   coords: AssemblyCoords,
   selectedKeys: string[],
@@ -934,4 +935,13 @@ export async function annotateTracked(
   }
 
   return tracked;
+}
+
+/* Named for the API-usage log — see lib/api-log.ts. */
+export function describeAssembly(...args: Parameters<typeof describeAssemblyImpl>): ReturnType<typeof describeAssemblyImpl> {
+  return withApiProcess("BOM read", () => describeAssemblyImpl(...args));
+}
+
+export function importBomLines(...args: Parameters<typeof importBomLinesImpl>): ReturnType<typeof importBomLinesImpl> {
+  return withApiProcess("BOM import", () => importBomLinesImpl(...args));
 }

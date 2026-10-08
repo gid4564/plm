@@ -1,3 +1,4 @@
+import { withApiProcess } from "@/lib/api-log";
 import { connectDb } from "@/lib/db";
 import { ActivityLog, Drawing, DrawingFile } from "@/lib/models";
 import { listDefinitions } from "@/lib/attributes";
@@ -118,7 +119,7 @@ export type CaptureResult = {
  * that — not as a release with no drawings, which looks the same as a release
  * that never had any.
  */
-export async function captureDrawingPdf(
+async function captureDrawingPdfImpl(
   client: OnshapeClient,
   drawingId: string,
   stage: "as-submitted" | "as-released",
@@ -263,4 +264,9 @@ export async function listDrawingFiles(drawingId: string): Promise<any[]> {
     .select("-data")
     .sort({ version: -1 })
     .lean();
+}
+
+/* Named for the API-usage log — see lib/api-log.ts. */
+export function captureDrawingPdf(...args: Parameters<typeof captureDrawingPdfImpl>): ReturnType<typeof captureDrawingPdfImpl> {
+  return withApiProcess("Drawing PDF", () => captureDrawingPdfImpl(...args));
 }
