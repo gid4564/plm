@@ -141,6 +141,12 @@ forwards to `127.0.0.1:3005`, with the app served from `/home/gid/apps/plm`.
 The app name and port are both distinct from MOS, so the two can run on the same
 box.
 
+**Upload size.** Files attached to parts (a STEP to create a part in Onshape
+from, say) are accepted up to 200 MB each — `PLM_MAX_ATTACHMENT_MB` in
+`.env.local` changes that. The reverse proxy has to allow at least as much:
+nginx refuses anything over 1 MB by default, so set `client_max_body_size 200m;`
+in the site's server block (other proxies have an equivalent).
+
 ### Released sheets that need collecting by hand
 
 Onshape announces new revisions **before** it has finished applying them to the

@@ -10,6 +10,7 @@ import { AttributeInput, type Definition } from "@/components/AttributeInput";
 import { PartTasks, TaskCountBadge, type PartTask } from "@/components/PartTasks";
 import { StarReleaseDialog } from "@/components/StarReleaseDialog";
 import { SetInitialRevisionDialog } from "@/components/SetInitialRevisionDialog";
+import { PartFiles } from "@/components/PartFiles";
 /*
  * Lazily, and never on the server: the viewer registers a custom element and
  * pulls in a ~460KB library, so only a reader who opens a model pays for it.
@@ -75,6 +76,16 @@ export function PartDetail({ id, isAdmin }: { id: string; isAdmin: boolean }) {
     } finally {
       setLoading(false);
     }
+  }, [id]);
+
+  /*
+   * Re-read the part without touching the form. The Files card calls this
+   * every few seconds while an import runs, and `load` would throw away
+   * whatever somebody was in the middle of typing into the attributes.
+   */
+  const refresh = useCallback(async () => {
+    const r = await fetch(`/api/parts/${id}`);
+    if (r.ok) setData(await r.json());
   }, [id]);
 
   useEffect(() => { load(); }, [load]);
@@ -147,6 +158,11 @@ export function PartDetail({ id, isAdmin }: { id: string; isAdmin: boolean }) {
         setNotice(j.push?.ok ? "Written to Onshape." : `Onshape refused the write: ${j.push?.error}`);
       } else if (action === "obsolete") {
         setNotice("Obsoleted.");
+      } else if (action === "assign-number") {
+        setNotice(
+          `Assigned ${j.number}.` +
+          (j.push && !j.push.ok ? ` Onshape was not updated: ${j.push.error}` : "")
+        );
       }
       await load();
     } catch (e: any) {
@@ -285,6 +301,16 @@ export function PartDetail({ id, isAdmin }: { id: string; isAdmin: boolean }) {
           <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
             <FavoriteButton kind="part" targetId={id} active={Boolean(p.isFavorite)} size={20} />
             <h1 className="mono" style={{ margin: 0, fontSize: 19 }}>{p.number ?? "—"}</h1>
+            {!p.number && (
+              <button
+                className="btn btn-sm btn-primary"
+                onClick={() => act("assign-number")}
+                disabled={busy === "assign-number"}
+                title="Issue the next number from this part's numbering scheme"
+              >
+                {busy === "assign-number" ? <Spinner /> : "Assign next number"}
+              </button>
+            )}
             <RevChip
               revision={p.revision} iteration={p.iteration} starCount={p.starCount}
               starReasons={data.starReleases.map(
@@ -294,7 +320,7 @@ export function PartDetail({ id, isAdmin }: { id: string; isAdmin: boolean }) {
             <StatusBadge status={p.lifecycleState} />
             {p.kind === "assembly" && <span className="badge">assembly</span>}
             {p.plmOnly && (
-              <span className="badge" title="Created by copying another part — no Onshape original backs this one">
+              <span className="badge" title="No Onshape original backs this part yet">
                 PLM only
               </span>
             )}
@@ -465,6 +491,17 @@ export function PartDetail({ id, isAdmin }: { id: string; isAdmin: boolean }) {
         </div>
 
         <div style={{ display: "grid", gap: 16 }}>
+          {/* --------------------------------- Files --------------------------- */}
+          <PartFiles
+            partId={id}
+            partNumber={p.number ?? null}
+            plmOnly={Boolean(p.plmOnly)}
+            locked={p.lifecycleState === "Released" || p.lifecycleState === "Obsolete"}
+            attachments={p.attachments ?? []}
+            run={p.onshapeCreate ?? null}
+            onChanged={refresh}
+          />
+
           {/* ------------------------------ Drawings --------------------------- */}
           {/* --------------------------------- Product --------------------------- */}
           <div className="card">

@@ -5,7 +5,7 @@ import {
 } from "@/lib/models";
 import { requireSession } from "@/lib/auth/session";
 import {
-  deletePart, plainAttributes, pushPartToOnshape, readCoords, syncPartFromOnshape,
+  allocatePartNumber, deletePart, plainAttributes, pushPartToOnshape, readCoords, syncPartFromOnshape,
 } from "@/lib/sync";
 import {
   editabilityReason, isEditable, listDefinitions, missingForRelease, missingForReleaseKeys,
@@ -19,6 +19,10 @@ import { captureReleasedGeometry, geometryForPart } from "@/lib/geometry";
 import { isFavorited } from "@/lib/favorites";
 import { registerStarRelease, setInitialRevision, starHistory, starLabel } from "@/lib/star-release";
 import { copyPart } from "@/lib/part-copy";
+import {
+  ATTACHMENT_BUCKET, assignBodies, cancelPlan, confirmPlan, isImportableCad, startCreateInOnshape, type PlanEdit,
+} from "@/lib/onshape-create";
+import { gridfsDelete } from "@/lib/gridfs";
 import { listVariants } from "@/lib/variants";
 
 type Ctx = { params: Promise<{ id: string }> };
@@ -39,7 +43,16 @@ export const GET = handler(async (_req: Request, ctx: Ctx) => {
   if (!part) return fail("Part not found", 404);
 
   const defs = await listDefinitions(s.enterpriseId, "PART");
-  const attributes = plainAttributes(part.attributes);
+  /*
+   * The number lives on the part, not in its attribute bag — it is identity,
+   * issued by PLM and indexed — so the Part number field is filled from there.
+   * Without this the form showed an empty, required Part number on a part
+   * that plainly had one in its title.
+   */
+  const stored = plainAttributes(part.attributes);
+  // Name likewise, until a first sync from Onshape fills the attribute — a
+  // part made in PLM has its name only on the part.
+  const attributes = { ...stored, number: part.number ?? null, name: stored.name ?? part.name ?? null };
   const state = String(part.lifecycleState);
 
   /*
@@ -134,6 +147,15 @@ export const GET = handler(async (_req: Request, ctx: Ctx) => {
    */
   const variants = part.kind === "assembly" ? await listVariants(s.enterpriseId, id) : [];
 
+  // The parts a multi-part file made, so the plan can name and link them.
+  const planIds = (part.onshapeCreate?.plan ?? []).map((x: any) => x.plmPartId).filter(Boolean);
+  const planNumbers = new Map(
+    (planIds.length
+      ? await Part.find({ _id: { $in: planIds }, enterpriseId: s.enterpriseId }).select("number").lean()
+      : []
+    ).map((r: any) => [String(r._id), r.number as string])
+  );
+
   return ok({
     part: {
       id: String(part._id),
@@ -158,6 +180,37 @@ export const GET = handler(async (_req: Request, ctx: Ctx) => {
       elementName: part.elementName,
       attributes,
       onshapeProperties: part.onshapeProperties ?? [],
+      attachments: (part.attachments ?? []).map((a: any) => ({
+        id: String(a._id),
+        filename: a.filename,
+        contentType: a.contentType,
+        size: a.size,
+        uploadedAt: a.uploadedAt,
+        uploadedByEmail: a.uploadedByEmail,
+        isCad: isImportableCad(a.filename),
+        onshapeElementId: a.onshapeElementId ?? null,
+        onshapeError: a.onshapeError ?? null,
+      })),
+      onshapeCreate: part.onshapeCreate
+        ? {
+            state: part.onshapeCreate.state,
+            step: part.onshapeCreate.step,
+            error: part.onshapeCreate.error,
+            warnings: part.onshapeCreate.warnings ?? [],
+            attachmentId: part.onshapeCreate.attachmentId,
+            planFrom: part.onshapeCreate.planFrom ?? null,
+            plan: (part.onshapeCreate.plan ?? []).map((x: any) => ({
+              key: x.key, fileName: x.fileName, name: x.name,
+              instances: x.instances, bodiesPerInstance: x.bodiesPerInstance,
+              include: x.include !== false, primary: Boolean(x.primary),
+              plmPartId: x.plmPartId ?? null, bodyCount: (x.bodies ?? []).length,
+              number: x.plmPartId ? planNumbers.get(String(x.plmPartId)) ?? null : null,
+            })),
+            unassignedBodies: part.onshapeCreate.unassignedBodies ?? [],
+            startedAt: part.onshapeCreate.startedAt,
+            finishedAt: part.onshapeCreate.finishedAt,
+          }
+        : null,
       createdByEmail: part.createdByEmail ?? null,
       pushPending: part.pushPending,
       writeBackBlocked: part.writeBackBlocked ?? null,
@@ -191,8 +244,13 @@ export const GET = handler(async (_req: Request, ctx: Ctx) => {
       authority: d.authority ?? "onshape",
       onshapePropertyName: d.onshapePropertyName ?? "",
       mapped: Boolean(d.onshapePropertyId),
-      editable: isEditable(d, state),
-      lockReason: editabilityReason(d, state),
+      // Never typed: PLM issues it. A part without one gets "Assign next number".
+      editable: d.key === "number" ? false : isEditable(d, state),
+      lockReason: d.key === "number"
+        ? part.number
+          ? "Issued by PLM. PLM is the number master, so it is not edited by hand."
+          : "Not assigned yet — use Assign next number."
+        : editabilityReason(d, state),
     })),
     missingForRelease: missingForRelease(defs, attributes),
     /* Keys as well as labels, so a caller rendering the fields can match them. */
@@ -278,11 +336,28 @@ export const PATCH = handler(async (req: Request, ctx: Ctx) => {
   if (!part) return fail("Part not found", 404);
 
   const defs = await listDefinitions(s.enterpriseId, "PART");
-  const current = plainAttributes(part.attributes);
+  /*
+   * Number and name are the part's own fields; the attribute copies can lag
+   * (a number adopted from Onshape, a part made in PLM). Validating against
+   * stale copies refused every save on such a part with "Part number is
+   * required", so the part's own values are what the check sees — and what is
+   * stored back.
+   */
+  const stored = plainAttributes(part.attributes);
+  const current: Record<string, unknown> = {
+    ...stored, number: part.number ?? null, name: stored.name ?? part.name ?? null,
+  };
   const state = String(part.lifecycleState);
 
   let changed = false;
   const changes: Record<string, { from: unknown; to: unknown }> = {};
+
+  if (b.attributes && "number" in b.attributes) {
+    return ok({
+      ok: false,
+      errors: { number: "The part number is issued by PLM — use Assign next number if it has none." },
+    }, 422);
+  }
 
   if (b.attributes) {
     const result = validateAttributes(defs, b.attributes, current, state);
@@ -302,6 +377,12 @@ export const PATCH = handler(async (req: Request, ctx: Ctx) => {
     if (changed) {
       part.attributes = result.values;
       part.markModified("attributes");
+
+      // Before it is in Onshape, PLM is the only place a part's name lives:
+      // renaming it renames the part, and that is the name Onshape gets.
+      if (part.plmOnly && "name" in b.attributes && result.values.name) {
+        part.name = String(result.values.name);
+      }
 
       /*
        * A PLM-side edit earns an iteration too.
@@ -364,9 +445,11 @@ export const PATCH = handler(async (req: Request, ctx: Ctx) => {
 export const POST = handler(async (req: Request, ctx: Ctx) => {
   const s = await requireSession();
   const { id } = await ctx.params;
-  const { action, revision, reason, swap } = (await req.json().catch(() => ({}))) as {
+  const { action, revision, reason, swap, attachmentId, plan, assignments } = (await req.json().catch(() => ({}))) as {
     action?: string; revision?: string;
     reason?: string; swap?: { bomLinkId?: string; newPartId?: string };
+    attachmentId?: string; plan?: PlanEdit[];
+    assignments?: { key: string; elementId: string; partId: string }[];
   };
 
   await connectDb();
@@ -464,6 +547,64 @@ export const POST = handler(async (req: Request, ctx: Ctx) => {
     try {
       const result = await copyPart(s.enterpriseId, { userId: s.userId, email: s.email }, id);
       return ok({ copy: result });
+    } catch (err: any) {
+      return fail(String(err?.message ?? err), 422);
+    }
+  }
+
+  /*
+   * Give a part with no number the next one from its scheme. Only for a part
+   * without one: renumbering is a different, deliberate act (copy the part),
+   * not something a button on the page should do in passing.
+   */
+  if (action === "assign-number") {
+    if (part.number) return fail(`This part already has number ${part.number}.`, 409);
+    const number = await allocatePartNumber(s.enterpriseId, part.kind === "assembly" ? "assembly" : "part");
+    const claimed = await Part.updateOne({ _id: id, number: { $in: [null, ""] } }, { $set: { number } });
+    if (claimed.modifiedCount === 0) return fail("Someone assigned a number to this part just now.", 409);
+    await ActivityLog.create({
+      enterpriseId: s.enterpriseId, partId: id, direction: "plm", action: "updated", trigger: "manual", ok: true,
+      message: `${s.email} assigned ${number} to ${part.name || "a part"}.`,
+    });
+    // A linked part carries its number in Onshape too.
+    const push = part.plmOnly ? null : await pushPartToOnshape(id, { trigger: "assign-number" });
+    return ok({ number, push });
+  }
+
+  /*
+   * Make an Onshape document from one of this PLM-only part's CAD files and
+   * link the part to it. Returns at once; the import carries on in the
+   * background and the page follows it on the part. See lib/onshape-create.ts.
+   */
+  if (action === "create-in-onshape") {
+    if (!attachmentId) return fail("Say which attached file to import.", 422);
+    try {
+      const { review } = await startCreateInOnshape(
+        s.enterpriseId, id, { userId: s.userId, email: s.email }, attachmentId
+      );
+      return ok({ started: !review, review }, review ? 200 : 202);
+    } catch (err: any) {
+      return fail(String(err?.message ?? err), 422);
+    }
+  }
+
+  /*
+   * The answers to a multi-part file: which parts to create and under what
+   * names (confirm-plan), where unmatched bodies go (assign-bodies), or to
+   * stop at review (cancel-plan).
+   */
+  if (action === "confirm-plan" || action === "assign-bodies" || action === "cancel-plan") {
+    const actor = { userId: s.userId, email: s.email };
+    try {
+      if (action === "confirm-plan") {
+        return ok(await confirmPlan(s.enterpriseId, id, actor, Array.isArray(plan) ? plan : []), 202);
+      }
+      if (action === "assign-bodies") {
+        await assignBodies(s.enterpriseId, id, actor, Array.isArray(assignments) ? assignments : []);
+        return ok({ started: true }, 202);
+      }
+      await cancelPlan(s.enterpriseId, id);
+      return ok({ cancelled: true });
     } catch (err: any) {
       return fail(String(err?.message ?? err), 422);
     }
@@ -588,6 +729,10 @@ export const DELETE = handler(async (req: Request, ctx: Ctx) => {
   // Structure edges on both sides go with it: an edge to a part that no longer
   // exists renders as a blank row and is worse than no edge.
   await BomLink.deleteMany({ $or: [{ parentId: id }, { childId: id }] });
+
+  // Attached files go too — PLM's copies only; anything already sent to an
+  // Onshape document stays there.
+  for (const a of part.attachments ?? []) await gridfsDelete(ATTACHMENT_BUCKET, a.fileId);
 
   return ok({
     deleted: true,

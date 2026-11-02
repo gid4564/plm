@@ -1,3 +1,4 @@
+import { randomBytes } from "crypto";
 import { connectDb } from "@/lib/db";
 import {
   MockOnshapeDrawing, MockOnshapePart, MockPropertyDef, MockReleasePackage, MockOnshapeTask,
@@ -11,11 +12,16 @@ import type { ExportFormat } from "./export-formats";
 import type {
   PartExport, ReleasePackage, ReleasePackageItem, ReleaseWorkflow, WorkflowAction,
   CreateReleasePackageInput, DrawingCoords, FileExport,
+  ImportResult, NewDocument, UploadFile,
 } from "./types";
 import type { MassProperties } from "./mass-properties";
 import { mapStandardProperties, resolveEnumLabel, toDisplayString, type RawProperty } from "./standard-properties";
 import { classify } from "./element-type";
 import { resolveTaskCommentContext } from "./object-types";
+import { isStepFile, scanStep } from "@/lib/step-scan";
+
+/** A random lowercase-hex id of `bytes` bytes, for simulator-made objects. */
+const randomHex = (bytes: number) => randomBytes(bytes).toString("hex");
 
 /** [r, g, b] in 0..1, for a glTF baseColorFactor derived from a part's hue. */
 function hslToRgb(h: number, s: number, l: number): [number, number, number] {
@@ -43,6 +49,80 @@ export class MockOnshapeClient implements OnshapeClient {
   readonly mode = "mock" as const;
 
   constructor(private companyId: string, private actingUser?: { id: string; email: string; name: string }) {}
+
+  /*
+   * Names of documents the simulator has created, until an import puts a part
+   * in them — the mock's documents exist only as the parts inside them, so an
+   * empty one has nowhere else to keep its name.
+   */
+  private static createdDocuments = new Map<string, string>();
+
+  async createDocument(input: { name: string }): Promise<NewDocument> {
+    const documentId = `mockdoc${randomHex(10)}`;
+    MockOnshapeClient.createdDocuments.set(documentId, input.name);
+    return { documentId, workspaceId: `mockws${randomHex(10)}`, name: input.name };
+  }
+
+  /**
+   * An import, simulated from what the file actually says.
+   *
+   * A STEP file is read with the same scanner PLM uses (step-scan.ts) and
+   * becomes what a flattened import makes of it: one body per use of each
+   * part, the first named after the part and the rest "Name (2)", "Name (3)".
+   * That lets multi-part files — and a bolt used four times — be exercised
+   * with real STEP text rather than a test switch.
+   *
+   * A Parasolid text file must start with its real transmit header, so a
+   * malformed one fails the way a real import would, after the document
+   * exists. Anything else comes in as one body named after the file.
+   */
+  async importFile(
+    coords: { documentId: string; workspaceId: string },
+    file: UploadFile
+  ): Promise<ImportResult> {
+    await connectDb();
+    const started = Date.now();
+    const base = file.filename.replace(/\.[^.]+$/, "") || file.filename;
+
+    let names: string[] = [base];
+    if (isStepFile(file.filename)) {
+      const scan = scanStep(file.data);
+      if (!scan.ok) throw new Error(`Mock Onshape: ${file.filename}: ${scan.error}`);
+      names = scan.parts.flatMap((p) =>
+        Array.from({ length: p.instances * p.bodiesPerInstance }, (_, i) => (i === 0 ? p.name : `${p.name} (${i + 1})`))
+      );
+    } else if (/\.x_t$/i.test(file.filename) && !file.data.toString("latin1").startsWith("**ABCDEFGHIJKLMNOPQRSTUVWXYZ")) {
+      throw new Error(`Mock Onshape: ${file.filename} is not a Parasolid transmit file.`);
+    }
+
+    const defs = await this.listPropertyDefinitions(this.companyId);
+    const nameId = defs.find((d) => d.name.toLowerCase() === "name")?.propertyId;
+    const elementId = `mockel${randomHex(10)}`;
+    const documentName = MockOnshapeClient.createdDocuments.get(coords.documentId) ?? base;
+
+    for (const [i, name] of names.entries()) {
+      await MockOnshapePart.create({
+        companyId: this.companyId, documentId: coords.documentId, documentName,
+        workspaceId: coords.workspaceId, elementId, elementName: base,
+        elementType: "PARTSTUDIO", partId: `J${i.toString(36).toUpperCase()}D`,
+        configuration: "default",
+        properties: nameId ? { [nameId]: name } : {},
+      });
+    }
+
+    return { elementIds: [elementId], translationId: `mocktr${randomHex(8)}`, elapsedMs: Date.now() - started };
+  }
+
+  async uploadBlob(): Promise<{ elementId: string }> {
+    return { elementId: `mockblob${randomHex(10)}` };
+  }
+
+  async deleteElement(coords: { documentId: string; workspaceId: string; elementId: string }): Promise<void> {
+    await connectDb();
+    await MockOnshapePart.deleteMany({
+      companyId: this.companyId, documentId: coords.documentId, elementId: coords.elementId,
+    });
+  }
 
   async getAuthenticatedUser(): Promise<OnshapeUser> {
     return {

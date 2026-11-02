@@ -22,6 +22,8 @@ export function SettingsClient(p: Props) {
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  /** The new-document folder as typed; null until edited, so it follows `ent`. */
+  const [folderDraft, setFolderDraft] = useState<string | null>(null);
 
   // Shown once, then gone: the secret is stored only as a hash.
   const [newSecret, setNewSecret] = useState<{ clientId: string; clientSecret: string; warning: string } | null>(null);
@@ -119,6 +121,49 @@ export function SettingsClient(p: Props) {
         <KV k="Name" v={ent?.name} />
         <KV k="Onshape company" v={ent?.onshapeCompanyId} mono />
         <KV k="Onshape domain" v={ent?.onshapeDomain || "—"} mono />
+
+        {/*
+          * Where "Create in Onshape" puts the documents it makes. A setting
+          * rather than a default because the company's folder layout is
+          * theirs; blank works, but lands every new document at the top level.
+          */}
+        <div style={{ marginTop: 12 }}>
+          <label className="label">Folder for documents PLM creates</label>
+          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+            <input
+              className="input mono"
+              style={{ flex: 1, minWidth: 220 }}
+              placeholder="Paste the folder's Onshape link, or its id"
+              value={folderDraft ?? ent?.onshapeNewDocFolderId ?? ""}
+              disabled={!isAdmin}
+              onChange={(e) => setFolderDraft(e.target.value)}
+            />
+            {isAdmin && folderDraft !== null && folderDraft !== (ent?.onshapeNewDocFolderId ?? "") && (
+              <button
+                className="btn btn-sm"
+                disabled={busy === "folder"}
+                onClick={() =>
+                  run("folder", async () => {
+                    const j = await post("/api/enterprise", { onshapeNewDocFolderId: folderDraft }, "PATCH");
+                    setNotice(
+                      j.onshapeNewDocFolderId
+                        ? "New Onshape documents will be created in that folder."
+                        : "New Onshape documents will be created at the top level."
+                    );
+                    setFolderDraft(null);
+                    await load();
+                  })
+                }
+              >
+                {busy === "folder" ? <Spinner /> : "Save"}
+              </button>
+            )}
+          </div>
+          <div style={{ color: "var(--text-faint)", fontSize: 11.5, marginTop: 4 }}>
+            Used by &ldquo;Create in Onshape&rdquo; on a part made in PLM. Documents are owned by
+            the company either way; blank puts them at the top level.
+          </div>
+        </div>
       </section>
 
       {/* --------------------------- Onshape connection ---------------------- */}

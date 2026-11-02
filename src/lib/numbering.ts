@@ -1,5 +1,5 @@
 import { connectDb } from "@/lib/db";
-import { CategoryNumberingSequence, NumberingSequence } from "@/lib/models";
+import { CategoryNumberingSequence, NumberingSequence, Part } from "@/lib/models";
 
 /**
  * The number generator. PLM is the number master.
@@ -118,4 +118,39 @@ export async function nextNumber(
     counter: seq.counter,
     matchedCategoryId: null,
   };
+}
+
+/**
+ * The number PLM already holds for this Onshape object, if it tracks it.
+ *
+ * Onshape's number generator asks for "the next number" whenever someone
+ * presses Generate — including on a part PLM numbered long ago. Issuing a
+ * fresh one then put a second number on the part in Onshape, and the next
+ * sync (where a differing Onshape number wins) carried it back into PLM,
+ * so the part changed number for no reason and a number was burned. Answering
+ * with the number already on record makes Generate idempotent for anything
+ * PLM knows.
+ *
+ * Matched on document, element and part; configuration is ignored unless it
+ * separates two records, since Onshape reports it inconsistently (see
+ * Enterprise.ignoreConfigurations).
+ */
+export async function knownNumberFor(
+  enterpriseId: string,
+  item: { documentId?: unknown; elementId?: unknown; partId?: unknown; configuration?: unknown }
+): Promise<string | null> {
+  const documentId = String(item.documentId ?? "");
+  const elementId = String(item.elementId ?? "");
+  if (!documentId || !elementId) return null;
+
+  await connectDb();
+  const rows: any[] = await Part.find({
+    enterpriseId, documentId, elementId, partId: String(item.partId ?? ""),
+    number: { $nin: [null, ""] },
+  }).select("number configuration").lean();
+  if (rows.length === 0) return null;
+
+  const cfg = String(item.configuration ?? "");
+  const exact = rows.find((r) => r.configuration === cfg) ?? rows.find((r) => r.configuration === "default");
+  return String((exact ?? rows[0]).number);
 }

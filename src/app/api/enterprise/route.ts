@@ -32,6 +32,7 @@ export const GET = handler(async () => {
     onshapeDomain: ent.onshapeDomain ?? "",
     releaseTakeoverEnabled: Boolean(ent.releaseTakeoverEnabled),
     releaseGltfEnabled: Boolean(ent.releaseGltfEnabled),
+    onshapeNewDocFolderId: ent.onshapeNewDocFolderId ?? "",
     releasesIgnored: ent.releasesIgnored ?? 0,
     lastReleaseIgnoredAt: ent.lastReleaseIgnoredAt ?? null,
     ignoreConfigurations: ent.ignoreConfigurations !== false,
@@ -96,6 +97,12 @@ const Body = z.object({
   /** Which connected Onshape account PLM acts as for background writes and transitions. */
   integrationUserId: z.string().min(1).optional(),
   onshapeDomain: z.string().max(200).optional(),
+  /**
+   * Where "Create in Onshape" puts new documents. Accepts the folder id or a
+   * pasted folder URL (`...documents?nodeId=<id>`), since the URL is what
+   * an admin actually has to hand.
+   */
+  onshapeNewDocFolderId: z.string().max(500).optional(),
 });
 
 /**
@@ -135,6 +142,14 @@ export const PATCH = handler(async (req: Request) => {
   if (b.releaseGltfEnabled !== undefined) ent.releaseGltfEnabled = b.releaseGltfEnabled;
   if (b.ignoreConfigurations !== undefined) ent.ignoreConfigurations = b.ignoreConfigurations;
   if (b.onshapeDomain !== undefined) ent.onshapeDomain = b.onshapeDomain.trim();
+  if (b.onshapeNewDocFolderId !== undefined) {
+    const raw = b.onshapeNewDocFolderId.trim();
+    const id = /[?&]nodeId=([0-9a-f]{24})/i.exec(raw)?.[1] ?? raw;
+    if (id && !/^[0-9a-f]{24}$/i.test(id)) {
+      return fail("That is not an Onshape folder id or folder link.", 422);
+    }
+    ent.onshapeNewDocFolderId = id;
+  }
 
   if (b.integrationUserId) {
     const user: any = await User.findOne({
@@ -158,6 +173,7 @@ export const PATCH = handler(async (req: Request) => {
     releaseGltfEnabled: ent.releaseGltfEnabled,
     ignoreConfigurations: ent.ignoreConfigurations,
     onshapeDomain: ent.onshapeDomain,
+    onshapeNewDocFolderId: ent.onshapeNewDocFolderId ?? "",
     integrationUserId: ent.integrationUserId ? String(ent.integrationUserId) : null,
   });
 });

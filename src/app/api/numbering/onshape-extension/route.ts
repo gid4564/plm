@@ -1,6 +1,6 @@
 import { connectDb } from "@/lib/db";
 import { Enterprise, NumberIssuedLog } from "@/lib/models";
-import { nextNumber } from "@/lib/numbering";
+import { knownNumberFor, nextNumber } from "@/lib/numbering";
 import { classify } from "@/lib/onshape/element-type";
 import { authenticateBearer } from "@/lib/oauth-server";
 import { readExtensionRequest } from "@/lib/onshape/extension-request";
@@ -75,6 +75,19 @@ function categoryFrom(item: Record<string, unknown>): { id: string; name: string
     | undefined;
   if (!first) return null;
   return { id: String(first.id ?? "").trim(), name: String(first.name ?? "").trim() };
+}
+
+/**
+ * The identifying fields to send back beside a number — Onshape uses them to
+ * know which object each answer belongs to.
+ */
+function echoOf(item: Record<string, unknown>): Record<string, unknown> {
+  const echo: Record<string, unknown> = {};
+  for (const key of ECHOED) if (item[key] !== undefined) echo[key] = item[key];
+  // Present on some payload shapes; harmless to return, and Onshape's own
+  // sample echoes whatever it was given.
+  if (item.partNumberId !== undefined) echo.partNumberId = item.partNumberId;
+  return echo;
 }
 
 export const POST = handler(async (req: Request) => {
@@ -179,6 +192,15 @@ export const POST = handler(async (req: Request) => {
   const categoryNotes: string[] = [];
 
   for (const { item, type } of classified) {
+    // Something PLM already numbered gets that number back, not a new one —
+    // see knownNumberFor.
+    const known = await knownNumberFor(String(enterprise._id), item);
+    if (known) {
+      categoryNotes.push("already in PLM — existing number returned");
+      results.push({ ...echoOf(item), partNumber: known });
+      continue;
+    }
+
     const category = categoryFrom(item);
     const { number, matchedCategoryId } = await nextNumber(
       String(enterprise._id), type, { onshapeCategoryId: category?.id }
@@ -206,19 +228,11 @@ export const POST = handler(async (req: Request) => {
       onshapeCategoryName: category?.name ?? "",
     });
 
-    // Echo the identifying fields back beside the number — Onshape uses them to
-    // know which object each answer belongs to.
-    const echo: Record<string, unknown> = {};
-    for (const key of ECHOED) if (item[key] !== undefined) echo[key] = item[key];
-    // Present on some payload shapes; harmless to return, and Onshape's own
-    // sample echoes whatever it was given.
-    if (item.partNumberId !== undefined) echo.partNumberId = item.partNumberId;
-
-    results.push({ ...echo, partNumber: number });
+    results.push({ ...echoOf(item), partNumber: number });
   }
 
   console.log(
-    `[PLM] numbering extension out: issued ${results.length} number(s) — ` +
+    `[PLM] numbering extension out: answered ${results.length} number(s) — ` +
     `${classified.map((c, n) =>
       `${results[n].partNumber} (${c.type} via ${c.from}, ${categoryNotes[n]})`
     ).join(", ")}`

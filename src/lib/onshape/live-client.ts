@@ -5,6 +5,7 @@ import type {
 import type {
   PartExport, ReleasePackage, ReleasePackageItem, ReleaseWorkflow, WorkflowAction,
   CreateReleasePackageInput, DrawingCoords, FileExport,
+  ImportResult, NewDocument, UploadFile,
 } from "./types";
 import { recordApiCall } from "@/lib/api-log";
 import { parseBom, type BomTable } from "./bom";
@@ -60,6 +61,15 @@ function readWritePermission(doc: Record<string, any> | null | undefined): boole
  * says so and lets the user try again.
  */
 export const TRANSLATION_TIMEOUT_MS = 90_000;
+
+/**
+ * How long to wait for a CAD file to import.
+ *
+ * Far longer than an export: an import is a whole file healed and split into
+ * bodies, and a supplier's STEP of a casting can take minutes. It runs in the
+ * background (see lib/onshape-create.ts), so nobody is held at a spinner.
+ */
+export const IMPORT_TIMEOUT_MS = 10 * 60_000;
 
 /**
  * The most tasks Onshape will return in one page.
@@ -248,7 +258,9 @@ export class LiveOnshapeClient implements OnshapeClient {
     return {
       Authorization: `Bearer ${this.accessToken}`,
       Accept: "application/json;charset=UTF-8; qs=0.09",
-      "Content-Type": "application/json",
+      // A multipart upload sets its own Content-Type, boundary included. A
+      // hard-coded JSON one would replace it and Onshape could not find the file.
+      ...(init.body instanceof FormData ? {} : { "Content-Type": "application/json" }),
       ...(init.headers || {}),
     };
   }
@@ -1007,6 +1019,38 @@ export class LiveOnshapeClient implements OnshapeClient {
     label: string,
     started: number
   ): Promise<FileExport> {
+    const { job, translationId } = await this.pollTranslation(submitted, label, started);
+
+    const externalId = String(
+      job?.resultExternalDataIds?.[0] ?? job?.resultDocumentId ?? ""
+    );
+    if (!externalId) {
+      throw new Error(
+        `Translation ${translationId} finished but named no result file. ` +
+        `Response keys: ${Object.keys(job ?? {}).join(", ")}`
+      );
+    }
+
+    const { data, contentType } = await this.reqBinary(
+      `/documents/d/${documentId}/externaldata/${encodeURIComponent(externalId)}`
+    );
+
+    return { data, contentType, via: "translation", translationId, elapsedMs: Date.now() - started };
+  }
+
+  /**
+   * Wait for a translation job to finish, either way.
+   *
+   * The polling half of awaitTranslation, apart because an import ends
+   * differently: its result is new tabs in the document, not a file to fetch.
+   * Throws unless the job reached DONE.
+   */
+  private async pollTranslation(
+    submitted: Record<string, any>,
+    label: string,
+    started: number,
+    timeoutMs = TRANSLATION_TIMEOUT_MS
+  ): Promise<{ job: Record<string, any>; translationId: string }> {
     const translationId = String(submitted?.id ?? "");
     if (!translationId) {
       throw new Error(
@@ -1018,7 +1062,7 @@ export class LiveOnshapeClient implements OnshapeClient {
     // Poll. Onshape gives no completion callback, so waiting is the contract.
     // Backs off gently: most single-part translations finish within seconds, and
     // a tight loop on a shared rate limit helps nobody.
-    const deadline = started + TRANSLATION_TIMEOUT_MS;
+    const deadline = started + timeoutMs;
     // The submit response often already says DONE for a small part, in which
     // case this costs no checks at all.
     let state = String(submitted?.requestState ?? "ACTIVE").toUpperCase();
@@ -1029,7 +1073,7 @@ export class LiveOnshapeClient implements OnshapeClient {
       if (Date.now() > deadline) {
         throw new Error(
           `Onshape is still translating this part to ${label} after ` +
-          `${Math.round(TRANSLATION_TIMEOUT_MS / 1000)}s (job ${translationId}, ` +
+          `${Math.round(timeoutMs / 1000)}s (job ${translationId}, ` +
           `${checks} check${checks === 1 ? "" : "s"}). Large or complex parts can ` +
           `take longer — try again in a moment.`
         );
@@ -1054,21 +1098,98 @@ export class LiveOnshapeClient implements OnshapeClient {
       );
     }
 
-    const externalId = String(
-      job?.resultExternalDataIds?.[0] ?? job?.resultDocumentId ?? ""
-    );
-    if (!externalId) {
+    return { job, translationId };
+  }
+
+  /* ======================================================================== */
+  /* Creating CAD                                                              */
+  /* ======================================================================== */
+
+  async createDocument(input: { name: string; companyId?: string; folderId?: string }): Promise<NewDocument> {
+    const companyId = input.companyId || this.companyId;
+    const doc = await this.req<Record<string, any>>(`/documents`, {
+      method: "POST",
+      body: JSON.stringify({
+        name: input.name,
+        isPublic: false,
+        // Owned by the company, not the integration account: a document that
+        // belongs to one person's account leaves with them.
+        ...(companyId ? { ownerType: 1, ownerId: companyId } : {}),
+        ...(input.folderId ? { parentId: input.folderId } : {}),
+      }),
+    });
+
+    const documentId = String(doc?.id ?? "");
+    const workspaceId = String(doc?.defaultWorkspace?.id ?? "");
+    if (!documentId || !workspaceId) {
       throw new Error(
-        `Translation ${translationId} finished but named no result file. ` +
-        `Response keys: ${Object.keys(job ?? {}).join(", ")}`
+        `Onshape created a document but did not say its id or workspace. ` +
+        `Response keys: ${Object.keys(doc ?? {}).join(", ") || "none"}`
       );
     }
+    return { documentId, workspaceId, name: String(doc?.name ?? input.name) };
+  }
 
-    const { data, contentType } = await this.reqBinary(
-      `/documents/d/${documentId}/externaldata/${encodeURIComponent(externalId)}`
+  async importFile(
+    coords: { documentId: string; workspaceId: string },
+    file: UploadFile
+  ): Promise<ImportResult> {
+    const started = Date.now();
+    const form = new FormData();
+    form.append("file", new Blob([new Uint8Array(file.data)], { type: file.contentType }), file.filename);
+    form.append("encodedFilename", encodeURIComponent(file.filename));
+    // One Part Studio of bodies, whatever structure the file carried. PLM is
+    // linking one part, and an assembly import would leave it guessing which
+    // of several new tabs that part is in.
+    form.append("flattenAssemblies", "true");
+    form.append("translate", "true");
+    form.append("allowFaultyParts", "true");
+    // Keep the original file in the document as well, so what was imported
+    // can always be checked against what it became.
+    form.append("storeInDocument", "true");
+    form.append("notifyUser", "false");
+
+    const submitted = await this.req<Record<string, any>>(
+      `/translations/d/${coords.documentId}/w/${coords.workspaceId}`,
+      { method: "POST", body: form }
     );
 
-    return { data, contentType, via: "translation", translationId, elapsedMs: Date.now() - started };
+    const { job, translationId } = await this.pollTranslation(
+      submitted, `an import of ${file.filename}`, started, IMPORT_TIMEOUT_MS
+    );
+    const elementIds = (Array.isArray(job?.resultElementIds) ? job.resultElementIds : [])
+      .map((e: unknown) => String(e))
+      .filter(Boolean);
+    return { elementIds, translationId, elapsedMs: Date.now() - started };
+  }
+
+  async uploadBlob(
+    coords: { documentId: string; workspaceId: string },
+    file: UploadFile
+  ): Promise<{ elementId: string }> {
+    const form = new FormData();
+    form.append("file", new Blob([new Uint8Array(file.data)], { type: file.contentType }), file.filename);
+    form.append("encodedFilename", encodeURIComponent(file.filename));
+
+    const el = await this.req<Record<string, any>>(
+      `/blobelements/d/${coords.documentId}/w/${coords.workspaceId}`,
+      { method: "POST", body: form }
+    );
+    const elementId = String(el?.id ?? el?.elementId ?? "");
+    if (!elementId) {
+      throw new Error(
+        `Onshape accepted ${file.filename} but did not say which tab it made. ` +
+        `Response keys: ${Object.keys(el ?? {}).join(", ") || "none"}`
+      );
+    }
+    return { elementId };
+  }
+
+  async deleteElement(coords: { documentId: string; workspaceId: string; elementId: string }): Promise<void> {
+    await this.req<void>(
+      `/elements/d/${coords.documentId}/w/${coords.workspaceId}/e/${coords.elementId}`,
+      { method: "DELETE" }
+    );
   }
 
   async getPartMetadata(coords: PartCoords): Promise<PartMetadata> {

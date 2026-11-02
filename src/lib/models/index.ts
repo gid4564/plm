@@ -82,6 +82,13 @@ const EnterpriseSchema = new Schema(
      */
     ignoreConfigurations: { type: Boolean, default: true },
 
+    /**
+     * The Onshape folder new documents go into when PLM creates one — see
+     * lib/onshape-create.ts. Empty puts them at the top of the company's
+     * documents, which works but scatters them; set once, by an admin.
+     */
+    onshapeNewDocFolderId: { type: String, default: "" },
+
     webhookId: { type: String, default: null },
     webhookRegisteredAt: { type: Date, default: null },
   },
@@ -687,6 +694,93 @@ const PartSchema = new Schema(
      * happens to be non-empty.
      */
     plmOnly: { type: Boolean, default: false },
+
+    /**
+     * Files attached to the part in PLM — a STEP model, a spec sheet, a photo.
+     *
+     * The bytes live in GridFS (bucket `partfiles`), never inline: a CAD
+     * export is routinely tens of megabytes, and the part document is read on
+     * every list page. `onshapeElementId` is set once the file has been sent
+     * to the part's Onshape document — imported as geometry for the CAD file
+     * the part was created from, or added as a file tab for anything else.
+     */
+    attachments: {
+      type: [{
+        filename: { type: String, required: true },
+        contentType: { type: String, default: "application/octet-stream" },
+        size: { type: Number, default: 0 },
+        fileId: { type: Schema.Types.ObjectId, required: true },
+        uploadedAt: { type: Date, default: () => new Date() },
+        uploadedByEmail: { type: String, default: "" },
+        onshapeElementId: { type: String, default: null },
+        onshapeError: { type: String, default: null },
+      }],
+      default: [],
+    },
+
+    /**
+     * Progress of "Create in Onshape" for a PLM-only part — see
+     * lib/onshape-create.ts.
+     *
+     * Kept on the part, step by step, because the job outlives the request
+     * that started it (an import is minutes, not seconds) and because a retry
+     * has to pick up where the last attempt stopped. A document already made
+     * is reused rather than made twice: Onshape would happily create a second
+     * one, and the first would sit in the company folder as an orphan nobody
+     * remembers the purpose of.
+     *
+     * `plan` is what the file is to become: one entry per distinct part, the
+     * `primary` one being this PLM part and every other included one a new PLM
+     * part made when the plan is confirmed. For a STEP file it is read from
+     * the file before anything is created (state "review"); for other formats
+     * it is built from what the import produced. Each entry's `bodies` are
+     * the Onshape parts it links to — the first is the one PLM tracks, the
+     * rest are further uses of the same part and carry the same name and
+     * number. A body the import produced that no entry claims by name waits
+     * in `unassignedBodies` for a person to place (state "map").
+     */
+    onshapeCreate: {
+      type: {
+        state: { type: String, enum: ["review", "running", "map", "failed", "done"], default: "running" },
+        step: { type: String, default: "" },
+        error: { type: String, default: null },
+        warnings: { type: [String], default: [] },
+        attachmentId: { type: String, default: null },
+        documentId: { type: String, default: null },
+        workspaceId: { type: String, default: null },
+        /** Elements the new document came with, removed once the import has its own. */
+        initialElementIds: { type: [String], default: [] },
+        importedElementIds: { type: [String], default: [] },
+        plan: {
+          type: [{
+            key: String,
+            /** The part's name in the file, before anyone edited it. */
+            fileName: String,
+            name: String,
+            instances: { type: Number, default: 1 },
+            bodiesPerInstance: { type: Number, default: 1 },
+            include: { type: Boolean, default: true },
+            primary: { type: Boolean, default: false },
+            plmPartId: { type: String, default: null },
+            bodies: {
+              type: [{ elementId: String, elementName: String, partId: String, name: String }],
+              default: [],
+            },
+          }],
+          default: undefined,
+        },
+        /** Whether `plan` was read from the file before importing, or from the import. */
+        planFrom: { type: String, enum: ["file", "import", null], default: null },
+        unassignedBodies: {
+          type: [{ elementId: String, elementName: String, partId: String, name: String }],
+          default: [],
+        },
+        startedAt: { type: Date, default: null },
+        finishedAt: { type: Date, default: null },
+        startedByEmail: { type: String, default: "" },
+      },
+      default: null,
+    },
   },
   { timestamps: true }
 );

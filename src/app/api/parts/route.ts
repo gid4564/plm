@@ -7,6 +7,7 @@ import { taskCountsForParts } from "@/lib/tasks";
 import { decodeCursor, encodeCursor } from "@/lib/pagination";
 import { plainAttributes } from "@/lib/sync";
 import { starReasonsForParts } from "@/lib/star-release";
+import { createPlmPart } from "@/lib/onshape-create";
 
 /**
  * Page size for the parts list.
@@ -191,4 +192,24 @@ export const GET = handler(async (req: Request) => {
       };
     }),
   });
+});
+
+/**
+ * Create a part in PLM, with no Onshape original yet.
+ *
+ * The starting point for a part that arrives as a file — a supplier's STEP,
+ * say — rather than as something modelled in Onshape. Attach the file, then
+ * "Create in Onshape" makes the document; see lib/onshape-create.ts.
+ */
+export const POST = handler(async (req: Request) => {
+  const s = await requireSession();
+  const { name, productId } = (await req.json().catch(() => ({}))) as {
+    name?: string; productId?: string | null;
+  };
+  if (!name?.trim()) return fail("A new part needs a name.", 422);
+
+  const created = await createPlmPart(
+    s.enterpriseId, { userId: s.userId, email: s.email }, { name, productId: productId ?? null }
+  );
+  return ok({ part: created }, 201);
 });

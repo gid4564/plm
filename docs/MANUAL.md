@@ -95,7 +95,7 @@ of enabling it is visible before you enable it.
 
 ### How they get into PLM
 
-Four routes, all deliberate:
+Five routes, all deliberate:
 
 - **The Onshape panel** — select a part, press *Sync to PLM*.
 - **A context menu in Onshape** — right-click a part or a tab, *Send to PLM*.
@@ -135,6 +135,47 @@ Four routes, all deliberate:
   back** — an import is the wrong moment to override that decision. Select it on
   the BOM page if you want it moved.
 - **A release** — every item in a release package is brought in automatically.
+- **New part, from a file** — for a part that arrives as a file rather than as
+  something modelled in Onshape, such as a supplier's STEP. Press *New part* on
+  the Parts page, give it a name and attach the file. It gets a PLM number and
+  starts **PLM only**.
+
+  On the part's page, *Create in Onshape* first works out what the file holds.
+  A **STEP file is read before anything is sent anywhere**: PLM finds each
+  distinct part in it, how many times each is used (through every
+  subassembly), and how many bodies each has. Other formats cannot be read
+  that way, so they are imported first and the same question is asked
+  afterwards.
+
+  **One part** goes straight through. **Several parts** stop at a review:
+  one row per distinct part, where you choose which row *is* this PLM part,
+  untick any that should not become PLM parts, and correct the names of the
+  rest. Confirming makes a new PLM part — with its own number, in the same
+  product — for every other ticked row. A part used more than once (four of
+  the same bolt) is **one** PLM part; every copy of it in Onshape gets the same
+  name and number. Unticked parts stay in the document as geometry with no PLM
+  part behind them.
+
+  Then, in the background:
+
+  1. a document named `<number> <name>` is created, owned by the company, in
+     the folder set under *Settings → Enterprise* (top level if none is set);
+  2. the file is imported into one Part Studio, flattened, and the empty
+     starter tab is removed;
+  3. each PLM part is linked to its body, matched by name. If Onshape named
+     the bodies differently ("Part 1", "Part 2"), the page lists the parts left
+     without one and you pick each one's body;
+  4. each body gets its PLM part's **Name and Part number**, then every
+     attribute the mapping sends to Onshape, the same way an edit would;
+  5. each part is read back like any other sync, and this part's other files
+     (PDFs, images, spec sheets) go into the document as file tabs.
+
+  If it **fails**, *Try again* reuses the document already made, and any PLM
+  parts already created and linked are kept rather than made twice.
+
+  CAD formats Onshape imports as geometry: STEP, IGES, Parasolid, ACIS,
+  SolidWorks, Inventor, Creo/NX, CATIA, Solid Edge, JT, Rhino, STL, OBJ, 3MF
+  and Fusion. Files are limited to 200 MB each.
 
 Editing a property in Onshape does **not** bring a part in. If it did, every
 property a designer touched would allocate a PLM number nobody asked for. It does
@@ -190,6 +231,14 @@ inside Onshape: the *Part number generator* extension means opening the Release
 candidate dialog gets a PLM number applied then and there, rather than after the
 fact — and because it is a batch request, a candidate covering several unnumbered
 parts numbers them all in one go.
+
+A part's number is shown in its **Part number** field but is never typed:
+PLM issues it. A part that has none — one whose number could not be issued
+when it arrived — shows **Assign next number** beside its title.
+
+When someone presses *Generate* on a part number in Onshape for a part PLM
+already tracks, PLM answers with **that part's existing number**, not a new
+one. Only an object PLM has not seen gets a fresh number.
 
 Numbers are never reused, even if the write to Onshape fails afterwards. A number
 that might already be in a quote or a drawing is worse to reissue than to leave

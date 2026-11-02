@@ -487,8 +487,46 @@ export type FileExport = {
   elapsedMs: number;
 };
 
+/** A document PLM has just created, with the workspace new tabs go into. */
+export type NewDocument = { documentId: string; workspaceId: string; name: string };
+
+/** A file to send to Onshape, held in memory. */
+export type UploadFile = { filename: string; data: Buffer; contentType: string };
+
+export type ImportResult = {
+  /** The tabs the import created — a Part Studio for a flattened CAD import. */
+  elementIds: string[];
+  translationId: string;
+  elapsedMs: number;
+};
+
 export interface OnshapeClient {
   readonly mode: "mock" | "live";
+
+  /* ------------------------------ Creating CAD ---------------------------- */
+
+  /**
+   * Create an empty document owned by the company, optionally in a folder.
+   *
+   * Onshape gives every new document a blank "Part Studio 1"; it is left for
+   * the caller to remove once an import has made a tab of its own.
+   */
+  createDocument(input: { name: string; companyId?: string; folderId?: string }): Promise<NewDocument>;
+
+  /**
+   * Import a CAD file into a document as geometry, and wait for it.
+   *
+   * Flattened, so whatever structure the file had lands as bodies in one
+   * Part Studio. An import is a translation job — submit, poll, collect —
+   * and can take minutes for a large file.
+   */
+  importFile(coords: { documentId: string; workspaceId: string }, file: UploadFile): Promise<ImportResult>;
+
+  /** Add a file to a document as a plain file tab, untranslated. */
+  uploadBlob(coords: { documentId: string; workspaceId: string }, file: UploadFile): Promise<{ elementId: string }>;
+
+  /** Remove one tab from a document's workspace. */
+  deleteElement(coords: { documentId: string; workspaceId: string; elementId: string }): Promise<void>;
 
   /** Identify what kind of tab an element is, before assuming it holds parts. */
   getElementInfo(coords: PartCoords): Promise<ElementInfo | null>;

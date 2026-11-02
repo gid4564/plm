@@ -5,6 +5,8 @@ import { useCallback, useEffect, useState } from "react";
 import { ProductSidebar, type ProductSummary } from "./ProductSidebar";
 import { Alert, CollapsibleSection, PartThumb, RevChip, Spinner, StatusBadge, relTime } from "@/components/ui";
 import { TaskCountBadge } from "@/components/PartTasks";
+import { NewPartDialog } from "@/components/NewPartDialog";
+import { useRouter } from "next/navigation";
 
 type Part = {
   id: string;
@@ -72,6 +74,8 @@ export function PartsTable({
    */
   const [product, setProduct] = useState(initialProduct);
   const [productsBusy, setProductsBusy] = useState(false);
+  const [newPartOpen, setNewPartOpen] = useState(false);
+  const router = useRouter();
   const [total, setTotal] = useState(0);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
 
@@ -277,6 +281,13 @@ export function PartsTable({
             {loading ? "loading…" : `${parts.length} of ${total}`}
           </span>
           <div style={{ flex: 1 }} />
+          <button
+            className="btn btn-sm btn-primary"
+            onClick={(e) => { e.stopPropagation(); setNewPartOpen(true); }}
+            title="Create a part in PLM — from a STEP or other CAD file, if you have one"
+          >
+            New part
+          </button>
           {stateFacets.map((f) => (
             <button
               key={f.state}
@@ -298,6 +309,18 @@ export function PartsTable({
      * viewport. `min-width: 0` on the main column is what stops the table's own
      * horizontal scroll container from pushing the sidebar off the page.
      */}
+    <NewPartDialog
+      open={newPartOpen}
+      onClose={() => setNewPartOpen(false)}
+      // The product being looked at, when it is a real one; otherwise the
+      // server files it where this person is working.
+      productId={product !== "all" && product !== "unfiled" ? product : null}
+      onCreated={(p, uploadError) => {
+        // The part exists either way; say what did not attach before leaving.
+        if (uploadError) alert(`${p.number} was created, but: ${uploadError}`);
+        router.push(`/parts/${p.id}`);
+      }}
+    />
     <div style={{ display: "flex", gap: 16, alignItems: "flex-start", flexWrap: "wrap" }}>
       <ProductSidebar
         products={products}
@@ -519,7 +542,8 @@ export function PartsTable({
           </p>
           <p style={{ margin: "0 0 14px", color: "var(--text-faint)", fontSize: 12.5 }}>
             Parts reach PLM from the Onshape panel, a &ldquo;Send to PLM&rdquo; context-menu
-            action, or a release raised in Onshape.
+            action, or a release raised in Onshape — or start one here with New part, from a
+            STEP or other CAD file.
             {product !== "all" && " Parts already in PLM can be moved here from the Parts list."}
           </p>
           <div style={{ display: "flex", gap: 8, justifyContent: "center" }}>
