@@ -16,7 +16,8 @@ process.env.ONSHAPE_MODE = "mock";
 
 import { connectDb } from "../src/lib/db";
 import {
-  ActivityLog, AttributeDefinition, Enterprise, MockOnshapePart, MockPropertyDef, Part, PartIteration, Product,
+  ActivityLog, AttributeDefinition, Enterprise, MockOnshapePart, MockPropertyDef, Part, PartGeometry, PartIteration,
+  Product,
 } from "../src/lib/models";
 import { seedAttributeDefinitions } from "../src/lib/attributes";
 import { MOCK_PROPS } from "../src/lib/mock-seed";
@@ -69,7 +70,7 @@ async function main() {
 
   const stale: any = await Enterprise.findOne({ onshapeCompanyId: COMPANY }).lean();
   if (stale) {
-    for (const M of [Part, PartIteration, ActivityLog, AttributeDefinition, Product]) {
+    for (const M of [Part, PartIteration, ActivityLog, AttributeDefinition, Product, PartGeometry]) {
       await (M as any).deleteMany({ enterpriseId: stale._id });
     }
     await Enterprise.deleteOne({ _id: stale._id });
@@ -162,6 +163,9 @@ async function main() {
   check("PLM's name survived the first sync", part.name === "Mounting Bracket", part.name);
   check("the first sync ran", !!part.lastSyncedFromOnshapeAt);
   check("no write is left pending", !part.pushPending, part.lastPushError);
+  const geo: any = await PartGeometry.findOne({ partId: part._id, revision: "" }).lean();
+  check("a 3D model was captured for PLM's viewer", !!geo && !geo.failureReason && (geo.size ?? 0) > 0,
+    JSON.stringify(geo && { size: geo.size, failureReason: geo.failureReason }));
 
   const stepRow = part.attachments.find((a: any) => String(a._id) === step.id);
   const pdfRow = part.attachments.find((a: any) => String(a._id) === pdf.id);
@@ -224,6 +228,7 @@ async function main() {
   check("is linked into the same document", boltPart.plmOnly === false && boltPart.documentId === part.documentId);
   check("in the same Part Studio", boltPart.elementId === part.elementId);
   check("and filed with this part", String(boltPart.productId) === String(part.productId));
+  check("and has its own 3D model", !!(await PartGeometry.exists({ partId: boltPart._id, revision: "", failureReason: null })));
   check("this part keeps its own name", part.name === "Frame", part.name);
 
   const kitBodies = await bodyProps(part.documentId);

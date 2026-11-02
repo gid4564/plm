@@ -20,7 +20,7 @@ const RETRY_AFTER_MS = 60 * 60 * 1000;
  * Served with a short cache lifetime and a 200 rather than a 404 so the browser
  * shows a tidy tile instead of a broken-image icon, and retries reasonably soon.
  */
-function placeholder(): NextResponse {
+function placeholder(cache = "private, max-age=300"): NextResponse {
   const svg =
     `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">` +
     `<rect width="100" height="100" fill="#eef1f5"/>` +
@@ -30,7 +30,7 @@ function placeholder(): NextResponse {
     status: 200,
     headers: {
       "Content-Type": "image/svg+xml",
-      "Cache-Control": "private, max-age=300",
+      "Cache-Control": cache,
     },
   });
 }
@@ -83,7 +83,11 @@ export const GET = handler(async (req: Request, ctx: Ctx) => {
   // not an Onshape object this account merely lacks access to — there is
   // nothing there to ask, ever, so this skips the call rather than caching a
   // failure from asking Onshape about an id it was never going to recognise.
-  if (part.plmOnly) return placeholder();
+  //
+  // Never cached by the browser: a PLM-only part becomes a real one the moment
+  // Create in Onshape links it, and a cached placeholder then kept showing on
+  // the very page that watched it happen.
+  if (part.plmOnly) return placeholder("no-store");
 
   // `writeBackBlocked` already names standard content and library parts —
   // the account can read but not write to the document they live in — and
@@ -126,6 +130,19 @@ export const GET = handler(async (req: Request, ctx: Ctx) => {
     if (!thumb) reason = "Onshape returned no image for this part.";
   } catch (err: any) {
     reason = String(err?.message ?? err);
+  }
+
+  /*
+   * A failed larger render must not cost the smaller image already held: the
+   * part page asks for a bigger picture than the list, and overwriting a good
+   * cached image with a failure left the page showing a placeholder for an
+   * hour while the list still showed the part.
+   */
+  if (!thumb && cachedBytes && cachedBytes.length > 0) {
+    return new NextResponse(new Uint8Array(cachedBytes), {
+      status: 200,
+      headers: { "Content-Type": cached.contentType, "Cache-Control": "private, max-age=300" },
+    });
   }
 
   if (!thumb) {

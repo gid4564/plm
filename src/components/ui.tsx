@@ -175,9 +175,15 @@ export function relTime(d: string | Date | null | undefined): string {
  * loading is lazy so a long dashboard does not request every picture at once.
  */
 export function PartThumb({
-  partId, size = 40, radius = 6, alt = "",
+  partId, size = 40, radius = 6, alt = "", version,
 }: {
   partId: string; size?: number; radius?: number; alt?: string;
+  /**
+   * Changes when the picture behind the part does — e.g. when a PLM-only part
+   * is linked to Onshape — so the browser fetches anew instead of reusing an
+   * image of what the part used to be.
+   */
+  version?: string;
 }) {
   const [failed, setFailed] = React.useState(false);
 
@@ -198,7 +204,7 @@ export function PartThumb({
   return (
     // eslint-disable-next-line @next/next/no-img-element
     <img
-      src={`/api/parts/${partId}/thumbnail?size=${Math.max(120, size * 3)}`}
+      src={`/api/parts/${partId}/thumbnail?size=${Math.max(120, size * 3)}${version ? `&v=${encodeURIComponent(version)}` : ""}`}
       alt={alt}
       width={size}
       height={size}

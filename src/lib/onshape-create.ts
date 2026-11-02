@@ -8,6 +8,7 @@ import { currentProductFor, resolveProductById, resolveUnassignedProduct } from 
 import { clientForEnterprise } from "@/lib/onshape/factory";
 import { withApiProcess } from "@/lib/api-log";
 import { IMPORT_TIMEOUT_MS } from "@/lib/onshape/live-client";
+import { captureWorkspaceGeometry } from "@/lib/geometry";
 import type { OnshapeClient, PartCoords } from "@/lib/onshape/types";
 import { isStepFile, scanStep } from "@/lib/step-scan";
 
@@ -748,7 +749,7 @@ async function linkPlan(enterpriseId: string, partId: string, given?: OnshapeCli
       if (!target) { warnings.push(`The PLM part for "${x.name}" no longer exists.`); continue; }
       if (!target.plmOnly) continue; // linked by an earlier attempt
       await step(partId, `Linking ${target.number} ${target.name}`);
-      await linkOne(enterpriseId, target, x.bodies, { documentId, workspaceId, documentName }, client, warnings);
+      await linkOne(enterpriseId, target, x.bodies, { documentId, workspaceId, documentName, runPartId: partId }, client, warnings);
     }
 
     // The source file is the imported tab; other files go in as file tabs.
@@ -826,7 +827,8 @@ async function linkOne(
   enterpriseId: string,
   target: any,
   bodies: Body[],
-  doc: { documentId: string; workspaceId: string; documentName: string },
+  /** Where the job reports progress: the part "Create in Onshape" was pressed on. */
+  doc: { documentId: string; workspaceId: string; documentName: string; runPartId: string },
   client: OnshapeClient,
   warnings: string[]
 ): Promise<void> {
@@ -882,4 +884,16 @@ async function linkOne(
 
   await syncPartFromOnshape(enterpriseId, coordsOf(first), { trigger: "create-in-onshape", client, kind: "part" })
     .catch((err: any) => warnings.push(`${target.number}: the first sync did not complete: ${String(err?.message ?? err)}`));
+
+  /*
+   * The 3D model, for PLM's own viewer — taken whether or not the enterprise
+   * captures on every sync. A part made from a file has nothing else to look
+   * at in PLM until it does, and this is one export per part, asked for by
+   * the person creating it. A first sync would capture it for a new part;
+   * this one was linked, not created, so the sync does not.
+   */
+  await step(doc.runPartId, `Capturing the 3D model of ${target.number}`);
+  const cap = await captureWorkspaceGeometry(client, enterpriseId, id, coordsOf(first))
+    .catch((err: any) => ({ ok: false, bytes: 0, reason: String(err?.message ?? err) }));
+  if (!cap.ok) warnings.push(`${target.number}: the 3D model was not captured: ${cap.reason}`);
 }

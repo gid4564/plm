@@ -296,7 +296,12 @@ export function PartDetail({ id, isAdmin }: { id: string; isAdmin: boolean }) {
   return (
     <div style={{ display: "grid", gap: 16 }}>
       <div style={{ display: "flex", gap: 14, alignItems: "flex-start", flexWrap: "wrap" }}>
-        <PartThumb partId={id} size={64} radius={8} alt="" />
+        {/* Keyed on where the part lives, so linking it in Onshape re-renders the picture. */}
+        <PartThumb
+          key={p.plmOnly ? "plm" : `${p.documentId}:${p.partIdInOnshape}`}
+          version={p.plmOnly ? "plm" : `${p.documentId}:${p.partIdInOnshape}`}
+          partId={id} size={64} radius={8} alt=""
+        />
         <div style={{ flex: 1, minWidth: 220 }}>
           <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
             <FavoriteButton kind="part" targetId={id} active={Boolean(p.isFavorite)} size={20} />
