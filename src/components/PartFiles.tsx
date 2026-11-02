@@ -55,10 +55,16 @@ function size(bytes: number): string {
  * thumbnail, the PLM-only badge) changes the moment the part is linked.
  */
 export function PartFiles({
-  partId, partNumber, plmOnly, locked, attachments, run, onChanged,
+  partId, partNumber, plmOnly, locked, attachments, run, onChanged, unsaved = false,
 }: {
   partId: string;
   partNumber: string | null;
+  /**
+   * The attributes form has edits not yet saved. Creating in Onshape then
+   * would send the stored values, not the ones on screen — a Description
+   * typed but not saved simply never arrived.
+   */
+  unsaved?: boolean;
   plmOnly: boolean;
   /** Released or obsolete: files are fixed. */
   locked: boolean;
@@ -210,7 +216,7 @@ export function PartFiles({
           ) : run?.state === "review" ? (
             <PlanReview
               key={run.plan.map((x) => x.key).join()}
-              run={run} partNumber={partNumber} busy={busy}
+              run={run} partNumber={partNumber} busy={busy} unsaved={unsaved}
               onConfirm={(plan) => post({ action: "confirm-plan", plan }, "confirm")}
               onCancel={() => post({ action: "cancel-plan" }, "cancel")}
             />
@@ -245,14 +251,16 @@ export function PartFiles({
                   )}
                   <button
                     className="btn btn-primary btn-sm"
-                    disabled={!source || busy !== null}
+                    disabled={!source || busy !== null || unsaved}
                     onClick={() => post({ action: "create-in-onshape", attachmentId: source }, "create")}
                     title="Make a company document, import this file into a Part Studio, and link this part to it"
                   >
                     {busy === "create" ? <Spinner /> : run?.state === "failed" ? "Try again" : "Create in Onshape"}
                   </button>
-                  <span style={{ color: "var(--text-faint)", fontSize: 11.5 }}>
-                    {cad.length === 1 ? `from ${cad[0].filename}` : ""}
+                  <span style={{ color: unsaved ? "var(--warn)" : "var(--text-faint)", fontSize: 11.5 }}>
+                    {unsaved
+                      ? "Save or discard your attribute changes first — they are what Onshape gets."
+                      : cad.length === 1 ? `from ${cad[0].filename}` : ""}
                   </span>
                 </div>
               )}
@@ -297,24 +305,35 @@ export function PartFiles({
  * PLM part behind it.
  */
 function PlanReview({
-  run, partNumber, busy, onConfirm, onCancel,
+  run, partNumber, busy, unsaved, onConfirm, onCancel,
 }: {
   run: NonNullable<OnshapeCreate>;
   partNumber: string | null;
   busy: string | null;
+  unsaved: boolean;
   onConfirm: (plan: { key: string; name: string; include: boolean; primary: boolean }[]) => void;
   onCancel: () => void;
 }) {
-  const [rows, setRows] = useState(() =>
-    run.plan.map((x) => ({ ...x, name: x.primary ? x.fileName : x.name }))
-  );
+  const [rows, setRows] = useState(() => run.plan.map((x) => ({ ...x })));
   const set = (key: string, patch: Partial<(typeof rows)[number]>) =>
     setRows((prev) => prev.map((r) => (r.key === key ? { ...r, ...patch } : r)));
+  /*
+   * Moving "this part" to another row carries this part's name with it, and
+   * gives the row it left its name from the file back — the name follows the
+   * PLM part, not the row.
+   */
   const choosePrimary = (key: string) =>
-    setRows((prev) => prev.map((r) => ({ ...r, primary: r.key === key, include: r.key === key ? true : r.include })));
+    setRows((prev) => {
+      const ownName = prev.find((r) => r.primary)?.name ?? "";
+      return prev.map((r) =>
+        r.key === key ? { ...r, primary: true, include: true, name: ownName }
+          : r.primary ? { ...r, primary: false, name: r.fileName }
+          : r
+      );
+    });
 
   const creating = rows.filter((r) => r.include && !r.primary).length;
-  const blank = rows.some((r) => r.include && !r.primary && !r.name.trim());
+  const blank = rows.some((r) => r.include && !r.name.trim());
   const label = partNumber ?? "this part";
 
   return (
@@ -329,10 +348,11 @@ function PlanReview({
       </div>
       <div style={{ display: "grid", gap: 4 }}>
         <div style={{ display: "grid", gridTemplateColumns: "22px 22px 1fr auto", gap: 8, fontSize: 11, color: "var(--text-faint)" }}>
-          <span title={`Which part is ${label}`}>is</span><span title="Create a PLM part">add</span><span>Name</span><span>Uses</span>
+          <span title={`Which row is ${label}`}>this</span><span title="Create a PLM part">add</span>
+          <span>Name — sent to Onshape</span><span>Uses</span>
         </div>
         {rows.map((r) => (
-          <div key={r.key} style={{ display: "grid", gridTemplateColumns: "22px 22px 1fr auto", gap: 8, alignItems: "center", fontSize: 13 }}>
+          <div key={r.key} style={{ display: "grid", gridTemplateColumns: "22px 22px 1fr auto", gap: 8, alignItems: "start", fontSize: 13 }}>
             <input
               type="radio" name="plan-primary" checked={r.primary}
               onChange={() => choosePrimary(r.key)}
@@ -343,19 +363,19 @@ function PlanReview({
               onChange={(e) => set(r.key, { include: e.target.checked })}
               aria-label={`Create a PLM part for ${r.fileName}`}
             />
-            {r.primary ? (
-              <span title={`Keeps ${label}'s own name and number`}>
-                <strong className="mono">{label}</strong>{" "}
-                <span style={{ color: "var(--text-faint)" }}>({r.fileName} in the file)</span>
-              </span>
-            ) : (
+            <div style={{ display: "grid", gap: 2, minWidth: 0 }}>
               <input
                 className="input" value={r.name} disabled={!r.include}
                 onChange={(e) => set(r.key, { name: e.target.value })}
                 aria-label={`Name for ${r.fileName}`}
                 style={{ minWidth: 0, opacity: r.include ? 1 : 0.5 }}
               />
-            )}
+              <span style={{ fontSize: 11, color: "var(--text-faint)" }}>
+                {r.primary
+                  ? <><strong className="mono">{label}</strong> · &ldquo;{r.fileName}&rdquo; in the file</>
+                  : r.include ? <>new part · &ldquo;{r.fileName}&rdquo; in the file</> : <>left out · &ldquo;{r.fileName}&rdquo;</>}
+              </span>
+            </div>
             <span
               style={{ color: "var(--text-faint)", fontSize: 12, whiteSpace: "nowrap" }}
               title={r.bodiesPerInstance > 1 ? `${r.bodiesPerInstance} bodies each` : undefined}
@@ -368,7 +388,8 @@ function PlanReview({
       <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
         <button
           className="btn btn-primary btn-sm"
-          disabled={busy !== null || blank}
+          disabled={busy !== null || blank || unsaved}
+          title={unsaved ? "Save or discard your attribute changes first" : undefined}
           onClick={() => onConfirm(rows.map((r) => ({ key: r.key, name: r.name, include: r.include, primary: r.primary })))}
         >
           {busy === "confirm" ? <Spinner /> :

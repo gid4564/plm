@@ -181,6 +181,32 @@ async function main() {
     server.close();
   }
 
+  console.log("\nA delete that succeeds with an empty body is a success");
+  {
+    // Onshape answers DELETE /elements with 200 and nothing at all — which
+    // used to read as "a body that is not JSON" and be reported as a failure.
+    const server = createServer((_req, res) => { res.writeHead(200); res.end(); });
+    const port = await listen(server);
+    const client = new LiveOnshapeClient("t", `http://127.0.0.1:${port}`);
+    let msg = "";
+    await client.deleteElement({ documentId: "d", workspaceId: "w", elementId: "e" })
+      .catch((e: any) => { msg = String(e?.message ?? e); });
+    check("no error", msg === "", msg);
+    server.close();
+
+    const gone = createServer((_req, res) => {
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ message: "Not found.", status: 404 }));
+    });
+    const port2 = await listen(gone);
+    const client2 = new LiveOnshapeClient("t", `http://127.0.0.1:${port2}`);
+    msg = "";
+    await client2.deleteElement({ documentId: "d", workspaceId: "w", elementId: "e" })
+      .catch((e: any) => { msg = String(e?.message ?? e); });
+    check("and a tab already gone is not an error either", msg === "", msg);
+    gone.close();
+  }
+
   console.log(`\n${passed} passed, ${failed} failed`);
   process.exit(failed ? 1 : 0);
 }

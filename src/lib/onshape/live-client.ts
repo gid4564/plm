@@ -363,6 +363,9 @@ export class LiveOnshapeClient implements OnshapeClient {
      */
     if (res.status === 204) return undefined as T;
     const text = await res.text();
+    // A success with nothing in it — how Onshape answers a DELETE — is not a
+    // malformed reply. Treated as one, every successful delete read as a failure.
+    if (!text.trim()) return undefined as T;
     if (/^\s*<(!doctype|html)/i.test(text)) {
       throw new Error(
         `Onshape ${init.method || "GET"} ${path} -> ${res.status} but answered with an HTML ` +
@@ -1186,10 +1189,17 @@ export class LiveOnshapeClient implements OnshapeClient {
   }
 
   async deleteElement(coords: { documentId: string; workspaceId: string; elementId: string }): Promise<void> {
-    await this.req<void>(
-      `/elements/d/${coords.documentId}/w/${coords.workspaceId}/e/${coords.elementId}`,
-      { method: "DELETE" }
-    );
+    try {
+      await this.req<void>(
+        `/elements/d/${coords.documentId}/w/${coords.workspaceId}/e/${coords.elementId}`,
+        { method: "DELETE" }
+      );
+    } catch (err: any) {
+      // Already gone is the outcome asked for. A new document's starter tabs
+      // can depend on one another, so removing one can take another with it.
+      if (/-> 404\b/.test(String(err?.message ?? ""))) return;
+      throw err;
+    }
   }
 
   async getPartMetadata(coords: PartCoords): Promise<PartMetadata> {

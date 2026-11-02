@@ -262,10 +262,28 @@ export type PlanEdit = { key: string; name?: string; include?: boolean; primary?
 export const bodyNameKey = (s: string) =>
   s.trim().toLowerCase().replace(/\s*(\(\d+\)|<\d+>)$/, "");
 
-/** Fresh entries' default: the part already named like this PLM part, else the first. */
-function primaryIndex(names: string[], partName: string): number {
-  const i = names.findIndex((n) => bodyNameKey(n) === bodyNameKey(partName));
-  return i >= 0 ? i : 0;
+/**
+ * Which of the file's parts is most likely this PLM part.
+ *
+ * An exact name first; then one whose name appears as a whole word in this
+ * part's name, or the other way round ("Plastic Bottle" → "bottle"), the
+ * longest such match winning; else the first. Only a default — the review
+ * shows it and anyone can change it — but a wrong default was easy to miss:
+ * this part then took the wrong body, and the wrong body took its name.
+ */
+export function primaryIndex(names: string[], partName: string): number {
+  const target = bodyNameKey(partName);
+  const exact = names.findIndex((n) => bodyNameKey(n) === target);
+  if (exact >= 0) return exact;
+
+  const words = (s: string) => ` ${s.replace(/[^a-z0-9]+/g, " ").trim()} `;
+  const t = words(target);
+  let best = -1, bestLen = 0;
+  names.forEach((n, i) => {
+    const w = words(bodyNameKey(n));
+    if (w.trim() && (t.includes(w) || w.includes(t)) && w.length > bestLen) { best = i; bestLen = w.length; }
+  });
+  return best >= 0 ? best : 0;
 }
 
 /**
@@ -396,13 +414,39 @@ export async function confirmPlan(
   if (primaries.length !== 1) throw new Error(`Choose exactly one part to be ${part.number}.`);
   if (!primaries[0].include) throw new Error(`The part chosen as ${part.number} has to be included.`);
 
-  // This PLM part keeps its own name; the entry it took over goes back to the file's.
+  // The entry this part no longer takes goes back to the file's name.
+  // The name follows the PLM part, not the row: a row that becomes this part
+  // takes its name unless given another, and the row it left gets the file's.
+  const named = (key: string) => edits.some((e) => e.key === key && e.name !== undefined);
   for (const x of plan) {
-    if (x.primary) { x.plmPartId = partId; x.name = part.name; }
-    else if (x.plmPartId === partId) { x.plmPartId = null; x.name = x.fileName; }
+    if (x.primary && x.plmPartId !== partId) {
+      x.plmPartId = partId;
+      if (!named(x.key)) x.name = part.name;
+    } else if (!x.primary && x.plmPartId === partId) {
+      x.plmPartId = null;
+      if (!named(x.key)) x.name = x.fileName;
+    }
   }
   const blank = plan.find((x) => x.include && !x.name);
   if (blank) throw new Error(`Give "${blank.fileName}" a name, or leave it out.`);
+
+  /*
+   * A name given to this part's own row renames it, here, before Onshape is
+   * written to — the review is the last moment the name can be settled
+   * without a rename in two systems.
+   */
+  const primary = primaries[0];
+  if (primary.name !== part.name) {
+    const from = part.name;
+    part.name = primary.name;
+    part.attributes = { ...plainAttributes(part.attributes), name: primary.name };
+    part.markModified("attributes");
+    await ActivityLog.create({
+      enterpriseId, partId, direction: "plm", action: "updated", trigger: "manual", ok: true,
+      message: `${actor.email} renamed ${part.number} from "${from}" to "${primary.name}" at review.`,
+      changes: { name: { from, to: primary.name } },
+    });
+  }
 
   const a = part.attachments.id(run.attachmentId);
   const created: { id: string; number: string; name: string }[] = [];

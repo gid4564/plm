@@ -22,8 +22,8 @@ import { seedAttributeDefinitions } from "../src/lib/attributes";
 import { MOCK_PROPS } from "../src/lib/mock-seed";
 import { MockOnshapeClient } from "../src/lib/onshape/mock-client";
 import {
-  addAttachment, assignBodies, cancelPlan, confirmPlan, createPlmPart, readAttachment, removeAttachment,
-  startCreateInOnshape,
+  addAttachment, assignBodies, cancelPlan, confirmPlan, createPlmPart, primaryIndex, readAttachment,
+  removeAttachment, startCreateInOnshape,
 } from "../src/lib/onshape-create";
 import { knownNumberFor } from "../src/lib/numbering";
 import type { UploadFile } from "../src/lib/onshape/types";
@@ -255,6 +255,48 @@ async function main() {
     `${part.onshapeCreate?.state} ${part.partId} ${part.onshapeCreate?.error}`);
   const upperPart: any = await Part.findOne({ enterpriseId: eid, name: "Clamp Upper" }).lean();
   check("and the first becomes a new part under its file name", upperPart?.partId === "J0D", upperPart?.partId);
+
+  check("and keeps its own name when it moves rows", part.name === "Clamp", part.name);
+
+  /* ---------------------------------------------------------------------- */
+  console.log("\nThe likely part is proposed, and every name can be changed before Onshape");
+  check("\"Plastic Bottle\" is the bottle, not the cap listed first",
+    primaryIndex(["cap", "bottle"], "Plastic Bottle") === 1);
+  check("a whole word only: \"Cap\" is not found in \"Capstan\"",
+    primaryIndex(["Base", "Cap"], "Capstan") === 0);
+  check("the longer match wins", primaryIndex(["Bracket", "Bracket Arm"], "Left Bracket Arm") === 1);
+
+  const bottle = await createPlmPart(eid, actor, { name: "Plastic Bottle" });
+  const bottleStep = await addAttachment(eid, bottle.id, actor, {
+    filename: "Plastic Bottle.step", contentType: "application/step",
+    data: stepFixture([
+      { name: "Assembly 1", children: [{ product: "cap", count: 1 }, { product: "bottle", count: 1 }] },
+      { name: "cap", solids: 1 }, { name: "bottle", solids: 1 },
+    ]),
+  });
+  await startCreateInOnshape(eid, bottle.id, actor, bottleStep.id, { client, wait: true });
+  part = await Part.findById(bottle.id).lean();
+  const bPlan = part.onshapeCreate.plan;
+  check("the bottle row is proposed as this part", bPlan.find((x: any) => x.primary)?.fileName === "bottle",
+    bPlan.find((x: any) => x.primary)?.fileName);
+  const capRow = bPlan.find((x: any) => x.fileName === "cap");
+  const bottleRow = bPlan.find((x: any) => x.fileName === "bottle");
+  await confirmPlan(eid, bottle.id, actor, [
+    { key: bottleRow.key, name: "Bottle, 500 ml" },
+    { key: capRow.key, name: "Bottle Cap, 28 mm" },
+  ], { client, wait: true });
+  part = await Part.findById(bottle.id).lean();
+  check("done", part.onshapeCreate?.state === "done", `${part.onshapeCreate?.state}: ${part.onshapeCreate?.error}`);
+  check("this part was renamed at review", part.name === "Bottle, 500 ml" && part.attributes?.name === "Bottle, 500 ml",
+    `${part.name} / ${part.attributes?.name}`);
+  check("and the document is named with the new name", part.documentName === `${part.number} Bottle, 500 ml`,
+    part.documentName);
+  const bBodies = await bodyProps(part.documentId);
+  const nameOn = (n: string) => bBodies.find((b) => b.properties?.[MOCK_PROPS.name.propertyId] === n);
+  check("the bottle body carries this part's name", nameOn("Bottle, 500 ml")?.partId === part.partId);
+  const capPart: any = await Part.findOne({ enterpriseId: eid, name: "Bottle Cap, 28 mm" }).lean();
+  check("the cap is a new part under the name given at review",
+    !!capPart && nameOn("Bottle Cap, 28 mm")?.partId === capPart.partId, capPart?.partId);
 
   /* ---------------------------------------------------------------------- */
   console.log("\nCancelling at review");

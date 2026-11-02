@@ -495,6 +495,7 @@ export function PartDetail({ id, isAdmin }: { id: string; isAdmin: boolean }) {
           <PartFiles
             partId={id}
             partNumber={p.number ?? null}
+            unsaved={dirty}
             plmOnly={Boolean(p.plmOnly)}
             locked={p.lifecycleState === "Released" || p.lifecycleState === "Obsolete"}
             attachments={p.attachments ?? []}
