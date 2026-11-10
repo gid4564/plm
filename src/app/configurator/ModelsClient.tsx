@@ -30,6 +30,7 @@ export function ModelsClient({ isAdmin }: { isAdmin: boolean }) {
   const [versionId, setVersionId] = useState("");
   const [name, setName] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     const r = await fetch("/api/configurator/models");
@@ -83,6 +84,44 @@ export function ModelsClient({ isAdmin }: { isAdmin: boolean }) {
     await load();
   }
 
+  /**
+   * Start a model again, for demos. The confirmation says exactly what goes,
+   * because the configurator's PLM parts go with the configurations.
+   */
+  async function reset(m: Model) {
+    setError(null); setNotice(null);
+    const pr = await fetch(`/api/configurator/models/${m.id}/reset`);
+    const pj = await pr.json();
+    if (!pr.ok) { setError(pj.error || "Could not check what a reset would remove"); return; }
+    const { configurations, parts } = pj.preview;
+    const ok = window.confirm(
+      `Reset "${m.name}"?\n\n` +
+      `This deletes its ${configurations} configuration${configurations === 1 ? "" : "s"} (pictures and BOMs) and the ` +
+      `${parts} PLM part${parts === 1 ? "" : "s"} and assemblies the configurator made for them. Parts PLM had before, ` +
+      `released parts and parts used elsewhere are kept. Nothing in Onshape is changed.\n\n` +
+      `CFG numbering starts again at 1 if no other model has configurations. This cannot be undone.`
+    );
+    if (!ok) return;
+    setBusy(`reset-${m.id}`);
+    try {
+      const r = await fetch(`/api/configurator/models/${m.id}/reset`, { method: "POST" });
+      const j = await r.json();
+      if (!r.ok) throw new Error(j.error || "Could not reset the model");
+      const x = j.result;
+      setNotice(
+        `"${m.name}" was reset: ${x.configurations} configuration${x.configurations === 1 ? "" : "s"} and ` +
+        `${x.partsRemoved} part${x.partsRemoved === 1 ? "" : "s"} removed` +
+        (x.partsKept.length ? `; kept ${x.partsKept.map((k: any) => `${k.number} (${k.reason})`).join(", ")}` : "") +
+        (x.cfgCounterReset ? ". CFG numbering starts again at CFG-00001." : ".")
+      );
+      await load();
+    } catch (e: any) {
+      setError(String(e?.message ?? e));
+    } finally {
+      setBusy(null);
+    }
+  }
+
   return (
     <div style={{ display: "grid", gap: 16 }}>
       <div>
@@ -94,6 +133,7 @@ export function ModelsClient({ isAdmin }: { isAdmin: boolean }) {
       </div>
 
       {error && <Alert kind="error" onDismiss={() => setError(null)}>{error}</Alert>}
+      {notice && <Alert kind="ok" onDismiss={() => setNotice(null)}>{notice}</Alert>}
 
       {models === null ? (
         <div className="card" style={{ padding: 30, textAlign: "center" }}><Spinner size={18} /></div>
@@ -120,7 +160,13 @@ export function ModelsClient({ isAdmin }: { isAdmin: boolean }) {
               <div style={{ display: "flex", gap: 8 }}>
                 <Link href={`/configurator/${m.id}`} className="btn btn-sm btn-primary">Configure</Link>
                 {isAdmin && (
-                  <button className="btn btn-sm" onClick={() => toggle(m)}>{m.enabled ? "Switch off" : "Switch on"}</button>
+                  <>
+                    <button className="btn btn-sm" onClick={() => toggle(m)}>{m.enabled ? "Switch off" : "Switch on"}</button>
+                    <button className="btn btn-sm btn-danger" onClick={() => reset(m)} disabled={busy !== null}
+                      title="Delete every configuration of this model and the PLM parts made for them">
+                      {busy === `reset-${m.id}` ? <Spinner /> : "Reset"}
+                    </button>
+                  </>
                 )}
               </div>
             </div>

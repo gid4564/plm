@@ -1766,7 +1766,8 @@ function flightCaseOf(configuration: string | null | undefined) {
 /**
  * The Flight Case's BOM for one configuration, shaped like the live one
  * (probe, 9 Nov 2026): sized parts carry the case's dimensions in their own
- * configuration, longer cases have more hinge pins and latches, foam parts
+ * configuration, while the hinge pin and handle parts are the same
+ * configuration in every case (as on the tenant, float noise included), longer cases have more hinge pins and latches, foam parts
  * only when foam is chosen, and a non-geometric line under the latch. Sized
  * parts have a part number only in the default size, as on the tenant.
  */
@@ -1791,7 +1792,7 @@ function flightCaseBom(c: AssemblyCoords, opts: { indented: boolean; multiLevel:
   let lines: BomLine[] = [
     row(0, 1, "Base", sized("PRT012175"), { element: 1, partId: "JLD", configuration: dims }),
     row(0, 1, "Lid", sized("PRT012176"), { element: 1, partId: "JHD", configuration: dims }),
-    row(0, hinges, "Hinge Pin", "PRT012177", { element: 2, partId: "RABD", configuration: `L=${m(k.L)}` }),
+    row(0, hinges, "Hinge Pin", "PRT012177", { element: 2, partId: "RABD", configuration: "L=0.5+meter" }),
     row(0, 1, "Seal", sized("PRT012178"), { element: 1, partId: "R0HD", configuration: dims }),
     row(0, hinges + 1, "Latch Assembly", "", { element: 3, partId: "", configuration: "default" }, true),
     row(1, 1, "Button", "PRT012179", { element: 4, partId: "ReBD", configuration: "L=0.0+meter;Single=true" }),
@@ -1800,8 +1801,8 @@ function flightCaseBom(c: AssemblyCoords, opts: { indented: boolean; multiLevel:
     row(1, 1, "Latch Pin", "PRT012182", { element: 4, partId: "RJCD", configuration: "L=0.0+meter;Single=true" }),
     row(1, 1000, "N/A", "N/A", null),
     row(0, 3, "Handle Assembly", "PRD-00013-PLM", { element: 5, partId: "", configuration: "default" }, true),
-    row(1, 1, "Handle", "PRT012183", { element: 6, partId: "JLD", configuration: `H=${m(k.D)}` }),
-    row(1, 2, "Handle Pin", "PRT012184", { element: 6, partId: "REBD", configuration: `H=${m(k.D)}` }),
+    row(1, 1, "Handle", "PRT012183", { element: 6, partId: "JLD", configuration: "H=0.35000000000000003+meter" }),
+    row(1, 2, "Handle Pin", "PRT012184", { element: 6, partId: "REBD", configuration: "H=0.35000000000000003+meter" }),
   ];
   if (k.foam) {
     const cut = k.cutouts ? (k.slotsMode ? `;Slots=${k.slots};Slot_width=${m(k.slotWidth)}` : `;Compartments=${k.compartments}`) : "";

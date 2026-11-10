@@ -1,5 +1,9 @@
 import { connectDb } from "@/lib/db";
-import { ActivityLog, ConfigurableModel, ConfiguredItem } from "@/lib/models";
+import { ActivityLog, BomLink, ConfigurableModel, ConfiguredItem, Enterprise, NumberingSequence, Part, PartIteration, PartThumbnail } from "@/lib/models";
+import { configurationNormalizer, deletePart, syncPartFromOnshape } from "@/lib/sync";
+import { listDefinitions } from "@/lib/attributes";
+import { resolveProductById, resolveUnassignedProduct } from "@/lib/products";
+import { upsertBomLink } from "@/lib/bom-import";
 import { clientForEnterprise } from "@/lib/onshape/factory";
 import { withApiProcess } from "@/lib/api-log";
 import { nextNumber } from "@/lib/numbering";
@@ -15,9 +19,20 @@ import type { BomLine } from "@/lib/onshape/bom";
  * resolved against the model's own rules, keyed by Onshape's configuration
  * string, and either served from PLM or generated once in the background and
  * kept. See docs/CONFIGURATOR-DESIGN.md — phase 1 renders the picture, phase 2
- * reads the configuration's BOM and keeps it as a snapshot; PLM parts and the
- * 3D model come in later phases.
+ * reads the configuration's BOM and keeps it as a snapshot, phase 3 grows
+ * PLM's BOM from it: the configuration becomes a PLM assembly numbered from
+ * the CFG scheme, each BOM line a PLM part (reused when PLM has it), with this
+ * configuration's quantities on its own edges. Numbers stay in PLM — nothing
+ * is written back to Onshape (decided 10 Nov 2026). The 3D model is phase 4.
  */
+
+/**
+ * Why a configurator-made part is never written to Onshape. Set as the part's
+ * writeBackBlocked, which every write-back path already honours — including
+ * deletion, so a reset touches nothing in Onshape either.
+ */
+export const NO_WRITE_BACK =
+  "Made by the configurator — numbered in PLM only; nothing is written back to Onshape.";
 
 /** One position in a configuration's BOM, as kept on the item. */
 export type ConfiguredBomLine = {
@@ -31,6 +46,13 @@ export type ConfiguredBomLine = {
   elementId: string | null;
   partId: string | null;
   configuration: string | null;
+  /** Where the row's part is read from. Absent on phase-2 snapshots. */
+  workspaceId?: string | null;
+  versionId?: string | null;
+  /** Phase 3: the PLM part this line is, and whether this configuration added it. */
+  plmPartId?: string | null;
+  plmNumber?: string | null;
+  added?: boolean;
 };
 
 export function toBomSnapshot(lines: BomLine[]): ConfiguredBomLine[] {
@@ -40,6 +62,7 @@ export function toBomSnapshot(lines: BomLine[]): ConfiguredBomLine[] {
     kind: !l.source ? "other" : l.isAssembly ? "assembly" : "part",
     documentId: l.source?.documentId ?? null, elementId: l.source?.elementId ?? null,
     partId: l.source?.partId ?? null, configuration: l.source?.configuration ?? null,
+    workspaceId: l.source?.workspaceId ?? null, versionId: l.source?.versionId ?? null,
   }));
 }
 
@@ -202,6 +225,8 @@ function shapeItem(i: any) {
     values: i.values ?? {}, summary: i.summary, state: i.state, step: i.step, error: i.error,
     hasPicture: Boolean(i.hasPicture),
     bom: (i.bom ?? null) as ConfiguredBomLine[] | null, bomError: i.bomError ?? null, bomFetchedAt: i.bomFetchedAt ?? null,
+    partId: i.partId ? String(i.partId) : null, plmError: i.plmError ?? null,
+    addedParts: (i.addedPartIds ?? []).length,
     requestCount: i.requestCount ?? 1, requestedByEmail: i.requestedByEmail,
     lastRequestedAt: i.lastRequestedAt, generatedAt: i.generatedAt, elapsedMs: i.elapsedMs,
   };
@@ -296,19 +321,24 @@ export async function requestConfiguration(
   // Ready but without its BOM: generated before phase 2, or the BOM read
   // failed after the picture worked. The picture is kept; only the BOM is
   // asked for. A failed BOM read is retried only on request, like a failure.
-  const bomOnly = item.state === "ready" && !item.bom && (!item.bomError || opts.retry);
+  const bomMissing = item.state === "ready" && !item.bom && (!item.bomError || opts.retry);
+  // Ready with a BOM but not yet in PLM: generated before phase 3, or adding
+  // it failed. Only that step runs.
+  const plmMissing = item.state === "ready" && item.bom && !item.partId && (!item.plmError || opts.retry);
+  const bomOnly = bomMissing || plmMissing;
 
   if (fresh || lost || again || bomOnly) {
     if (!fresh) {
       await ConfiguredItem.updateOne(
         { _id: item._id },
         { $set: {
-          state: "queued", step: bomOnly ? "Waiting to read the BOM" : "Waiting to generate",
-          error: null, bomError: null, startedAt: null,
+          state: "queued",
+          step: bomMissing ? "Waiting to read the BOM" : plmMissing ? "Waiting to add it to PLM" : "Waiting to generate",
+          error: null, bomError: null, plmError: null, startedAt: null,
         } }
       );
     }
-    const job = enqueue(String(item._id), () => generate(enterpriseId, String(item._id), model, client));
+    const job = enqueue(String(item._id), () => generate(enterpriseId, String(item._id), model, client, actor));
     if (opts.wait) await job;
   }
 
@@ -342,7 +372,7 @@ function pump() {
   }
 }
 
-async function generate(enterpriseId: string, itemId: string, model: any, client: OnshapeClient) {
+async function generate(enterpriseId: string, itemId: string, model: any, client: OnshapeClient, actor: Actor) {
   const started = Date.now();
   const coords = (configuration: string) => ({
     documentId: model.documentId, elementId: model.elementId,
@@ -383,7 +413,9 @@ async function generate(enterpriseId: string, itemId: string, model: any, client
 
     // Then the BOM. Its failure does not undo a good picture: the item is
     // ready, says why its BOM is missing, and can be asked again.
-    if (!item.bom) {
+    let bom: ConfiguredBomLine[] | null = item.bom ?? null;
+    const bomWasRead = !bom;
+    if (!bom) {
       await ConfiguredItem.updateOne(
         { _id: itemId },
         { $set: { state: "generating", step: "Reading the BOM", ...(hasPicture ? { startedAt: new Date() } : {}) } }
@@ -391,16 +423,271 @@ async function generate(enterpriseId: string, itemId: string, model: any, client
       let set: Record<string, unknown>;
       try {
         const table = await client.getAssemblyBom(coords(item.key), { multiLevel: true });
-        set = { bom: toBomSnapshot(table.lines), bomError: null, bomFetchedAt: new Date() };
+        bom = toBomSnapshot(table.lines);
+        set = { bom, bomError: null, bomFetchedAt: new Date() };
       } catch (err: any) {
         const message = String(err?.message ?? err);
         console.warn(`[PLM] configurator: reading the BOM of ${itemId} failed: ${message}`);
         set = { bomError: message };
       }
-      if (!hasPicture) set.elapsedMs = Date.now() - started;
-      await ConfiguredItem.updateOne({ _id: itemId }, { $set: { ...set, state: "ready", step: "", error: null } });
-    } else {
-      await ConfiguredItem.updateOne({ _id: itemId }, { $set: { state: "ready", step: "", error: null } });
+      await ConfiguredItem.updateOne({ _id: itemId }, { $set: set });
     }
+
+    // Then PLM's BOM (phase 3). Like the BOM read, a failure here leaves the
+    // picture and the snapshot standing, says why, and is retried on request.
+    const inPlm = Boolean(await ConfiguredItem.exists({ _id: itemId, partId: { $ne: null } }));
+    // Also after a fresh read of an item already in PLM: the new snapshot has
+    // to learn its PLM parts again. Every step is find-or-create, so nothing
+    // is made twice.
+    if (bom && (!inPlm || bomWasRead)) {
+      await ConfiguredItem.updateOne({ _id: itemId }, { $set: { state: "generating", step: "Adding to PLM" } });
+      try {
+        await addToPlm(enterpriseId, itemId, model, client, actor, bom);
+      } catch (err: any) {
+        const message = String(err?.message ?? err);
+        console.warn(`[PLM] configurator: adding ${itemId} to PLM failed: ${message}`);
+        await ConfiguredItem.updateOne({ _id: itemId }, { $set: { plmError: message } });
+      }
+    }
+
+    await ConfiguredItem.updateOne(
+      { _id: itemId },
+      { $set: { state: "ready", step: "", error: null, ...(hasPicture ? {} : { elapsedMs: Date.now() - started }) } }
+    );
   }, { subject: model.name, newRun: true });
+}
+
+/* ----------------------------- Growing the BOM ---------------------------- */
+
+/**
+ * Turn one configuration's BOM into PLM's: §4.4 of the design.
+ *
+ * - Every document the BOM reaches is marked distinct first, so the parts are
+ *   keyed by their own configuration — the 700 mm Base is not the 1000 mm one.
+ * - Each line is looked up by (document, tab, part, configuration) and reused;
+ *   the latch is one PLM part however many cases use it. A part PLM held under
+ *   "default" before its document was distinct, with the same number Onshape
+ *   reports for this configuration, is re-keyed rather than duplicated (§8).
+ * - A line PLM does not have is created as a sync creates one — adopting
+ *   Onshape's number, or issuing the next — but never written back.
+ * - The configuration itself is a PLM assembly with the CFG number, its own
+ *   parent, so its quantities are its own edges (Hinge Pin × 4 here, × 2 in
+ *   a smaller case) — which one edge per parent and child could not hold.
+ */
+async function addToPlm(
+  enterpriseId: string, itemId: string, model: any, client: OnshapeClient, actor: Actor, snapshot: ConfiguredBomLine[]
+) {
+  const item: any = await ConfiguredItem.findById(itemId).select("key number summary picture pictureType").lean();
+  let bom = snapshot;
+  // A phase-2 snapshot does not say where each row is read from; read it again.
+  if (bom.some((l) => l.kind !== "other" && l.workspaceId === undefined && l.versionId === undefined)) {
+    const table = await client.getAssemblyBom(
+      { documentId: model.documentId, elementId: model.elementId, versionId: model.versionId, workspaceId: model.workspaceId, configuration: item.key },
+      { multiLevel: true }
+    );
+    bom = toBomSnapshot(table.lines);
+  }
+
+  const documents = new Set<string>([model.documentId]);
+  for (const l of bom) if (l.documentId) documents.add(l.documentId);
+  await Enterprise.updateOne({ _id: enterpriseId }, { $addToSet: { distinctConfigurationDocuments: { $each: [...documents] } } });
+  const normalize = await configurationNormalizer(enterpriseId);
+
+  // The configured assembly.
+  const topIdentity = {
+    enterpriseId, documentId: model.documentId, elementId: model.elementId, partId: "",
+    configuration: normalize(item.key, model.documentId),
+  };
+  let top: any = await Part.findOne(topIdentity);
+  if (!top) {
+    const product = (model.productId ? await resolveProductById(enterpriseId, String(model.productId)) : null)
+      ?? (await resolveUnassignedProduct(enterpriseId));
+    const defs = await listDefinitions(enterpriseId, "PART");
+    const attributes: Record<string, unknown> = {};
+    for (const d of defs) if (d.defaultValue != null) attributes[d.key] = d.defaultValue;
+    Object.assign(attributes, { number: item.number, name: model.name, description: item.summary });
+    top = await Part.create({
+      ...topIdentity,
+      kind: "assembly", number: item.number, name: model.name, attributes,
+      lifecycleState: "In Work", iteration: 1,
+      versionId: model.versionId ?? null, workspaceId: model.workspaceId ?? null,
+      documentName: model.documentName, elementName: model.elementName,
+      productId: product.productId, productName: product.productName,
+      createdByUserId: actor.userId, createdByEmail: actor.email,
+      writeBackBlocked: NO_WRITE_BACK,
+      configuredFrom: { modelId: model._id, configuredItemId: itemId },
+      firstSyncedAt: new Date(),
+    });
+    await PartIteration.create({
+      enterpriseId, partId: top._id, iteration: 1, revision: "", lifecycleState: "In Work",
+      attributes, onshapeVersionId: model.versionId ?? null, cause: "sync", changedKeys: [],
+      createdByEmail: actor.email, releaseId: null,
+    }).catch(() => {});
+    if (item.picture) {
+      await PartThumbnail.updateOne(
+        { partId: top._id },
+        { $set: { enterpriseId, contentType: item.pictureType || "image/png", data: item.picture, fetchedAt: new Date(), failedAt: null, failureReason: null } },
+        { upsert: true }
+      );
+    }
+  }
+
+  // Each line, parents before children (BOM order already is).
+  const added: string[] = [];
+  const parentAt: (string | null)[] = [];
+  const edges = new Map<string, { parent: string; child: string; quantity: number }>();
+  for (const l of bom) {
+    if (l.kind === "other" || !l.documentId || !l.elementId) {
+      parentAt[l.level] = null;
+      continue;
+    }
+    const configuration = normalize(l.configuration, l.documentId);
+    const identity = { enterpriseId, documentId: l.documentId, elementId: l.elementId, partId: l.partId || "", configuration };
+    let part: any = await Part.findOne(identity).select("_id number").lean();
+    if (!part && configuration !== "default" && l.partNumber) {
+      const legacy: any = await Part.findOne({ ...identity, configuration: "default" }).select("_id number").lean();
+      if (legacy && legacy.number === l.partNumber) {
+        await Part.updateOne({ _id: legacy._id }, { $set: { configuration } });
+        part = legacy;
+      }
+    }
+    if (!part) {
+      const coords = {
+        documentId: l.documentId, elementId: l.elementId, partId: l.partId || "", configuration: l.configuration ?? "default",
+        workspaceId: l.workspaceId ?? null, versionId: l.versionId ?? null,
+      };
+      const r = await syncPartFromOnshape(enterpriseId, coords, {
+        trigger: "configurator", client, create: true, kind: l.kind === "assembly" ? "assembly" : "part",
+        productId: model.productId ? String(model.productId) : null,
+        createdBy: actor, writeBackBlocked: NO_WRITE_BACK,
+        metadataFallback: {
+          coords, documentName: model.documentName, elementName: `${model.elementName} (configurator BOM)`,
+          partName: l.name, partNumber: l.partNumber, revision: "", description: l.description,
+          material: "", state: "", vendor: "", project: "", raw: {}, definitions: [], properties: [],
+        },
+      });
+      if (!r.partId) throw new Error(`Could not add "${l.name}" to PLM (${r.action}).`);
+      part = await Part.findById(r.partId).select("_id number").lean();
+      if (r.action === "created") {
+        await Part.updateOne({ _id: r.partId }, { $set: { configuredFrom: { modelId: model._id, configuredItemId: null } } });
+        added.push(String(r.partId));
+      }
+    }
+    l.plmPartId = String(part._id);
+    l.plmNumber = part.number ?? null;
+    l.added = added.includes(String(part._id));
+
+    const parent = l.level === 0 ? String(top._id) : parentAt[l.level - 1];
+    parentAt[l.level] = String(part._id);
+    parentAt.length = l.level + 1;
+    if (parent && parent !== String(part._id)) {
+      const key = `${parent}:${part._id}`;
+      const e = edges.get(key);
+      if (e) e.quantity += l.quantity;
+      else edges.set(key, { parent, child: String(part._id), quantity: l.quantity });
+    }
+  }
+  for (const e of edges.values()) {
+    await upsertBomLink(enterpriseId, e.parent, e.child, e.quantity, { documentId: model.documentId, elementId: model.elementId });
+  }
+
+  await ConfiguredItem.updateOne(
+    { _id: itemId },
+    { $set: { bom, partId: top._id, plmError: null, plmAt: new Date() }, $addToSet: { addedPartIds: { $each: added } } }
+  );
+  await ActivityLog.create({
+    enterpriseId, partId: top._id, direction: "plm", action: "created", trigger: "configurator", ok: true,
+    message: `Configurator: ${item.number} (${item.summary}) is in PLM with ${edges.size} BOM lines; ` +
+      `${added.length} new part${added.length === 1 ? "" : "s"}.`,
+  });
+}
+
+/* --------------------------------- Reset --------------------------------- */
+
+/** What resetting a model would remove: its configurations and the PLM parts made for them. */
+export async function resetPreview(enterpriseId: string, modelId: string) {
+  await connectDb();
+  const model: any = await ConfigurableModel.findOne({ _id: modelId, enterpriseId }).select("_id name").lean();
+  if (!model) return null;
+  const [configurations, parts] = await Promise.all([
+    ConfiguredItem.countDocuments({ enterpriseId, modelId: model._id }),
+    Part.countDocuments({ enterpriseId, "configuredFrom.modelId": model._id }),
+  ]);
+  return { name: model.name as string, configurations, parts };
+}
+
+export type ResetResult = {
+  configurations: number;
+  partsRemoved: number;
+  /** Parts the configurator made that stay: released, or used by something else. */
+  partsKept: { number: string; reason: string }[];
+  cfgCounterReset: boolean;
+};
+
+/**
+ * Start a model again from nothing, for demos: its configurations, their
+ * pictures and BOMs, the PLM assemblies and parts the configurator made for
+ * them, and — when no configuration of any model is left — the CFG counter.
+ *
+ * Never removed: a part PLM had before the configurator used it (the latch
+ * that was already there), a released part, or one something else now uses.
+ * Nothing in Onshape is touched; configurator parts are never written there.
+ */
+export async function resetModel(enterpriseId: string, modelId: string, actorEmail: string): Promise<ResetResult> {
+  await connectDb();
+  const model: any = await ConfigurableModel.findOne({ _id: modelId, enterpriseId }).lean();
+  if (!model) throw new ConfigurationError("Model not found.");
+  for (const id of [...running, ...waiting.map((w) => w.id)]) {
+    if (await ConfiguredItem.exists({ _id: id, modelId })) {
+      throw new ConfigurationError("A configuration of this model is generating. Try again when it has finished.");
+    }
+  }
+
+  const made: any[] = await Part.find({ enterpriseId, "configuredFrom.modelId": model._id })
+    .select("_id number revision").lean();
+  const kept = new Map<string, string>();
+  for (const p of made) if (p.revision) kept.set(String(p._id), `released at revision ${p.revision}`);
+
+  // A made part still used by a parent outside what is being removed stays —
+  // and so, in turn, may its own parents' removal change nothing below it.
+  for (;;) {
+    const going = new Set(made.map((p) => String(p._id)).filter((id) => !kept.has(id)));
+    const outside: any[] = await BomLink.find({ enterpriseId, childId: { $in: [...going] } }).select("parentId childId").lean();
+    let moved = false;
+    for (const e of outside) {
+      if (!going.has(String(e.parentId)) && !kept.has(String(e.childId))) {
+        const parentKept = made.find((p) => String(p._id) === String(e.parentId));
+        kept.set(String(e.childId), parentKept ? `inside ${parentKept.number}, which stays` : "used by another assembly");
+        moved = true;
+      }
+    }
+    if (!moved) break;
+  }
+  const going = made.filter((p) => !kept.has(String(p._id)));
+  const goingIds = going.map((p) => p._id);
+
+  await BomLink.deleteMany({ enterpriseId, parentId: { $in: goingIds } });
+  await BomLink.deleteMany({ enterpriseId, childId: { $in: goingIds } });
+  let partsRemoved = 0;
+  for (const p of going) {
+    const r = await deletePart(String(p._id), { trigger: "configurator-reset" });
+    if (r.ok) partsRemoved++;
+  }
+
+  const configurations = (await ConfiguredItem.deleteMany({ enterpriseId, modelId: model._id })).deletedCount ?? 0;
+  const cfgCounterReset = !(await ConfiguredItem.exists({ enterpriseId }));
+  if (cfgCounterReset) await NumberingSequence.updateOne({ enterpriseId, type: "CONFIGURATION" }, { $set: { counter: 0 } });
+
+  await ActivityLog.create({
+    enterpriseId, direction: "plm", action: "deleted", trigger: "configurator-reset", ok: true,
+    message: `${actorEmail} reset "${model.name}": ${configurations} configuration${configurations === 1 ? "" : "s"} ` +
+      `and ${partsRemoved} part${partsRemoved === 1 ? "" : "s"} removed` +
+      (kept.size ? `, ${kept.size} kept` : "") + (cfgCounterReset ? "; CFG numbering starts again at 1." : "."),
+  });
+
+  const numberOf = new Map(made.map((p) => [String(p._id), p.number]));
+  return {
+    configurations, partsRemoved, cfgCounterReset,
+    partsKept: [...kept].map(([id, reason]) => ({ number: numberOf.get(id) ?? id, reason })),
+  };
 }

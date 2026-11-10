@@ -611,9 +611,22 @@ Onshape assembly and see the result, without opening Onshape.
   without being rendered again. If Onshape does not return a BOM, the picture
   stays and *Try again* asks for the BOM only.
 
-This is phases 1–2 of docs/CONFIGURATOR-DESIGN.md: the picture and a read-only
-BOM. Nothing is created in PLM's parts yet — turning these BOMs into PLM parts
-with numbers, and the 3D model, follow.
+- **In PLM.** Each configuration becomes a PLM assembly numbered from the CFG
+  scheme, with this configuration's quantities, and every BOM line a PLM part:
+  reused when PLM already has it (the latch is one part in every case), created
+  otherwise — keeping Onshape's part number where there is one, or issuing the
+  next PLM number. A *new* badge marks the parts this configuration added; the
+  numbers link to the parts, and *Open CFG-… in PLM* to the assembly, whose page
+  links back to the configuration. Configurator numbers stay in PLM: nothing is
+  written back to Onshape.
+- **Reset** (admins), on the Configurator page: deletes every configuration of
+  the model and the PLM parts and assemblies the configurator made for them, and
+  starts CFG numbering again at CFG-00001 when no other model has
+  configurations. Parts PLM had before, released parts and parts used by
+  another assembly are kept. Meant for starting a demo again; it cannot be
+  undone.
+
+This is phases 1–3 of docs/CONFIGURATOR-DESIGN.md. The 3D model follows.
 
 ## The Onshape panels
 

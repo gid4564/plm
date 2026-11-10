@@ -37,7 +37,7 @@ export const GET = handler(async (req: Request) => {
 
   // Must match exactly how the sync engine keys the record, or the panel will
   // miss an existing object and create a second one.
-  const configuration = await normalizeConfiguration(s.enterpriseId, rawConfiguration);
+  const configuration = await normalizeConfiguration(s.enterpriseId, rawConfiguration, documentId);
   const identity = { enterpriseId: s.enterpriseId, documentId, elementId, partId, configuration };
   let part: any = await Part.findOne(identity).lean();
 

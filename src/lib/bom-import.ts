@@ -440,7 +440,7 @@ async function importBomLinesImpl(
    */
   const normalize = await configurationNormalizer(session.enterpriseId);
   const identityOf = (l: BomLine) =>
-    `${l.source!.documentId}:${l.source!.elementId}:${l.source!.partId}:${normalize(l.source!.configuration)}`;
+    `${l.source!.documentId}:${l.source!.elementId}:${l.source!.partId}:${normalize(l.source!.configuration, l.source!.documentId)}`;
 
   const claimed = new Map<string, BomLine>();
   const collisions = new Map<string, BomLine>();
@@ -470,7 +470,7 @@ async function importBomLinesImpl(
         documentId: assembly.documentId,
         elementId: assembly.elementId,
         partId: "",
-        configuration: coords.configuration ? normalize(coords.configuration) : "default",
+        configuration: coords.configuration ? normalize(coords.configuration, assembly.documentId) : "default",
         workspaceId: assembly.workspaceId,
         versionId: assembly.versionId,
       },
@@ -614,7 +614,7 @@ async function importBomLinesImpl(
       const already: any = await Part.findOne({
         enterpriseId: session.enterpriseId,
         documentId: src.documentId, elementId: src.elementId, partId: src.partId,
-        configuration: normalize(src.configuration),
+        configuration: normalize(src.configuration, src.documentId),
       }).select("_id number").lean();
 
       // Genuinely new AND not selected — left out, exactly as before.
@@ -895,7 +895,7 @@ export async function annotateTracked(
 
   for (const l of resolvable) {
     const src = l.source!;
-    const id = `${src.documentId}:${src.elementId}:${src.partId}:${normalize(src.configuration)}`;
+    const id = `${src.documentId}:${src.elementId}:${src.partId}:${normalize(src.configuration, src.documentId)}`;
     const bucket = byIdentity.get(id);
     if (bucket) bucket.push(l);
     else byIdentity.set(id, [l]);
@@ -908,7 +908,7 @@ export async function annotateTracked(
 
   for (const part of parts) {
     // Stored values predate canonical spelling, so both sides are normalised.
-    const id = `${part.documentId}:${part.elementId}:${part.partId}:${normalize(part.configuration)}`;
+    const id = `${part.documentId}:${part.elementId}:${part.partId}:${normalize(part.configuration, part.documentId)}`;
     for (const l of byIdentity.get(id) ?? []) {
       tracked.set(l.key, {
         partId: String(part._id),

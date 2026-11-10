@@ -83,6 +83,15 @@ const EnterpriseSchema = new Schema(
     ignoreConfigurations: { type: Boolean, default: true },
 
     /**
+     * Documents whose configurations are distinct PLM parts, whatever
+     * ignoreConfigurations says — a configured model's own document, and every
+     * document its configurations' BOMs reach (docs/CONFIGURATOR-DESIGN.md §6).
+     * Set automatically by the configurator; the 700 mm and the 1000 mm Base
+     * are different parts with different numbers.
+     */
+    distinctConfigurationDocuments: { type: [String], default: [] },
+
+    /**
      * The Onshape folder new documents go into when PLM creates one — see
      * lib/onshape-create.ts. Empty puts them at the top of the company's
      * documents, which works but scatters them; set once, by an admin.
@@ -739,6 +748,22 @@ const PartSchema = new Schema(
      * number. A body the import produced that no entry claims by name waits
      * in `unassignedBodies` for a person to place (state "map").
      */
+    /**
+     * Made by the configurator (docs/CONFIGURATOR-DESIGN.md §5).
+     *
+     * `configuredItemId` is set on a configured item's own assembly — its
+     * page links back to the choices that made it. `modelId` alone is set on
+     * a part the configurator created for a BOM line, so a demo reset of the
+     * model knows what it may remove; a part PLM had before is never marked.
+     */
+    configuredFrom: {
+      type: {
+        modelId: { type: Schema.Types.ObjectId, ref: "ConfigurableModel" },
+        configuredItemId: { type: Schema.Types.ObjectId, ref: "ConfiguredItem", default: null },
+      },
+      default: null,
+    },
+
     onshapeCreate: {
       type: {
         state: { type: String, enum: ["review", "running", "map", "failed", "done"], default: "running" },
@@ -1918,6 +1943,12 @@ const ConfiguredItemSchema = new Schema(
     bom: { type: Schema.Types.Mixed, default: null },
     bomError: { type: String, default: null },
     bomFetchedAt: { type: Date, default: null },
+    /** Phase 3: the configured assembly in PLM, and why it could not be made. */
+    partId: { type: Schema.Types.ObjectId, ref: "Part", default: null },
+    plmError: { type: String, default: null },
+    plmAt: { type: Date, default: null },
+    /** Parts this configuration added to PLM (the rest were already there). */
+    addedPartIds: { type: [Schema.Types.ObjectId], default: [] },
     requestedByEmail: { type: String, default: "" },
     requestCount: { type: Number, default: 1 },
     lastRequestedAt: { type: Date, default: () => new Date() },

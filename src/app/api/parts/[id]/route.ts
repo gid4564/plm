@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { connectDb } from "@/lib/db";
 import {
-  ActivityLog, BomLink, Drawing, Enterprise, Part, PartGeometry, PartIteration, Release,
+  ActivityLog, BomLink, ConfigurableModel, ConfiguredItem, Drawing, Enterprise, Part, PartGeometry, PartIteration, Release,
 } from "@/lib/models";
 import { requireSession } from "@/lib/auth/session";
 import {
@@ -156,9 +156,20 @@ export const GET = handler(async (_req: Request, ctx: Ctx) => {
     ).map((r: any) => [String(r._id), r.number as string])
   );
 
+  // A configured item's own assembly links back to the choices that made it.
+  let configured: { modelId: string; modelName: string; itemId: string; summary: string } | null = null;
+  if (part.configuredFrom?.configuredItemId) {
+    const [m, it]: any[] = await Promise.all([
+      ConfigurableModel.findById(part.configuredFrom.modelId).select("name").lean(),
+      ConfiguredItem.findById(part.configuredFrom.configuredItemId).select("summary").lean(),
+    ]);
+    if (m && it) configured = { modelId: String(m._id), modelName: m.name, itemId: String(it._id), summary: it.summary };
+  }
+
   return ok({
     part: {
       id: String(part._id),
+      configured,
       number: part.number,
       productId: part.productId ? String(part.productId) : null,
       productName: part.productName || "",

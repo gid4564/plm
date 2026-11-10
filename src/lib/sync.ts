@@ -29,9 +29,10 @@ import type { OnshapeClient, PartCoords, PartMetadata } from "@/lib/onshape/type
  */
 export async function normalizeConfiguration(
   enterpriseId: string,
-  raw: string | null | undefined
+  raw: string | null | undefined,
+  documentId?: string | null
 ): Promise<string> {
-  return (await configurationNormalizer(enterpriseId))(raw);
+  return (await configurationNormalizer(enterpriseId))(raw, documentId);
 }
 
 /**
@@ -97,16 +98,31 @@ export async function resolveHeldConfiguration(
 
 export async function configurationNormalizer(
   enterpriseId: string
-): Promise<(raw?: string | null) => string> {
+): Promise<(raw?: string | null, documentId?: string | null) => string> {
   const ent: any = await Enterprise.findById(enterpriseId).lean();
   const ignore = ent?.ignoreConfigurations !== false;
+  const distinct = new Set<string>((ent?.distinctConfigurationDocuments ?? []).map(String));
 
-  return (raw?: string | null) => {
+  return (raw?: string | null, documentId?: string | null) => {
     const v = String(raw ?? "").trim();
-    if (ignore) return "default";
+    const isDistinct = Boolean(documentId && distinct.has(documentId));
+    if (ignore && !isDistinct) return "default";
     if (!v || /^\{\$.*\}$/.test(v)) return "default";
-    return canonicalConfiguration(v) || "default";
+    // A distinct document's configurations are keyed with their float noise
+    // removed (§6): Onshape spells 350 mm "0.35000000000000003+meter", and
+    // one spelling arriving rounded would otherwise be a second part.
+    return (isDistinct ? stableNumbers(canonicalConfiguration(v)) : canonicalConfiguration(v)) || "default";
   };
+}
+
+/** "Depth=0.35000000000000003 meter" → "Depth=0.35 meter"; 12 significant digits. */
+export function stableNumbers(canonical: string): string {
+  return canonical.split(";").map((pair) => {
+    const i = pair.indexOf("=");
+    if (i < 0) return pair;
+    const value = pair.slice(i + 1).replace(/^(-?\d+\.\d+(?:e-?\d+)?)(?=$|\s)/i, (n) => String(Number(Number(n).toPrecision(12))));
+    return `${pair.slice(0, i)}=${value}`;
+  }).join(";");
 }
 
 /* -------------------------------------------------------------------------- */
@@ -401,7 +417,7 @@ async function syncPartFromOnshapeOnce(
   const mayCreate = opts.create === true;
   const client = opts.client ?? (await clientForEnterprise(enterpriseId)).client;
 
-  const configuration = await normalizeConfiguration(enterpriseId, coords.configuration);
+  const configuration = await normalizeConfiguration(enterpriseId, coords.configuration, coords.documentId);
   const identity = {
     enterpriseId,
     documentId: coords.documentId,

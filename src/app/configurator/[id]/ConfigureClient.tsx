@@ -13,12 +13,14 @@ type Model = {
 type BomRow = {
   level: number; quantity: number; partNumber: string; name: string; description: string;
   kind: "part" | "assembly" | "other"; configuration: string | null;
+  plmPartId?: string | null; plmNumber?: string | null; added?: boolean;
 };
 
 type Item = {
   id: string; number: string | null; summary: string; values: Values;
   state: "queued" | "generating" | "ready" | "failed"; step: string; error: string | null;
-  hasPicture: boolean; bom: BomRow[] | null; bomError: string | null; requestCount: number; generatedAt: string | null; elapsedMs: number | null;
+  hasPicture: boolean; bom: BomRow[] | null; bomError: string | null;
+  partId: string | null; plmError: string | null; addedParts: number; requestCount: number; generatedAt: string | null; elapsedMs: number | null;
   lastRequestedAt: string;
 };
 
@@ -38,8 +40,8 @@ function downloadCsv(item: Item) {
   const rows = item.bom ?? [];
   const nums = outline(rows);
   const q = (v: unknown) => `"${String(v ?? "").replace(/"/g, '""')}"`;
-  const csv = [["Item", "Quantity", "Part number", "Name", "Description", "Configuration"].map(q).join(",")]
-    .concat(rows.map((r, i) => [nums[i], r.quantity, r.partNumber, r.name, r.description, r.configuration ?? ""].map(q).join(",")))
+  const csv = [["Item", "Quantity", "PLM number", "Onshape part number", "Name", "Description", "Configuration"].map(q).join(",")]
+    .concat(rows.map((r, i) => [nums[i], r.quantity, r.plmNumber ?? "", r.partNumber, r.name, r.description, r.configuration ?? ""].map(q).join(",")))
     .join("\r\n");
   const a = document.createElement("a");
   a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
@@ -75,6 +77,20 @@ export function ConfigureClient({ id }: { id: string; isAdmin: boolean }) {
     setItems(j.items);
   }, [id]);
   useEffect(() => { void load(); }, [load]);
+
+  // Opened from a part page (?item=…): show that configuration and its choices.
+  useEffect(() => {
+    const wanted = new URLSearchParams(window.location.search).get("item");
+    if (!wanted) return;
+    void (async () => {
+      const r = await fetch(`/api/configurator/items/${wanted}`);
+      if (!r.ok) return;
+      const { item } = await r.json();
+      setGiven(item.values ?? {});
+      setCurrent(item);
+      setCached(true);
+    })();
+  }, []);
 
   const inputs = model?.inputs ?? [];
   const { values, visible } = useMemo(() => resolve(inputs, given), [inputs, given]);
@@ -284,14 +300,23 @@ function BomPanel({ item, busy, onRetry, onRead }: { item: Item; busy: boolean; 
   const nums = outline(rows);
   const parts = rows.filter((r) => r.kind === "part").length;
   const unnumbered = rows.filter((r) => r.kind !== "other" && !r.partNumber).length;
+  const inPlm = Boolean(item.partId);
   return (
     <div style={{ display: "grid", gap: 8, borderTop: "1px solid var(--border)", paddingTop: 10 }}>
       <div style={{ display: "flex", gap: 10, alignItems: "baseline", flexWrap: "wrap" }}>
         <h3 style={{ margin: 0, fontSize: 14 }}>Bill of materials</h3>
         {item.bom && (
           <span style={{ fontSize: 12, color: "var(--text-faint)" }}>
-            {rows.length} lines · {parts} parts{unnumbered ? ` · ${unnumbered} without a number in Onshape` : ""}
+            {rows.length} lines · {parts} parts
+            {inPlm
+              ? ` · ${item.addedParts} new to PLM`
+              : unnumbered ? ` · ${unnumbered} without a number in Onshape` : ""}
           </span>
+        )}
+        {inPlm && (
+          <Link href={`/parts/${item.partId}`} style={{ fontSize: 12.5, color: "var(--accent)" }}>
+            Open {item.number} in PLM →
+          </Link>
         )}
         {item.bom && (
           <button className="btn btn-sm" style={{ marginLeft: "auto" }} onClick={() => downloadCsv(item)}>Download CSV</button>
@@ -301,7 +326,7 @@ function BomPanel({ item, busy, onRetry, onRead }: { item: Item; busy: boolean; 
         <div style={{ overflowX: "auto" }}>
           <table className="table" style={{ width: "100%", fontSize: 12.5 }}>
             <thead>
-              <tr><th style={{ width: 50 }}>Item</th><th style={{ width: 50, textAlign: "right" }}>Qty</th><th>Part number</th><th>Name</th></tr>
+              <tr><th style={{ width: 50 }}>Item</th><th style={{ width: 50, textAlign: "right" }}>Qty</th><th>{inPlm ? "PLM number" : "Part number"}</th><th>Name</th></tr>
             </thead>
             <tbody>
               {rows.map((r, i) => (
@@ -309,7 +334,14 @@ function BomPanel({ item, busy, onRetry, onRead }: { item: Item; busy: boolean; 
                   style={{ color: r.kind === "other" ? "var(--text-faint)" : undefined }}>
                   <td className="mono">{nums[i]}</td>
                   <td style={{ textAlign: "right" }}>{r.quantity}</td>
-                  <td className="mono">{r.partNumber || <span style={{ color: "var(--text-faint)" }}>—</span>}</td>
+                  <td className="mono" title={r.plmNumber && r.partNumber && r.partNumber !== r.plmNumber ? `In Onshape: ${r.partNumber}` : undefined}>
+                    {r.plmPartId ? (
+                      <>
+                        <Link href={`/parts/${r.plmPartId}`} style={{ color: "var(--accent)" }}>{r.plmNumber || "—"}</Link>
+                        {r.added && <span className="badge" style={{ marginLeft: 6, fontSize: 10.5 }}>new</span>}
+                      </>
+                    ) : r.partNumber || <span style={{ color: "var(--text-faint)" }}>—</span>}
+                  </td>
                   <td style={{ paddingLeft: 8 + r.level * 18, fontWeight: r.kind === "assembly" ? 650 : undefined,
                     fontStyle: r.kind === "other" ? "italic" : undefined }}>
                     {r.name || "(unnamed)"}
@@ -320,7 +352,27 @@ function BomPanel({ item, busy, onRetry, onRead }: { item: Item; busy: boolean; 
             </tbody>
           </table>
         </div>
-      ) : reading ? (
+      ) : null}
+      {item.bom && !inPlm && reading && (
+        <div style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 12.5, color: "var(--text-muted)" }}>
+          <Spinner /> {item.step || "Adding to PLM…"}
+        </div>
+      )}
+      {item.bom && !inPlm && !reading && item.plmError && (
+        <Alert kind="warn">
+          This configuration could not be added to PLM: {item.plmError}
+          <div style={{ marginTop: 6 }}>
+            <button className="btn btn-sm" onClick={onRetry} disabled={busy}>Try again</button>
+          </div>
+        </Alert>
+      )}
+      {item.bom && !inPlm && !reading && !item.plmError && (
+        <div style={{ fontSize: 12.5, color: "var(--text-muted)" }}>
+          Not in PLM yet.{" "}
+          <button className="btn btn-sm" onClick={onRead} disabled={busy}>Add to PLM</button>
+        </div>
+      )}
+      {item.bom ? null : reading ? (
         <div style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 12.5, color: "var(--text-muted)" }}>
           <Spinner /> {item.step || "Reading the BOM…"}
         </div>

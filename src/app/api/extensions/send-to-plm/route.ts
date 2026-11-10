@@ -72,7 +72,7 @@ async function sendToPlm(req: Request): Promise<Response> {
 
   await connectDb();
   const enterpriseId = identity.enterpriseId;
-  const configuration = await normalizeConfiguration(enterpriseId, configurationRaw || "default");
+  const configuration = await normalizeConfiguration(enterpriseId, configurationRaw || "default", documentId);
 
   const existing: any = await Part.findOne({
     enterpriseId, documentId, elementId, partId: partId || "", configuration,

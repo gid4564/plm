@@ -17,6 +17,12 @@
  * the counts and sized parts of that configuration; an item made before its
  * BOM existed gets one without being rendered again; and a BOM that cannot be
  * read leaves a good picture alone, says why, and is retried only on request.
+ *
+ * Phase 3: the configuration becomes a PLM assembly with its CFG number and
+ * its own quantities; lines become PLM parts, reused across configurations
+ * and re-keyed from a "default" record PLM held before; nothing is written to
+ * Onshape. And a reset removes what the configurator made, keeps what PLM had
+ * before, and starts CFG numbering again.
  */
 process.env.MONGODB_URI ??= "mongodb://127.0.0.1:27017";
 process.env.MONGODB_DB ??= "plm_test";
@@ -24,11 +30,11 @@ process.env.ONSHAPE_MODE = "mock";
 process.env.MOCK_FAST = "1";
 
 import { connectDb } from "../src/lib/db";
-import { ActivityLog, ConfigurableModel, ConfiguredItem, Enterprise, NumberingSequence } from "../src/lib/models";
+import { ActivityLog, BomLink, ConfigurableModel, ConfiguredItem, Enterprise, NumberingSequence, Part, PartIteration, PartThumbnail, Product } from "../src/lib/models";
 import { MockOnshapeClient } from "../src/lib/onshape/mock-client";
 import { parseDefinition, resolve, summarize, toEncoding, validate } from "../src/lib/configurator-rules";
 import {
-  ConfigurationError, getItem, itemPicture, listItems, registerModel, requestConfiguration,
+  ConfigurationError, getItem, itemPicture, listItems, registerModel, requestConfiguration, resetModel, resetPreview,
 } from "../src/lib/configurator";
 import FLIGHT_CASE from "../src/lib/onshape/mock-configuration.json";
 
@@ -46,6 +52,11 @@ class CountingClient extends MockOnshapeClient {
   renders = 0;
   boms = 0;
   failBom = false;
+  writes = 0;
+  async updatePartProperties(...args: Parameters<MockOnshapeClient["updatePartProperties"]>) {
+    this.writes++;
+    return super.updatePartProperties(...args);
+  }
   async renderConfiguration(...args: Parameters<MockOnshapeClient["renderConfiguration"]>) {
     this.renders++;
     return super.renderConfiguration(...args);
@@ -120,7 +131,10 @@ async function main() {
   await connectDb();
   const stale: any = await Enterprise.findOne({ onshapeCompanyId: COMPANY }).lean();
   if (stale) {
-    for (const M of [ConfigurableModel, ConfiguredItem, ActivityLog, NumberingSequence]) {
+    const old = (await Part.find({ enterpriseId: stale._id }).select("_id").lean()).map((p: any) => p._id);
+    await PartThumbnail.deleteMany({ partId: { $in: old } });
+    await PartIteration.deleteMany({ partId: { $in: old } });
+    for (const M of [ConfigurableModel, ConfiguredItem, ActivityLog, NumberingSequence, Part, BomLink, Product]) {
       await (M as any).deleteMany({ enterpriseId: stale._id });
     }
     await Enterprise.deleteOne({ _id: stale._id });
@@ -128,6 +142,15 @@ async function main() {
   const ent: any = await Enterprise.create({ onshapeCompanyId: COMPANY, name: "Configurator Co" });
   const eid = String(ent._id);
   const client = new CountingClient(COMPANY);
+
+  // A part PLM already had before the configurator, keyed "default" as a
+  // panel sync would have: the Handle, with the number Onshape reports.
+  const DOC = "1c13dd44517cceffafef6ccd";
+  const handleEl = (6).toString(16).padStart(24, "c");
+  const before: any = await Part.create({
+    enterpriseId: eid, documentId: DOC, elementId: handleEl, partId: "JLD", configuration: "default",
+    kind: "part", number: "PRT012183", name: "Handle",
+  });
 
   console.log("\nRegistering a model");
   let refused = "";
@@ -252,6 +275,72 @@ async function main() {
   const recent = await listItems(eid, modelId);
   check("the model lists its configurations, newest request first", recent.length === 4 && recent[0].id === bad.item?.id,
     recent.map((x) => x.state).join(","));
+
+  /* -------------------------------------------------------------------- */
+  console.log("\nGrowing PLM's BOM");
+  const big = await getItem(eid, first.item!.id);
+  const top: any = await Part.findById(big?.partId).lean();
+  check("the configuration is a PLM assembly with its CFG number",
+    top?.kind === "assembly" && top?.number === big?.number && String(top?.configuredFrom?.configuredItemId) === big?.id,
+    `${top?.kind} ${top?.number} / ${big?.number}`);
+  check("with its picture as the thumbnail", Boolean(await PartThumbnail.exists({ partId: top?._id })));
+  const kids = async (parentId: unknown) => {
+    const links: any[] = await BomLink.find({ parentId }).lean();
+    const parts: any[] = await Part.find({ _id: { $in: links.map((l) => l.childId) } }).select("name number").lean();
+    return new Map(links.map((l) => [parts.find((p) => String(p._id) === String(l.childId))?.name, { qty: l.quantity, id: String(l.childId) }]));
+  };
+  const under = await kids(top?._id);
+  check("its own quantities on its own edges", under.get("Hinge Pin")?.qty === 4 && under.get("Latch Assembly")?.qty === 5,
+    JSON.stringify([...under]));
+  const latchKids = await kids(under.get("Latch Assembly")?.id);
+  check("subassemblies keep their parts", ["Button", "Button Pin", "Latch", "Latch Pin"].every((n) => latchKids.has(n)),
+    [...latchKids.keys()].join(", "));
+  check("a non-geometric line is not a part", !latchKids.has("N/A") && !(await Part.exists({ enterpriseId: eid, name: "N/A" })));
+  const bline = (it: any, n: string) => it?.bom?.find((l: any) => l.name === n);
+  check("Onshape's number is adopted", bline(big, "Latch")?.plmNumber === "PRT012181");
+  check("a part with none gets a PLM number", /^PN-\d+/.test(bline(big, "Base")?.plmNumber ?? ""), bline(big, "Base")?.plmNumber);
+  check("the Handle PLM already had is used, re-keyed to this configuration — not duplicated",
+    bline(big, "Handle")?.plmPartId === String(before._id) && bline(big, "Handle")?.added === false &&
+    (await Part.countDocuments({ enterpriseId: eid, number: "PRT012183" })) === 1,
+    JSON.stringify({ line: bline(big, "Handle"), before: String(before._id) }));
+  check("and is not marked as the configurator's", !(await Part.findById(before._id).lean() as any)?.configuredFrom);
+  const smallItem = await getItem(eid, p1.item!.id);
+  check("the latch is one PLM part in both configurations", bline(smallItem, "Latch")?.plmPartId === bline(big, "Latch")?.plmPartId);
+  check("the base is two", bline(smallItem, "Base")?.plmPartId !== bline(big, "Base")?.plmPartId);
+  check("the hinge pin is shared too, with each case's own quantity",
+    bline(smallItem, "Hinge Pin")?.plmPartId === bline(big, "Hinge Pin")?.plmPartId &&
+    (await kids(smallItem?.partId)).get("Hinge Pin")?.qty === 2 && (await kids(big?.partId)).get("Hinge Pin")?.qty === 4);
+  check("float noise does not make a second part",
+    (await Part.findById(bline(big, "Handle")?.plmPartId).lean() as any)?.configuration === "H=0.35 meter");
+  check("the model's document is now keyed by configuration",
+    ((await Enterprise.findById(eid).lean() as any)?.distinctConfigurationDocuments ?? []).includes(DOC));
+  check("nothing was written to Onshape", client.writes === 0, String(client.writes));
+  check("configurator parts are blocked from write-back",
+    (await Part.countDocuments({ enterpriseId: eid, "configuredFrom.modelId": modelId, writeBackBlocked: null })) === 0);
+
+  /* -------------------------------------------------------------------- */
+  console.log("\nStarting again");
+  // A part the configurator made, now also used by an assembly someone else built.
+  const elsewhere: any = await Part.create({ enterpriseId: eid, documentId: "d".repeat(24), elementId: "e".repeat(24), kind: "assembly", number: "AS-99999", name: "Other" });
+  await BomLink.create({ enterpriseId: eid, parentId: elsewhere._id, childId: bline(big, "Latch Assembly")?.plmPartId, quantity: 1 });
+  const preview = await resetPreview(eid, modelId);
+  check("the confirmation knows what it will remove", preview?.configurations === 4 && (preview?.parts ?? 0) > 10,
+    JSON.stringify(preview));
+  const reset = await resetModel(eid, modelId, actor.email);
+  check("every configuration is gone", (await ConfiguredItem.countDocuments({ modelId })) === 0 && reset.configurations === 4);
+  check("and the parts the configurator made, except an assembly something else uses — and what is inside it",
+    (await Part.countDocuments({ enterpriseId: eid, "configuredFrom.modelId": modelId })) === 5 &&
+    reset.partsKept.filter((k) => /another assembly/.test(k.reason)).length === 1 &&
+    reset.partsKept.filter((k) => /which stays/.test(k.reason)).length === 4,
+    JSON.stringify(reset.partsKept));
+  check("the part PLM had before stays", Boolean(await Part.exists({ _id: before._id })));
+  check("no edges are left pointing at removed parts",
+    (await BomLink.countDocuments({ enterpriseId: eid })) === 1 + (await BomLink.countDocuments({ parentId: bline(big, "Latch Assembly")?.plmPartId })));
+  check("CFG numbering starts again", reset.cfgCounterReset);
+  check("still nothing written to Onshape", client.writes === 0);
+  await ConfigurableModel.updateOne({ _id: modelId }, { $set: { enabled: true } });
+  const anew = await requestConfiguration(eid, actor, modelId, choice, { client, wait: true });
+  check("the next configuration is CFG-00001 again", (await getItem(eid, anew.item!.id))?.number === "CFG-00001");
 
   console.log(`\n${passed} passed, ${failed} failed`);
   process.exit(failed ? 1 : 0);

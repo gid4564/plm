@@ -5,9 +5,10 @@ sees the result, and gets a bill of materials for exactly that configuration.
 Each configuration is generated in Onshape once, kept in PLM, and served from
 PLM afterwards; every configuration generated adds its parts to PLM's BOM.
 
-Status: **phases 1–2 built** (configure, key, generate and cache the picture;
-read and keep each configuration's BOM as a snapshot — `src/lib/configurator*.ts`,
-`/configurator`); phases 3–4 not started. Building phase 2 found that PLM's BOM
+Status: **phases 1–3 built** (configure, key, generate and cache the picture;
+read and keep each configuration's BOM as a snapshot; grow PLM's BOM from it,
+numbering in PLM only — `src/lib/configurator*.ts`, `/configurator`), plus an
+admin **Reset** of a model for demos (§12); phase 4 not started. Building phase 2 found that PLM's BOM
 parser read the indent from the row, while the live `bomTable.items` shape
 carries it on `itemSource` — every indented BOM had come back flat; fixed in
 `lib/onshape/bom.ts` for the BOM import too. Grounded in a probe of a real configured
@@ -326,3 +327,33 @@ can be demonstrated before anything is numbered or written back.
 | Who may generate | **Anyone signed in** — this is a demo | No role check on Generate. The concurrency limit (§4.3) and the API usage page (§7) are the guard on spend. |
 | Internal or customer-facing | **Internal** | PLM's existing sign-in is enough; no public pages, no customer accounts. |
 | Distinct-configuration documents | **Automatic** | Registering a model marks its document; generating marks every document its BOM reaches, before any of those parts are keyed (§6). |
+
+## 11a. Decisions (10 Nov 2026)
+
+| Question | Decision | Consequence in this design |
+|---|---|---|
+| Write numbers back to Onshape (§4.5 step 2) | **PLM only for now** | A configurator part's number lives in PLM. Every part the configurator makes carries `writeBackBlocked`, so no write-back path (sync, edit, delete) touches Onshape. Onshape's own number is still adopted where it has one. §9.1 stays open until write-back is wanted. |
+| Demo reset | **Everything it made** | §12. |
+| Who may reset | **Admins** | Reset sits beside Switch off on the Configurator page, behind a confirmation that says what goes. |
+
+## 12. Reset (built 10 Nov 2026)
+
+For demos: start a model again from nothing. An admin's **Reset** removes
+
+- every configuration of the model — picture, BOM snapshot, number;
+- the PLM assemblies made for them (CFG numbers) and the PLM parts the
+  configurator created for their BOM lines (`Part.configuredFrom.modelId`),
+  with their edges, iterations and thumbnails;
+- and, when no configuration of any model is left, sets the CFG counter back
+  so the next one is CFG-00001 again.
+
+Kept: a part PLM had before the configurator used it (it is reused, never
+marked); a released part; a part some other assembly uses — and what is inside
+that part. Nothing in Onshape changes, because nothing was written there. The
+PART and ASSEMBLY counters are not reset: other parts share them.
+
+As built in phase 3 (§4.4): a "default" record PLM held before its document was
+marked distinct is re-keyed to the configuration when its number is the one
+Onshape reports for that configuration, rather than duplicated. Configuration
+strings in distinct documents are keyed with float noise rounded off (12
+significant digits — `stableNumbers` in `lib/sync.ts`).
