@@ -46,7 +46,8 @@ import FLIGHT_CASE from "../src/lib/onshape/mock-configuration.json";
 import { boxGlb, composeGlb, parseGltf, toColumnMajor } from "../src/lib/gltf-compose";
 import { PartGeometry } from "../src/lib/models";
 import { readGeometryBytes } from "../src/lib/geometry";
-import { nameItem } from "../src/lib/configurator";
+import { listModels, nameItem, setModelProduct } from "../src/lib/configurator";
+import { resolveProduct } from "../src/lib/products";
 
 let passed = 0, failed = 0;
 function check(label: string, cond: boolean, detail = "") {
@@ -150,6 +151,7 @@ async function main() {
   if (stale) {
     const old = (await Part.find({ enterpriseId: stale._id }).select("_id").lean()).map((p: any) => p._id);
     await PartThumbnail.deleteMany({ partId: { $in: old } });
+    await PartGeometry.deleteMany({ partId: { $in: old } });
     await PartIteration.deleteMany({ partId: { $in: old } });
     for (const M of [ConfigurableModel, ConfiguredItem, ActivityLog, NumberingSequence, Part, BomLink, Product]) {
       await (M as any).deleteMany({ enterpriseId: stale._id });
@@ -164,9 +166,12 @@ async function main() {
   // panel sync would have: the Handle, with the number Onshape reports.
   const DOC = "1c13dd44517cceffafef6ccd";
   const handleEl = (6).toString(16).padStart(24, "c");
+  // …filed, by someone, under a "Flight Case" product.
+  const flightCaseProduct = (await resolveProduct(eid, "Flight Case"))!;
   const before: any = await Part.create({
     enterpriseId: eid, documentId: DOC, elementId: handleEl, partId: "JLD", configuration: "default",
     kind: "part", number: "PRT012183", name: "Handle",
+    productId: flightCaseProduct.productId, productName: flightCaseProduct.productName,
   });
 
   console.log("\nRegistering a model");
@@ -332,6 +337,12 @@ async function main() {
   check("the model's document is now keyed by configuration",
     ((await Enterprise.findById(eid).lean() as any)?.distinctConfigurationDocuments ?? []).includes(DOC));
   check("nothing was written to Onshape", client.writes === 0, String(client.writes));
+  check("the configuration and its new parts are filed where the model's own parts are",
+    String(top?.productId) === flightCaseProduct.productId &&
+    (await Part.countDocuments({ enterpriseId: eid, "configuredFrom.modelId": modelId, productId: { $ne: flightCaseProduct.productId } })) === 0,
+    String(top?.productName));
+  check("which the models list says, as followed rather than chosen",
+    (await listModels(eid)).some((m) => m.productName === "Flight Case" && !m.productChosen));
   check("configurator parts are blocked from write-back",
     (await Part.countDocuments({ enterpriseId: eid, "configuredFrom.modelId": modelId, writeBackBlocked: null })) === 0);
 
@@ -380,6 +391,25 @@ async function main() {
   check("a part that will not export is left out, not the model", plItem?.hasModel === true && !plJson.nodes.some((n: any) => /Hinge/.test(n.name ?? "")),
     plItem?.modelError ?? "");
   client.failExport = null;
+
+  const partGeo = await PartGeometry.findOne({ partId: bline(big, "Base")?.plmPartId, revision: "" }).lean() as any;
+  check("each part keeps its own 3D model, from the same exports", !!partGeo && partGeo.size > 100 && !partGeo.failureReason);
+  check("the shared latch too", Boolean(await PartGeometry.exists({ partId: bline(big, "Latch")?.plmPartId, size: { $gt: 0 } })));
+  const exportsBefore = client.exports;
+  await ConfiguredItem.updateOne({ _id: first.item!.id }, { $set: { partModelsAt: null } });
+  await requestConfiguration(eid, actor, modelId, choice, { client, wait: true });
+  check("a configuration made before parts kept theirs catches up when next opened",
+    Boolean((await ConfiguredItem.findById(first.item!.id).lean() as any)?.partModelsAt) && client.exports > exportsBefore);
+
+  console.log("\nChoosing the model's product");
+  const other = (await resolveProduct(eid, "Cases 2027"))!;
+  const movedTo = await setModelProduct(eid, modelId, other.productId, actor);
+  check("moves what the configurator made", movedTo.moved > 10 &&
+    (await Part.countDocuments({ enterpriseId: eid, "configuredFrom.modelId": modelId, productId: { $ne: other.productId } })) === 0,
+    String(movedTo.moved));
+  check("but not the part PLM had before", String((await Part.findById(before._id).lean() as any)?.productId) === flightCaseProduct.productId);
+  check("and new configurations follow the choice",
+    (await listModels(eid)).some((m) => m.productName === "Cases 2027" && m.productChosen));
 
   console.log("\nNaming a configuration");
   const named = await nameItem(eid, first.item!.id, "  Touring   case ");

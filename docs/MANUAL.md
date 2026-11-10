@@ -629,7 +629,13 @@ Onshape assembly and see the result, without opening Onshape.
 - **3D.** Once a configuration is in PLM its 3D model is built — usually
   seconds after the BOM — and *3D* beside *Picture* turns it in the viewer.
   It is built from the configuration's own parts in their own sizes, and the
-  configured assembly's part page shows the same model.
+  configured assembly's part page shows the same model. Every part the
+  configuration adds to PLM keeps its own 3D model too, from the same exports.
+- **Product.** A model's configurations and their new parts are filed where
+  the model's own parts already are (the assembly as synced, or the product
+  most of the document's parts are in). An admin can choose the product under
+  *Files into* on the Configurator page; choosing one also moves everything the
+  configurator already made for that model.
 - **Names.** *Name it* beside the CFG number gives a configuration a name of
   your choosing ("Touring case, 1000 mm"); it shows in the gallery, and the
   configuration's PLM assembly takes it. Clear it to go back to the model's

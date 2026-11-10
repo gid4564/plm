@@ -1956,6 +1956,8 @@ const ConfiguredItemSchema = new Schema(
     modelAt: { type: Date, default: null },
     modelError: { type: String, default: null },
     modelMs: { type: Number, default: null },
+    /** When the parts' own 3D models were kept, from the same exports. */
+    partModelsAt: { type: Date, default: null },
     /** What someone called this configuration ("Touring case, 10 slots"); empty for none. */
     name: { type: String, default: "" },
     requestedByEmail: { type: String, default: "" },

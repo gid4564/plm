@@ -392,6 +392,19 @@ waited for. A part that will not export is left out and logged rather than
 losing the model. Configurations made before phase 4 get their model the next
 time they are opened.
 
+**Each part's own model.** The part exports the assembly model is built from
+are kept as each PLM part's geometry too (when it has none) — no further
+Onshape call. Configurator parts are `writeBackBlocked`, which elsewhere means
+"library part, no 3D"; the part page makes an exception for parts with
+`configuredFrom`. Items whose assembly model predates this catch up the next
+time they are opened (`partModelsAt`).
+
+**Product.** Configurations and their new parts are filed into the model's
+chosen product; with none chosen, into the product the model's own parts are
+in (the assembly as synced, else the product most of the document's parts
+belong to), else Unassigned. Choosing a product for a model moves everything
+the configurator made for it.
+
 **Names.** Any configuration can be named ("Touring case, 1000 mm"); its PLM
 assembly takes the name (PLM's own part — nothing goes to Onshape), and an
 empty name goes back to the model's.

@@ -1,8 +1,9 @@
+import { Types } from "mongoose";
 import { connectDb } from "@/lib/db";
-import { ActivityLog, BomLink, ConfigurableModel, ConfiguredItem, Enterprise, NumberingSequence, Part, PartIteration, PartThumbnail } from "@/lib/models";
+import { ActivityLog, BomLink, ConfigurableModel, ConfiguredItem, Enterprise, NumberingSequence, Part, PartGeometry, PartIteration, PartThumbnail } from "@/lib/models";
 import { configurationNormalizer, deletePart, syncPartFromOnshape } from "@/lib/sync";
 import { listDefinitions } from "@/lib/attributes";
-import { resolveProductById, resolveUnassignedProduct } from "@/lib/products";
+import { assignParts, resolveProductById, resolveUnassignedProduct, type ResolvedProduct } from "@/lib/products";
 import { upsertBomLink } from "@/lib/bom-import";
 import { clientForEnterprise } from "@/lib/onshape/factory";
 import { withApiProcess } from "@/lib/api-log";
@@ -199,7 +200,57 @@ export async function listModels(enterpriseId: string) {
     { $group: { _id: "$modelId", n: { $sum: 1 } } },
   ]);
   const by = new Map(counts.map((c: any) => [String(c._id), c.n]));
-  return rows.map((m) => ({ ...shapeModel(m), configurations: by.get(String(m._id)) ?? 0 }));
+  return Promise.all(rows.map(async (m) => {
+    const product = await productFor(enterpriseId, m);
+    return {
+      ...shapeModel(m), configurations: by.get(String(m._id)) ?? 0,
+      productId: product.productId, productName: product.productName, productChosen: Boolean(m.productId),
+    };
+  }));
+}
+
+/**
+ * The product a model's configurations and their new parts are filed into.
+ *
+ * The one an admin chose for the model; otherwise the one the model's own
+ * parts are already in — the assembly itself as synced from Onshape, or else
+ * the product most of the document's parts belong to — so a Flight Case whose
+ * parts someone filed under "Flight Case" keeps growing there. Unassigned only
+ * when PLM has nothing to go on.
+ */
+export async function productFor(enterpriseId: string, model: any): Promise<ResolvedProduct> {
+  if (model.productId) {
+    const chosen = await resolveProductById(enterpriseId, String(model.productId));
+    if (chosen) return chosen;
+  }
+  const unassigned = await resolveUnassignedProduct(enterpriseId);
+  const filed = { enterpriseId, documentId: model.documentId, configuredFrom: null, productId: { $nin: [null, unassigned.productId] } };
+  const own: any = await Part.findOne({ ...filed, elementId: model.elementId, partId: "" }).select("productId").lean();
+  if (own?.productId) return (await resolveProductById(enterpriseId, String(own.productId))) ?? unassigned;
+  const [most]: any[] = await Part.aggregate([
+    { $match: { ...filed, enterpriseId: new Types.ObjectId(enterpriseId), productId: { $nin: [null, new Types.ObjectId(unassigned.productId)] } } },
+    { $group: { _id: "$productId", n: { $sum: 1 } } },
+    { $sort: { n: -1 } },
+    { $limit: 1 },
+  ]);
+  if (most?._id) return (await resolveProductById(enterpriseId, String(most._id))) ?? unassigned;
+  return unassigned;
+}
+
+/**
+ * Choose the product a model files into, and move what the configurator has
+ * already made for it — the configured assemblies and the parts created for
+ * their BOMs — there too. Parts PLM had before stay where they are. Admin.
+ */
+export async function setModelProduct(enterpriseId: string, modelId: string, productId: string, actor: Actor) {
+  await connectDb();
+  const product = await resolveProductById(enterpriseId, productId);
+  if (!product) throw new ConfigurationError("That product does not exist.");
+  const r = await ConfigurableModel.updateOne({ _id: modelId, enterpriseId }, { $set: { productId: product.productId } });
+  if (r.matchedCount === 0) throw new ConfigurationError("Model not found.");
+  const made = await Part.find({ enterpriseId, "configuredFrom.modelId": modelId }).select("_id").lean();
+  const { moved } = await assignParts(enterpriseId, made.map((p: any) => String(p._id)), product.productId, actor);
+  return { productId: product.productId, productName: product.productName, moved };
 }
 
 function shapeModel(m: any) {
@@ -336,7 +387,7 @@ export async function requestConfiguration(
   const plmMissing = item.state === "ready" && item.bom && !item.partId && (!item.plmError || opts.retry);
   // In PLM but without its 3D model: generated before phase 4, or building
   // it failed. Only that step runs.
-  const modelMissing = item.state === "ready" && item.partId && !item.modelAt && (!item.modelError || opts.retry);
+  const modelMissing = item.state === "ready" && item.partId && (!item.modelAt || !item.partModelsAt) && (!item.modelError || opts.retry);
   const bomOnly = bomMissing || plmMissing || modelMissing;
 
   if (fresh || lost || again || bomOnly) {
@@ -466,17 +517,29 @@ async function generate(enterpriseId: string, itemId: string, model: any, client
     // Last, the 3D model (phase 4) — the slowest step, and the least waited
     // for: the picture and the BOM are already on screen. Kept as the
     // configured assembly's geometry, so it needs that assembly first.
-    const done: any = await ConfiguredItem.findById(itemId).select("partId modelAt key").lean();
-    if (done?.partId && !done.modelAt) {
+    // The parts' own models come from the same exports, so an item whose
+    // assembly model predates them (or whose parts lost theirs) runs it again.
+    const done: any = await ConfiguredItem.findById(itemId).select("partId modelAt partModelsAt key").lean();
+    if (done?.partId && (!done.modelAt || !done.partModelsAt)) {
       await ConfiguredItem.updateOne({ _id: itemId }, { $set: { state: "generating", step: "Building the 3D model" } });
       const t0 = Date.now();
+      let parts: PartExports | null = null;
       const r = await captureWorkspaceGeometry(client, enterpriseId, String(done.partId), {
         documentId: model.documentId, elementId: model.elementId, partId: "", configuration: done.key,
         versionId: model.versionId ?? null, workspaceId: model.workspaceId ?? null,
-      }, { isAssembly: true, produce: () => buildModel(client, model, done.key) });
+      }, {
+        isAssembly: true,
+        produce: async () => { const b = await buildModel(client, model, done.key); parts = b.parts; return b.file; },
+      });
+      if (r.ok && parts) {
+        await ConfiguredItem.updateOne({ _id: itemId }, { $set: { step: "Keeping each part's 3D model" } });
+        await storePartModels(enterpriseId, client, model, parts);
+      }
       await ConfiguredItem.updateOne(
         { _id: itemId },
-        { $set: r.ok ? { modelAt: new Date(), modelError: null, modelMs: Date.now() - t0 } : { modelError: r.reason } }
+        { $set: r.ok
+          ? { modelAt: new Date(), partModelsAt: new Date(), modelError: null, modelMs: Date.now() - t0 }
+          : { modelError: r.reason } }
       );
       if (!r.ok) console.warn(`[PLM] configurator: the 3D model of ${itemId} failed: ${r.reason}`);
     }
@@ -497,7 +560,11 @@ async function generate(enterpriseId: string, itemId: string, model: any, client
  * cannot be exported is left out and named — a model missing one pin is more
  * use than no model.
  */
-export async function buildModel(client: OnshapeClient, model: any, key: string): Promise<FileExport> {
+export type PartExports = Map<string, { inst: AssemblyInstance; data: Buffer; configuration: string }>;
+
+export async function buildModel(
+  client: OnshapeClient, model: any, key: string
+): Promise<{ file: FileExport; parts: PartExports }> {
   const started = Date.now();
   const def: AssemblyDefinition = await client.getAssemblyDefinition({
     documentId: model.documentId, elementId: model.elementId,
@@ -536,6 +603,7 @@ export async function buildModel(client: OnshapeClient, model: any, key: string)
   if (!placements.length) throw new Error("The assembly definition has no visible parts to draw.");
 
   const exported = new Map<string, Buffer>();
+  const parts: PartExports = new Map();
   const missing: string[] = [];
   const queue = [...unique];
   await Promise.all(Array.from({ length: EXPORT_CONCURRENCY }, async () => {
@@ -550,6 +618,7 @@ export async function buildModel(client: OnshapeClient, model: any, key: string)
           versionId: sameDoc ? model.versionId ?? null : inst.documentVersion ?? null,
         }, { coarse: true });
         exported.set(k, out.data);
+        parts.set(k, { inst, data: out.data, configuration: cfgOf(inst) });
       } catch (err: any) {
         missing.push(`${inst.name} (${String(err?.message ?? err).slice(0, 120)})`);
       }
@@ -559,7 +628,33 @@ export async function buildModel(client: OnshapeClient, model: any, key: string)
   if (missing.length) console.warn(`[PLM] configurator: 3D model left out ${missing.length} part(s): ${missing.join("; ")}`);
 
   const data = composeGlb(exported, placements, model.name);
-  return { data, contentType: "model/gltf-binary", via: "direct", elapsedMs: Date.now() - started };
+  return { file: { data, contentType: "model/gltf-binary", via: "direct", elapsedMs: Date.now() - started }, parts };
+}
+
+/**
+ * Give each PLM part of the configuration its own 3D model, from the exports
+ * the assembly model was just built from — no further Onshape call. Only for
+ * a part that has none yet: a part shared by many configurations keeps the
+ * first, and one PLM had before keeps whatever it had.
+ */
+async function storePartModels(enterpriseId: string, client: OnshapeClient, model: any, parts: PartExports) {
+  const normalize = await configurationNormalizer(enterpriseId);
+  let stored = 0;
+  for (const { inst, data, configuration } of parts.values()) {
+    const part: any = await Part.findOne({
+      enterpriseId, documentId: inst.documentId, elementId: inst.elementId, partId: inst.partId,
+      configuration: normalize(configuration, inst.documentId),
+    }).select("_id").lean();
+    if (!part) continue;
+    const has = await PartGeometry.exists({ partId: part._id, size: { $gt: 0 }, failureReason: null });
+    if (has) continue;
+    const r = await captureWorkspaceGeometry(client, enterpriseId, String(part._id), {
+      documentId: inst.documentId, elementId: inst.elementId, partId: inst.partId!, configuration,
+      versionId: model.versionId ?? null, workspaceId: model.workspaceId ?? null,
+    }, { produce: async () => ({ data, contentType: "model/gltf-binary", via: "direct", elapsedMs: 0 }) });
+    if (r.ok) stored++;
+  }
+  return stored;
 }
 
 /* --------------------------------- Names --------------------------------- */
@@ -626,9 +721,8 @@ async function addToPlm(
     configuration: normalize(item.key, model.documentId),
   };
   let top: any = await Part.findOne(topIdentity);
+  const product = await productFor(enterpriseId, model);
   if (!top) {
-    const product = (model.productId ? await resolveProductById(enterpriseId, String(model.productId)) : null)
-      ?? (await resolveUnassignedProduct(enterpriseId));
     const defs = await listDefinitions(enterpriseId, "PART");
     const attributes: Record<string, unknown> = {};
     for (const d of defs) if (d.defaultValue != null) attributes[d.key] = d.defaultValue;
@@ -686,7 +780,7 @@ async function addToPlm(
       };
       const r = await syncPartFromOnshape(enterpriseId, coords, {
         trigger: "configurator", client, create: true, kind: l.kind === "assembly" ? "assembly" : "part",
-        productId: model.productId ? String(model.productId) : null,
+        productId: product.productId,
         createdBy: actor, writeBackBlocked: NO_WRITE_BACK,
         metadataFallback: {
           coords, documentName: model.documentName, elementName: `${model.elementName} (configurator BOM)`,

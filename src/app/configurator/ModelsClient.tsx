@@ -3,10 +3,12 @@
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import { Alert, Spinner, relTime } from "@/components/ui";
+import { ProductField } from "@/components/ProductField";
 
 type Model = {
   id: string; name: string; enabled: boolean; documentName: string; elementName: string;
   versionName: string; onVersion: boolean; configurations: number; createdAt: string;
+  productId: string; productName: string; productChosen: boolean;
 };
 
 type Preview = {
@@ -74,6 +76,17 @@ export function ModelsClient({ isAdmin }: { isAdmin: boolean }) {
     } finally {
       setBusy(null);
     }
+  }
+
+  async function fileInto(m: Model, productId: string, productName: string) {
+    setError(null); setNotice(null);
+    const r = await fetch(`/api/configurator/models/${m.id}`, {
+      method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ productId }),
+    });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || "Could not change the product");
+    setNotice(`"${m.name}" now files into ${productName}` + (j.moved ? `; ${j.moved} configurator part${j.moved === 1 ? "" : "s"} moved there.` : "."));
+    await load();
   }
 
   async function toggle(m: Model) {
@@ -157,6 +170,20 @@ export function ModelsClient({ isAdmin }: { isAdmin: boolean }) {
                 {m.configurations} configuration{m.configurations === 1 ? "" : "s"} generated
                 {!m.enabled && " · switched off"}
               </div>
+              {isAdmin ? (
+                <ProductField
+                  compact value={m.productChosen ? m.productId : null} label="Files into"
+                  emptyLabel={`Following its parts — ${m.productName}`}
+                  onChange={(id, name) => fileInto(m, id, name)}
+                />
+              ) : (
+                <div style={{ fontSize: 12, color: "var(--text-faint)" }}>Files into {m.productName}</div>
+              )}
+              {isAdmin && !m.productChosen && (
+                <div style={{ fontSize: 11.5, color: "var(--text-faint)", marginTop: -2 }}>
+                  Following where the model&apos;s own parts are filed. Choose one to fix it, and move what was already made.
+                </div>
+              )}
               <div style={{ display: "flex", gap: 8 }}>
                 <Link href={`/configurator/${m.id}`} className="btn btn-sm btn-primary">Configure</Link>
                 {isAdmin && (
