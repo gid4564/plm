@@ -22,6 +22,12 @@
  *
  *   node probe-configuration.mjs "<assembly URL>"
  *   node probe-configuration.mjs "<assembly URL>" --set "Size=Large" --set "Handles=true"
+ *   node probe-configuration.mjs "<assembly URL>" --gltf
+ *
+ * --gltf also exports each configuration as glTF (a translation job, nothing
+ * stored in the document), and reports how long it took, how big it is, and
+ * whether the two configurations' models differ — i.e. whether Onshape honoured
+ * the configuration.
  *
  * The URL is the one in the browser with the assembly tab open. Without
  * --set, the second configuration tried differs from the first in its first
@@ -38,6 +44,7 @@ const argv = process.argv.slice(2);
 const url = argv.find((a) => /\/documents\//.test(a));
 const sets = [];
 for (let i = 0; i < argv.length; i++) if (argv[i] === "--set" && argv[i + 1]) sets.push(argv[++i]);
+const wantGltf = argv.includes("--gltf");
 
 if (!url) {
   console.error('Usage: node probe-configuration.mjs "<Onshape assembly URL>" [--set "Input=Value" ...]');
@@ -139,6 +146,27 @@ async function call(method, p, body) {
   let json = null;
   try { json = text ? JSON.parse(text) : null; } catch { /* not JSON */ }
   return { status: res.status, ms: Date.now() - t0, json, text };
+}
+
+/** Export one configuration as glTF through a translation job; { status, ms, bytes, sha, text }. */
+async function gltfOf(configuration, cfgParam) {
+  const t0 = Date.now();
+  const q = cfgParam ? `?configuration=${cfgParam}` : "";
+  const sub = await call("POST", `/assemblies/d/${did}/${wv}/e/${eid}/export/gltf${q}`, {
+    configuration, excludeHiddenEntities: true, storeInDocument: false, notifyUser: false,
+  });
+  if (sub.status >= 300 || !sub.json?.id) return { status: sub.status, ms: Date.now() - t0, text: sub.text.slice(0, 300) };
+  let job = sub.json;
+  for (let i = 0; i < 120 && job.requestState === "ACTIVE"; i++) {
+    await new Promise((r) => setTimeout(r, i < 5 ? 1000 : 2000));
+    job = (await call("GET", `/translations/${sub.json.id}`)).json ?? job;
+  }
+  if (job.requestState !== "DONE") return { status: 0, ms: Date.now() - t0, text: `translation ${job.requestState}: ${job.failureReason ?? ""}` };
+  const ext = (job.resultExternalDataIds ?? [])[0];
+  const res = await fetch(`${API}/documents/d/${did}/externaldata/${ext}`, { headers: { Authorization: `Bearer ${token}` } });
+  const buf = Buffer.from(await res.arrayBuffer());
+  const { createHash } = await import("node:crypto");
+  return { status: res.status, ms: Date.now() - t0, bytes: buf.length, sha: createHash("sha256").update(buf).digest("hex").slice(0, 16), buf };
 }
 
 /** Every path in a payload whose key mentions visibility or a condition. */
@@ -347,7 +375,13 @@ try {
       console.log(`      ${"  ".repeat(r.indent)}${r.partNumber || "(no number)"}  ${r.name}  ×${r.quantity ?? "?"}${r.configuration && r.configuration !== "default" ? `  [cfg ${r.configuration.slice(0, 60)}]` : ""}`);
     }
     if (rows.length > 40) console.log(`      … ${rows.length - 40} more in bom-${label}.json`);
-    results.push({ label, rows });
+    let gltf = null;
+    if (wantGltf) {
+      gltf = await gltfOf(enc.json?.encodedId ?? "", cfgParam);
+      if (gltf.buf) save(`model-${label}.glb`, gltf.buf);
+      console.log(`    glTF -> ${gltf.status} in ${gltf.ms} ms` + (gltf.bytes ? `, ${(gltf.bytes / 1024).toFixed(0)} KB, sha ${gltf.sha}` : `: ${gltf.text}`));
+    }
+    results.push({ label, rows, gltf });
     console.log("");
   }
 
@@ -365,6 +399,11 @@ try {
   if (sameNumberDiffCfg.length) {
     console.log(`   ${sameNumberDiffCfg.length} part(s) change configuration but keep the SAME part number — ` +
       `Onshape's Part number is not configured for them, so PLM would have to number those variants itself.`);
+  }
+  if (wantGltf && a.gltf?.sha && b.gltf?.sha) {
+    console.log(a.gltf.sha === b.gltf.sha
+      ? "   glTF: the two configurations exported IDENTICAL models — the configuration was not honoured."
+      : "   glTF: the two configurations exported different models — the configuration was honoured.");
   }
   console.log(`\nEverything Onshape returned is in ${outDir}`);
 } catch (err) {

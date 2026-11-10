@@ -23,6 +23,12 @@
  * and re-keyed from a "default" record PLM held before; nothing is written to
  * Onshape. And a reset removes what the configurator made, keeps what PLM had
  * before, and starts CFG numbering again.
+ *
+ * Phase 4: the 3D model is composed from part exports — each distinct part
+ * exported once and drawn wherever the assembly places it, in this
+ * configuration's sizes; a part that will not export is left out rather than
+ * losing the model. And a configuration can be named, and its PLM assembly
+ * takes the name.
  */
 process.env.MONGODB_URI ??= "mongodb://127.0.0.1:27017";
 process.env.MONGODB_DB ??= "plm_test";
@@ -37,6 +43,10 @@ import {
   ConfigurationError, getItem, itemPicture, listItems, registerModel, requestConfiguration, resetModel, resetPreview,
 } from "../src/lib/configurator";
 import FLIGHT_CASE from "../src/lib/onshape/mock-configuration.json";
+import { boxGlb, composeGlb, parseGltf, toColumnMajor } from "../src/lib/gltf-compose";
+import { PartGeometry } from "../src/lib/models";
+import { readGeometryBytes } from "../src/lib/geometry";
+import { nameItem } from "../src/lib/configurator";
 
 let passed = 0, failed = 0;
 function check(label: string, cond: boolean, detail = "") {
@@ -53,6 +63,13 @@ class CountingClient extends MockOnshapeClient {
   boms = 0;
   failBom = false;
   writes = 0;
+  exports = 0;
+  failExport: string | null = null;
+  async exportGltf(...args: Parameters<MockOnshapeClient["exportGltf"]>) {
+    this.exports++;
+    if (this.failExport && args[0].partId === this.failExport) throw new Error("Onshape glTF: 500");
+    return super.exportGltf(...args);
+  }
   async updatePartProperties(...args: Parameters<MockOnshapeClient["updatePartProperties"]>) {
     this.writes++;
     return super.updatePartProperties(...args);
@@ -319,15 +336,69 @@ async function main() {
     (await Part.countDocuments({ enterpriseId: eid, "configuredFrom.modelId": modelId, writeBackBlocked: null })) === 0);
 
   /* -------------------------------------------------------------------- */
+  console.log("\nComposing a GLB");
+  {
+    const a = boxGlb([1, 1, 1]), b = boxGlb([2, 2, 2]);
+    const glb = composeGlb(new Map([["a", a], ["b", b]]), [
+      { key: "a", name: "A1", transform: [1, 0, 0, 5, 0, 1, 0, 6, 0, 0, 1, 7, 0, 0, 0, 1] },
+      { key: "a", name: "A2", transform: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1] },
+      { key: "b", name: "B1", transform: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1] },
+      { key: "gone", name: "X", transform: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1] },
+    ]);
+    const { json, bin } = parseGltf(glb);
+    check("one mesh per part, drawn once per placement", json.meshes.length === 2 && json.nodes[0].children.length === 3);
+    check("under one root that stands Onshape's Z-up scene upright", json.scenes[0].nodes.length === 1 && Math.abs(json.nodes[0].rotation[0] + Math.SQRT1_2) < 1e-9);
+    check("placements reuse the part's mesh", json.nodes.filter((n: any) => n.mesh === 0).length === 2);
+    check("Onshape's row-major transform becomes glTF's column-major", JSON.stringify(json.nodes[json.nodes[0].children[0]].matrix.slice(12, 15)) === "[5,6,7]");
+    check("the second part's data is offset past the first's",
+      json.bufferViews[3].byteOffset >= parseGltf(a).bin.length && bin.length === json.buffers[0].byteLength);
+    check("and its accessors point at its own views", json.accessors[3].bufferView === 3 && json.meshes[1].primitives[0].indices === 5);
+    check("column-major of identity is identity", JSON.stringify(toColumnMajor([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1])) === "[1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1]");
+  }
+
+  console.log("\nIts 3D model");
+  const geo: any = await PartGeometry.findOne({ partId: big?.partId, revision: "" }).lean();
+  check("built and kept as the configured assembly's geometry", big?.hasModel === true && !!geo && !geo.failureReason && geo.size > 1000,
+    `${big?.modelError ?? ""} ${geo?.failureReason ?? ""}`);
+  const model3d = parseGltf((await readGeometryBytes(geo))!);
+  check("every visible part placed: 3 shell, 4 hinges, 5 latches of 4, 3 handles of 3, 2 foam",
+    model3d.json.nodes[0].children.length === 3 + 4 + 20 + 9 + 2, String(model3d.json.nodes[0].children.length));
+  check("each distinct part exported once", model3d.json.meshes.length === 12, String(model3d.json.meshes.length));
+  const baseNode = model3d.json.nodes.find((n: any) => n.name === "Base");
+  const baseMesh = model3d.json.nodes[baseNode.children[0]].mesh;
+  const baseMax = model3d.json.accessors[model3d.json.meshes[baseMesh].primitives[0].attributes.POSITION].max;
+  check("in this configuration's size (the 700 mm base)", Math.abs(baseMax[0] - 0.35) < 1e-6, JSON.stringify(baseMax));
+  check("the 400 mm case has its own model", (await getItem(eid, p1.item!.id))?.hasModel === true);
+
+  await ConfigurableModel.updateOne({ _id: modelId }, { $set: { enabled: true } });
+  client.failExport = "RABD";
+  const pinless = { [by("Size").id]: by("Size").options[4].value };
+  const pl = await requestConfiguration(eid, actor, modelId, pinless, { client, wait: true });
+  const plItem = await getItem(eid, pl.item!.id);
+  const plGeo: any = await PartGeometry.findOne({ partId: plItem?.partId, revision: "" }).lean();
+  const plJson = parseGltf((await readGeometryBytes(plGeo))!).json;
+  check("a part that will not export is left out, not the model", plItem?.hasModel === true && !plJson.nodes.some((n: any) => /Hinge/.test(n.name ?? "")),
+    plItem?.modelError ?? "");
+  client.failExport = null;
+
+  console.log("\nNaming a configuration");
+  const named = await nameItem(eid, first.item!.id, "  Touring   case ");
+  check("kept, tidied", named?.name === "Touring case");
+  check("and the PLM assembly takes it", (await Part.findById(big?.partId).lean() as any)?.name === "Touring case");
+  await nameItem(eid, first.item!.id, "");
+  check("an empty name goes back to the model's", (await Part.findById(big?.partId).lean() as any)?.name === "Flight Case");
+
+  /* -------------------------------------------------------------------- */
   console.log("\nStarting again");
   // A part the configurator made, now also used by an assembly someone else built.
   const elsewhere: any = await Part.create({ enterpriseId: eid, documentId: "d".repeat(24), elementId: "e".repeat(24), kind: "assembly", number: "AS-99999", name: "Other" });
   await BomLink.create({ enterpriseId: eid, parentId: elsewhere._id, childId: bline(big, "Latch Assembly")?.plmPartId, quantity: 1 });
   const preview = await resetPreview(eid, modelId);
-  check("the confirmation knows what it will remove", preview?.configurations === 4 && (preview?.parts ?? 0) > 10,
+  check("the confirmation knows what it will remove", preview?.configurations === 5 && (preview?.parts ?? 0) > 10,
     JSON.stringify(preview));
   const reset = await resetModel(eid, modelId, actor.email);
-  check("every configuration is gone", (await ConfiguredItem.countDocuments({ modelId })) === 0 && reset.configurations === 4);
+  check("every configuration is gone", (await ConfiguredItem.countDocuments({ modelId })) === 0 && reset.configurations === 5);
+  check("and their 3D models", (await PartGeometry.countDocuments({ enterpriseId: eid, partId: { $in: [big?.partId, plItem?.partId] } })) === 0);
   check("and the parts the configurator made, except an assembly something else uses — and what is inside it",
     (await Part.countDocuments({ enterpriseId: eid, "configuredFrom.modelId": modelId })) === 5 &&
     reset.partsKept.filter((k) => /another assembly/.test(k.reason)).length === 1 &&

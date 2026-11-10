@@ -3,7 +3,7 @@ import { connectDb } from "@/lib/db";
 import { ActivityLog, Enterprise, Part, PartGeometry } from "@/lib/models";
 import { gridfsDelete, gridfsDownload, gridfsUpload } from "@/lib/gridfs";
 import { looksLikeZip, unpackGltfZip } from "@/lib/onshape/gltf-package";
-import type { OnshapeClient, PartCoords } from "@/lib/onshape/types";
+import type { FileExport, OnshapeClient, PartCoords } from "@/lib/onshape/types";
 
 /** The GridFS bucket every captured model larger than INLINE_GEOMETRY_BYTES lives in. */
 const GEOMETRY_BUCKET = "part-geometry";
@@ -157,7 +157,15 @@ async function captureReleasedGeometryImpl(
   enterpriseId: string,
   partId: string,
   coords: PartCoords,
-  opts: { revision: string; releaseId?: string | null; isAssembly?: boolean }
+  opts: {
+    revision: string; releaseId?: string | null; isAssembly?: boolean;
+    /**
+     * Where the model comes from, when not Onshape's own export of `coords` —
+     * the configurator composes one from part exports (lib/gltf-compose.ts).
+     * Everything after (size limit, format check, storage) is the same.
+     */
+    produce?: () => Promise<FileExport>;
+  }
 ): Promise<CaptureResult> {
   await connectDb();
 
@@ -194,7 +202,7 @@ async function captureReleasedGeometryImpl(
   };
 
   try {
-    const out = await client.exportGltf(coords, { isAssembly: opts.isAssembly });
+    const out = opts.produce ? await opts.produce() : await client.exportGltf(coords, { isAssembly: opts.isAssembly });
     let data = out.data;
     let repacked = false;
 
@@ -338,12 +346,13 @@ async function captureWorkspaceGeometryImpl(
   enterpriseId: string,
   partId: string,
   coords: PartCoords,
-  opts: { isAssembly?: boolean } = {}
+  opts: { isAssembly?: boolean; produce?: () => Promise<FileExport> } = {}
 ): Promise<CaptureResult> {
   return captureReleasedGeometry(client, enterpriseId, partId, coords, {
     revision: "",
     releaseId: null,
     isAssembly: opts.isAssembly,
+    produce: opts.produce,
   });
 }
 

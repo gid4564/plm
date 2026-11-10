@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import dynamic from "next/dynamic";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Alert, Spinner, relTime } from "@/components/ui";
 import { resolve, summarize, validate, type ConfigInput, type Values } from "@/lib/configurator-rules";
@@ -20,11 +21,18 @@ type Item = {
   id: string; number: string | null; summary: string; values: Values;
   state: "queued" | "generating" | "ready" | "failed"; step: string; error: string | null;
   hasPicture: boolean; bom: BomRow[] | null; bomError: string | null;
-  partId: string | null; plmError: string | null; addedParts: number; requestCount: number; generatedAt: string | null; elapsedMs: number | null;
+  partId: string | null; plmError: string | null; addedParts: number;
+  name: string; hasModel: boolean; modelError: string | null; modelMs: number | null; requestCount: number; generatedAt: string | null; elapsedMs: number | null;
   lastRequestedAt: string;
 };
 
 const POLL_MS = 2000;
+
+// three.js is large; only loaded when someone opens the 3D view.
+const ModelViewer = dynamic(() => import("@/components/ModelViewer").then((m) => m.ModelViewer), {
+  ssr: false,
+  loading: () => <div style={{ display: "grid", placeItems: "center", height: 460 }}><Spinner size={20} /></div>,
+});
 /** Outline numbers for an indented BOM: 1, 2, 2.1, 2.2, 3 — as Onshape's Item column. */
 function outline(rows: BomRow[]): string[] {
   const counters: number[] = [];
@@ -68,6 +76,8 @@ export function ConfigureClient({ id }: { id: string; isAdmin: boolean }) {
   const [error, setError] = useState<string | null>(null);
   const [serverFields, setServerFields] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState(false);
+  const [view, setView] = useState<"picture" | "3d">("picture");
+  const [naming, setNaming] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     const r = await fetch(`/api/configurator/models/${id}`);
@@ -134,6 +144,18 @@ export function ConfigureClient({ id }: { id: string; isAdmin: boolean }) {
     setGiven(item.values ?? {});
     setCurrent(item);
     setCached(true);
+    setNaming(null);
+  }
+
+  async function saveName(item: Item, name: string) {
+    const r = await fetch(`/api/configurator/items/${item.id}`, {
+      method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name }),
+    });
+    const j = await r.json();
+    if (!r.ok) { setError(j.error || "Could not name it"); return; }
+    setCurrent(j.item);
+    setNaming(null);
+    void load();
   }
 
   if (!model) {
@@ -222,9 +244,68 @@ export function ConfigureClient({ id }: { id: string; isAdmin: boolean }) {
             <>
               <div style={{ display: "flex", gap: 10, alignItems: "baseline", flexWrap: "wrap" }}>
                 <span className="mono" style={{ fontWeight: 700, fontSize: 16 }}>{showing.number ?? "—"}</span>
-                <span style={{ fontSize: 13, color: "var(--text-muted)" }}>{showing.summary}</span>
+                {naming !== null ? (
+                  <form
+                    style={{ display: "flex", gap: 6, flex: 1, minWidth: 220 }}
+                    onSubmit={(e) => { e.preventDefault(); void saveName(showing, naming); }}
+                  >
+                    <input
+                      className="input" autoFocus value={naming} maxLength={120} style={{ flex: 1 }}
+                      placeholder={`Name this configuration — e.g. "Touring case, 10 slots"`}
+                      onChange={(e) => setNaming(e.target.value)} aria-label="Configuration name"
+                      onKeyDown={(e) => { if (e.key === "Escape") setNaming(null); }}
+                    />
+                    <button className="btn btn-sm btn-primary" type="submit">Save</button>
+                    <button className="btn btn-sm" type="button" onClick={() => setNaming(null)}>Cancel</button>
+                  </form>
+                ) : (
+                  <>
+                    {showing.name && <span style={{ fontWeight: 650, fontSize: 15 }}>{showing.name}</span>}
+                    <button
+                      className="btn btn-sm" style={{ padding: "1px 8px", fontSize: 12 }}
+                      onClick={() => setNaming(showing.name ?? "")}
+                    >
+                      {showing.name ? "Rename" : "Name it"}
+                    </button>
+                  </>
+                )}
               </div>
-              {showing.hasPicture && showing.state !== "failed" ? (
+              <div style={{ fontSize: 13, color: "var(--text-muted)", marginTop: -4 }}>{showing.summary}</div>
+              {showing.hasPicture && showing.state !== "failed" && (
+                <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
+                  {(["picture", "3d"] as const).map((v) => (
+                    <button
+                      key={v} className={`btn btn-sm${view === v ? " btn-primary" : ""}`}
+                      disabled={v === "3d" && !showing.hasModel} onClick={() => setView(v)}
+                    >
+                      {v === "picture" ? "Picture" : "3D"}
+                    </button>
+                  ))}
+                  <span style={{ fontSize: 12, color: "var(--text-faint)", marginLeft: 6, display: "flex", gap: 6, alignItems: "center" }}>
+                    {showing.hasModel
+                      ? null
+                      : showing.step === "Building the 3D model"
+                        ? <><Spinner /> Building the 3D model…</>
+                        : showing.modelError
+                          ? <>3D model failed: {showing.modelError.slice(0, 160)}{" "}
+                              <button className="btn btn-sm" onClick={() => generate(true)} disabled={busy}>Try again</button></>
+                          : showing.state === "ready" && showing.partId
+                            ? <button className="btn btn-sm" onClick={() => generate()} disabled={busy}>Build the 3D model</button>
+                            : "The 3D model follows the BOM."}
+                  </span>
+                </div>
+              )}
+              {view === "3d" && showing.hasModel && showing.partId ? (
+                <div style={{ maxWidth: 800, border: "1px solid var(--border)", borderRadius: 8, overflow: "hidden" }}>
+                  <ModelViewer
+                    key={showing.id}
+                    src={`/api/parts/${showing.partId}/geometry?revision=`}
+                    label={`${showing.number}${showing.name ? ` ${showing.name}` : ""}`}
+                    poster={`/api/configurator/items/${showing.id}/picture`}
+                    height={460}
+                  />
+                </div>
+              ) : showing.hasPicture && showing.state !== "failed" ? (
                 // eslint-disable-next-line @next/next/no-img-element
                 <img
                   src={`/api/configurator/items/${showing.id}/picture`} alt={showing.summary}
@@ -283,6 +364,7 @@ export function ConfigureClient({ id }: { id: string; isAdmin: boolean }) {
                   </div>
                 )}
                 <span className="mono" style={{ fontSize: 12.5, fontWeight: 650 }}>{it.number ?? "—"}</span>
+                {it.name && <span style={{ fontSize: 12.5, fontWeight: 650, marginTop: -2 }}>{it.name}</span>}
                 <span style={{ fontSize: 11.5, color: "var(--text-muted)", lineHeight: 1.35 }}>{it.summary}</span>
               </button>
             ))}

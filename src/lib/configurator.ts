@@ -11,6 +11,9 @@ import { parseDefinition, resolve, summarize, toEncoding, validate, type Values 
 import type { OnshapeClient } from "@/lib/onshape/types";
 import { toBuffer } from "@/lib/binary";
 import type { BomLine } from "@/lib/onshape/bom";
+import type { AssemblyDefinition, AssemblyInstance, FileExport } from "@/lib/onshape/types";
+import { captureWorkspaceGeometry } from "@/lib/geometry";
+import { composeGlb, type Placement } from "@/lib/gltf-compose";
 
 /**
  * The configurator, phase 1: configure a model and see it.
@@ -23,8 +26,13 @@ import type { BomLine } from "@/lib/onshape/bom";
  * PLM's BOM from it: the configuration becomes a PLM assembly numbered from
  * the CFG scheme, each BOM line a PLM part (reused when PLM has it), with this
  * configuration's quantities on its own edges. Numbers stay in PLM — nothing
- * is written back to Onshape (decided 10 Nov 2026). The 3D model is phase 4.
+ * is written back to Onshape (decided 10 Nov 2026). Phase 4 builds its 3D
+ * model from the part exports (lib/gltf-compose.ts says why not Onshape's
+ * assembly export) and keeps it as the configured assembly's geometry.
  */
+
+/** Part exports running at once while building one model. */
+const EXPORT_CONCURRENCY = 3;
 
 /**
  * Why a configurator-made part is never written to Onshape. Set as the part's
@@ -227,6 +235,7 @@ function shapeItem(i: any) {
     bom: (i.bom ?? null) as ConfiguredBomLine[] | null, bomError: i.bomError ?? null, bomFetchedAt: i.bomFetchedAt ?? null,
     partId: i.partId ? String(i.partId) : null, plmError: i.plmError ?? null,
     addedParts: (i.addedPartIds ?? []).length,
+    name: i.name ?? "", hasModel: Boolean(i.modelAt), modelError: i.modelError ?? null, modelMs: i.modelMs ?? null,
     requestCount: i.requestCount ?? 1, requestedByEmail: i.requestedByEmail,
     lastRequestedAt: i.lastRequestedAt, generatedAt: i.generatedAt, elapsedMs: i.elapsedMs,
   };
@@ -325,7 +334,10 @@ export async function requestConfiguration(
   // Ready with a BOM but not yet in PLM: generated before phase 3, or adding
   // it failed. Only that step runs.
   const plmMissing = item.state === "ready" && item.bom && !item.partId && (!item.plmError || opts.retry);
-  const bomOnly = bomMissing || plmMissing;
+  // In PLM but without its 3D model: generated before phase 4, or building
+  // it failed. Only that step runs.
+  const modelMissing = item.state === "ready" && item.partId && !item.modelAt && (!item.modelError || opts.retry);
+  const bomOnly = bomMissing || plmMissing || modelMissing;
 
   if (fresh || lost || again || bomOnly) {
     if (!fresh) {
@@ -333,8 +345,9 @@ export async function requestConfiguration(
         { _id: item._id },
         { $set: {
           state: "queued",
-          step: bomMissing ? "Waiting to read the BOM" : plmMissing ? "Waiting to add it to PLM" : "Waiting to generate",
-          error: null, bomError: null, plmError: null, startedAt: null,
+          step: bomMissing ? "Waiting to read the BOM" : plmMissing ? "Waiting to add it to PLM"
+            : modelMissing ? "Waiting to build the 3D model" : "Waiting to generate",
+          error: null, bomError: null, plmError: null, modelError: null, startedAt: null,
         } }
       );
     }
@@ -450,11 +463,125 @@ async function generate(enterpriseId: string, itemId: string, model: any, client
       }
     }
 
+    // Last, the 3D model (phase 4) — the slowest step, and the least waited
+    // for: the picture and the BOM are already on screen. Kept as the
+    // configured assembly's geometry, so it needs that assembly first.
+    const done: any = await ConfiguredItem.findById(itemId).select("partId modelAt key").lean();
+    if (done?.partId && !done.modelAt) {
+      await ConfiguredItem.updateOne({ _id: itemId }, { $set: { state: "generating", step: "Building the 3D model" } });
+      const t0 = Date.now();
+      const r = await captureWorkspaceGeometry(client, enterpriseId, String(done.partId), {
+        documentId: model.documentId, elementId: model.elementId, partId: "", configuration: done.key,
+        versionId: model.versionId ?? null, workspaceId: model.workspaceId ?? null,
+      }, { isAssembly: true, produce: () => buildModel(client, model, done.key) });
+      await ConfiguredItem.updateOne(
+        { _id: itemId },
+        { $set: r.ok ? { modelAt: new Date(), modelError: null, modelMs: Date.now() - t0 } : { modelError: r.reason } }
+      );
+      if (!r.ok) console.warn(`[PLM] configurator: the 3D model of ${itemId} failed: ${r.reason}`);
+    }
+
     await ConfiguredItem.updateOne(
       { _id: itemId },
       { $set: { state: "ready", step: "", error: null, ...(hasPicture ? {} : { elapsedMs: Date.now() - started }) } }
     );
   }, { subject: model.name, newRun: true });
+}
+
+/* ------------------------------- 3D model -------------------------------- */
+
+/**
+ * The configuration's 3D model: the assembly definition says which part sits
+ * where, for this configuration; each distinct part (one tab, part and
+ * configuration) is exported once; gltf-compose places them. A part that
+ * cannot be exported is left out and named — a model missing one pin is more
+ * use than no model.
+ */
+export async function buildModel(client: OnshapeClient, model: any, key: string): Promise<FileExport> {
+  const started = Date.now();
+  const def: AssemblyDefinition = await client.getAssemblyDefinition({
+    documentId: model.documentId, elementId: model.elementId,
+    versionId: model.versionId, workspaceId: model.workspaceId, configuration: key,
+  });
+
+  const cfgOf = (x: { fullConfiguration?: string; configuration?: string }) => x.fullConfiguration || x.configuration || "default";
+  const subFor = (inst: AssemblyInstance) => {
+    const same = def.subAssemblies.filter((s) => s.documentId === inst.documentId && s.elementId === inst.elementId);
+    return same.find((s) => cfgOf(s) === cfgOf(inst)) ?? same[0];
+  };
+  /** The instance an occurrence path ends at, or null if anything on the way is suppressed. */
+  const resolvePath = (path: string[]): AssemblyInstance | null => {
+    let list = def.rootAssembly.instances;
+    for (let i = 0; i < path.length; i++) {
+      const inst = list.find((x) => x.id === path[i]);
+      if (!inst || inst.suppressed) return null;
+      if (i === path.length - 1) return inst;
+      const sub = subFor(inst);
+      if (!sub) return null;
+      list = sub.instances;
+    }
+    return null;
+  };
+
+  const unique = new Map<string, AssemblyInstance>();
+  const placements: Placement[] = [];
+  for (const o of def.rootAssembly.occurrences) {
+    if (o.hidden) continue;
+    const inst = resolvePath(o.path);
+    if (!inst || String(inst.type).toLowerCase() !== "part" || !inst.partId) continue;
+    const k = `${inst.documentId}|${inst.elementId}|${inst.partId}|${cfgOf(inst)}`;
+    if (!unique.has(k)) unique.set(k, inst);
+    placements.push({ key: k, name: inst.name, transform: o.transform });
+  }
+  if (!placements.length) throw new Error("The assembly definition has no visible parts to draw.");
+
+  const exported = new Map<string, Buffer>();
+  const missing: string[] = [];
+  const queue = [...unique];
+  await Promise.all(Array.from({ length: EXPORT_CONCURRENCY }, async () => {
+    for (let next = queue.shift(); next; next = queue.shift()) {
+      const [k, inst] = next;
+      const sameDoc = inst.documentId === model.documentId;
+      if (!sameDoc && !inst.documentVersion) { missing.push(`${inst.name} (in another document)`); continue; }
+      try {
+        const out = await client.exportGltf({
+          documentId: inst.documentId, elementId: inst.elementId, partId: inst.partId!, configuration: cfgOf(inst),
+          workspaceId: sameDoc ? model.workspaceId ?? null : null,
+          versionId: sameDoc ? model.versionId ?? null : inst.documentVersion ?? null,
+        }, { coarse: true });
+        exported.set(k, out.data);
+      } catch (err: any) {
+        missing.push(`${inst.name} (${String(err?.message ?? err).slice(0, 120)})`);
+      }
+    }
+  }));
+  if (!exported.size) throw new Error(`No part of the assembly could be exported: ${missing.join("; ")}`);
+  if (missing.length) console.warn(`[PLM] configurator: 3D model left out ${missing.length} part(s): ${missing.join("; ")}`);
+
+  const data = composeGlb(exported, placements, model.name);
+  return { data, contentType: "model/gltf-binary", via: "direct", elapsedMs: Date.now() - started };
+}
+
+/* --------------------------------- Names --------------------------------- */
+
+/**
+ * Name a configuration ("Touring case, 10 slots"). The configured assembly in
+ * PLM takes the name too — it is PLM's own part, never written to Onshape.
+ * An empty name goes back to the model's.
+ */
+export async function nameItem(enterpriseId: string, itemId: string, name: string) {
+  await connectDb();
+  const clean = name.trim().replace(/\s+/g, " ").slice(0, 120);
+  const item: any = await ConfiguredItem.findOneAndUpdate(
+    { _id: itemId, enterpriseId }, { $set: { name: clean } }, { new: true }
+  ).select("modelId partId").lean();
+  if (!item) throw new ConfigurationError("Configuration not found.");
+  if (item.partId) {
+    const model: any = await ConfigurableModel.findById(item.modelId).select("name").lean();
+    const partName = clean || model?.name || "";
+    await Part.updateOne({ _id: item.partId, enterpriseId }, { $set: { name: partName, "attributes.name": partName } });
+  }
+  return getItem(enterpriseId, itemId);
 }
 
 /* ----------------------------- Growing the BOM ---------------------------- */
@@ -477,7 +604,7 @@ async function generate(enterpriseId: string, itemId: string, model: any, client
 async function addToPlm(
   enterpriseId: string, itemId: string, model: any, client: OnshapeClient, actor: Actor, snapshot: ConfiguredBomLine[]
 ) {
-  const item: any = await ConfiguredItem.findById(itemId).select("key number summary picture pictureType").lean();
+  const item: any = await ConfiguredItem.findById(itemId).select("key number summary name picture pictureType").lean();
   let bom = snapshot;
   // A phase-2 snapshot does not say where each row is read from; read it again.
   if (bom.some((l) => l.kind !== "other" && l.workspaceId === undefined && l.versionId === undefined)) {
@@ -505,10 +632,11 @@ async function addToPlm(
     const defs = await listDefinitions(enterpriseId, "PART");
     const attributes: Record<string, unknown> = {};
     for (const d of defs) if (d.defaultValue != null) attributes[d.key] = d.defaultValue;
-    Object.assign(attributes, { number: item.number, name: model.name, description: item.summary });
+    const topName = item.name || model.name;
+    Object.assign(attributes, { number: item.number, name: topName, description: item.summary });
     top = await Part.create({
       ...topIdentity,
-      kind: "assembly", number: item.number, name: model.name, attributes,
+      kind: "assembly", number: item.number, name: topName, attributes,
       lifecycleState: "In Work", iteration: 1,
       versionId: model.versionId ?? null, workspaceId: model.workspaceId ?? null,
       documentName: model.documentName, elementName: model.elementName,

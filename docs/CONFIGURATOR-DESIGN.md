@@ -5,10 +5,12 @@ sees the result, and gets a bill of materials for exactly that configuration.
 Each configuration is generated in Onshape once, kept in PLM, and served from
 PLM afterwards; every configuration generated adds its parts to PLM's BOM.
 
-Status: **phases 1–3 built** (configure, key, generate and cache the picture;
-read and keep each configuration's BOM as a snapshot; grow PLM's BOM from it,
-numbering in PLM only — `src/lib/configurator*.ts`, `/configurator`), plus an
-admin **Reset** of a model for demos (§12); phase 4 not started. Building phase 2 found that PLM's BOM
+Status: **all four phases built** (configure, key, generate and cache the
+picture; read and keep each configuration's BOM as a snapshot; grow PLM's BOM
+from it, numbering in PLM only; a 3D model per configuration, composed from
+part exports — §13), plus an admin **Reset** for demos (§12) and **names** for
+configurations. `src/lib/configurator*.ts`, `src/lib/gltf-compose.ts`,
+`/configurator`. Building phase 2 found that PLM's BOM
 parser read the indent from the row, while the live `bomTable.items` shape
 carries it on `itemSource` — every indented BOM had come back flat; fixed in
 `lib/onshape/bom.ts` for the BOM import too. Grounded in a probe of a real configured
@@ -357,3 +359,39 @@ marked distinct is re-keyed to the configuration when its number is the one
 Onshape reports for that configuration, rather than duplicated. Configuration
 strings in distinct documents are keyed with float noise rounded off (12
 significant digits — `stableNumbers` in `lib/sync.ts`).
+
+## 13. The 3D model (built 10 Nov 2026)
+
+**Probed first (§9.3), on the live Flight Case.** Onshape's assembly export
+(`POST /assemblies/…/export/gltf`, the path PLM uses for released assemblies)
+**ignores the configuration**: two different cases exported byte-identical —
+all 28 files the default case — as a 159 MB zip of loose per-occurrence glTF
+(366 MB unzipped) after about 86 s each. Unusable twice over.
+
+What works instead, and is built:
+
+1. `GET /assemblies/…?configuration=` — the assembly definition for this
+   configuration: every occurrence (37 on the Flight Case, subassemblies
+   included) with its row-major 4×4 transform from the root, and which part
+   in which configuration each one is. 0.2–0.8 s.
+2. `GET /parts/…/partid/{pid}/gltf?configuration=` once per distinct part
+   (12 here), coarse tessellation (`chordTolerance=0.001`,
+   `angleTolerance=0.35`, `maxFacetWidth=0.05`) — ~0.9 MB and ~1 s each,
+   versus ~1.2 MB and 2.5–4.5 s at Onshape's default; three at a time. The
+   part export honours the configuration (the Base measured 354 × 329 mm in
+   one size, 454 × 374 mm in the other).
+3. `lib/gltf-compose.ts` merges them into one GLB: each part's meshes once,
+   drawn at every placement (the latch, used five times, is one mesh), under
+   a root turning Onshape's Z-up into glTF's Y-up.
+
+Kept as the configured assembly's geometry (`PartGeometry`, revision ""), so
+the configure page's 3D view and the assembly's part page show the same
+model, and a reset removes it with the part. Built last — after the picture,
+the BOM and the PLM parts — because it is the slowest step and the one least
+waited for. A part that will not export is left out and logged rather than
+losing the model. Configurations made before phase 4 get their model the next
+time they are opened.
+
+**Names.** Any configuration can be named ("Touring case, 1000 mm"); its PLM
+assembly takes the name (PLM's own part — nothing goes to Onshape), and an
+empty name goes back to the model's.

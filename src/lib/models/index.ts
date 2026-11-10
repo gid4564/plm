@@ -1949,6 +1949,15 @@ const ConfiguredItemSchema = new Schema(
     plmAt: { type: Date, default: null },
     /** Parts this configuration added to PLM (the rest were already there). */
     addedPartIds: { type: [Schema.Types.ObjectId], default: [] },
+    /**
+     * Phase 4: the 3D model, stored as the configured assembly's geometry
+     * (PartGeometry, revision ""), so the part page's viewer shows it too.
+     */
+    modelAt: { type: Date, default: null },
+    modelError: { type: String, default: null },
+    modelMs: { type: Number, default: null },
+    /** What someone called this configuration ("Touring case, 10 slots"); empty for none. */
+    name: { type: String, default: "" },
     requestedByEmail: { type: String, default: "" },
     requestCount: { type: Number, default: 1 },
     lastRequestedAt: { type: Date, default: () => new Date() },

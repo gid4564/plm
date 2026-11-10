@@ -5,7 +5,7 @@ import type {
 import type {
   PartExport, ReleasePackage, ReleasePackageItem, ReleaseWorkflow, WorkflowAction,
   CreateReleasePackageInput, DrawingCoords, FileExport,
-  ImportResult, NewDocument, UploadFile, DocumentVersion,
+  ImportResult, NewDocument, UploadFile, DocumentVersion, AssemblyDefinition,
 } from "./types";
 import { recordApiCall } from "@/lib/api-log";
 import { parseBom, type BomTable } from "./bom";
@@ -901,7 +901,7 @@ export class LiveOnshapeClient implements OnshapeClient {
    */
   async exportGltf(
     c: PartCoords,
-    opts: { isAssembly?: boolean } = {}
+    opts: { isAssembly?: boolean; coarse?: boolean } = {}
   ): Promise<FileExport> {
     const started = Date.now();
     /*
@@ -921,6 +921,14 @@ export class LiveOnshapeClient implements OnshapeClient {
       const base = process.env.ONSHAPE_PARTS_PATH || "/parts";
       const q = new URLSearchParams();
       if (c.configuration && c.configuration !== "default") q.set("configuration", c.configuration);
+      // Coarser than Onshape's default tessellation — about a fifth smaller
+      // and two to three times faster on the Flight Case (probe, 10 Nov 2026),
+      // with no visible difference at viewer distances.
+      if (opts.coarse) {
+        q.set("chordTolerance", "0.001");
+        q.set("angleTolerance", "0.35");
+        q.set("maxFacetWidth", "0.05");
+      }
       const path =
         `${base}/d/${c.documentId}/${wv}/e/${c.elementId}` +
         `/partid/${encodeURIComponent(c.partId)}/gltf${q.toString() ? `?${q}` : ""}`;
@@ -948,6 +956,17 @@ export class LiveOnshapeClient implements OnshapeClient {
       }
     );
     return this.awaitTranslation(submitted, c.documentId, "glTF export", started);
+  }
+
+  async getAssemblyDefinition(c: AssemblyCoords): Promise<AssemblyDefinition> {
+    const wv = c.workspaceId ? `w/${c.workspaceId}` : `v/${c.versionId}`;
+    const q = new URLSearchParams({ includeMateFeatures: "false", includeNonSolids: "false", includeMateConnectors: "false" });
+    if (c.configuration && c.configuration !== "default") q.set("configuration", c.configuration);
+    const j = await this.req<Record<string, any>>(`/assemblies/d/${c.documentId}/${wv}/e/${c.elementId}?${q}`);
+    return {
+      rootAssembly: { instances: j?.rootAssembly?.instances ?? [], occurrences: j?.rootAssembly?.occurrences ?? [] },
+      subAssemblies: j?.subAssemblies ?? [],
+    };
   }
 
   /**

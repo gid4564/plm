@@ -12,7 +12,7 @@ import type { ExportFormat } from "./export-formats";
 import type {
   PartExport, ReleasePackage, ReleasePackageItem, ReleaseWorkflow, WorkflowAction,
   CreateReleasePackageInput, DrawingCoords, FileExport,
-  ImportResult, NewDocument, UploadFile, DocumentVersion,
+  ImportResult, NewDocument, UploadFile, DocumentVersion, AssemblyDefinition,
 } from "./types";
 import type { MassProperties } from "./mass-properties";
 import { mapStandardProperties, resolveEnumLabel, toDisplayString, type RawProperty } from "./standard-properties";
@@ -20,6 +20,7 @@ import { classify } from "./element-type";
 import { resolveTaskCommentContext } from "./object-types";
 import { isStepFile, scanStep } from "@/lib/step-scan";
 import MOCK_CONFIGURATION from "./mock-configuration.json";
+import { boxGlb } from "@/lib/gltf-compose";
 
 /** A random lowercase-hex id of `bytes` bytes, for simulator-made objects. */
 const randomHex = (bytes: number) => randomBytes(bytes).toString("hex");
@@ -393,6 +394,13 @@ export class MockOnshapeClient implements OnshapeClient {
 
   async getConfigurationDefinition(): Promise<ConfigurationDefinition> {
     return { parameters: [] };
+  }
+
+  async getAssemblyDefinition(c: AssemblyCoords): Promise<AssemblyDefinition> {
+    if (!/(^|;)Add_foam_inserts=/.test(String(c.configuration ?? ""))) {
+      throw new Error("The Onshape simulator only has an assembly definition for the configured Flight Case.");
+    }
+    return flightCaseDefinition(c);
   }
 
   async getAssemblyBom(
@@ -812,10 +820,15 @@ export class MockOnshapeClient implements OnshapeClient {
    */
   async exportGltf(
     c: PartCoords,
-    opts: { isAssembly?: boolean } = {}
+    opts: { isAssembly?: boolean; coarse?: boolean } = {}
   ): Promise<FileExport> {
-    await connectDb();
     const started = Date.now();
+    // A part of the simulated Flight Case: a box the size its configuration says.
+    if (!opts.isAssembly && FLIGHT_CASE_ELEMENT.test(c.elementId)) {
+      if (!process.env.MOCK_FAST) await new Promise((r) => setTimeout(r, 150));
+      return { data: flightCasePartGlb(c), contentType: "model/gltf-binary", via: "direct", elapsedMs: Date.now() - started };
+    }
+    await connectDb();
 
     if (!opts.isAssembly && !c.partId) {
       throw new Error(
@@ -1817,4 +1830,104 @@ function flightCaseBom(c: AssemblyCoords, opts: { indented: boolean; multiLevel:
     l.key = l.source ? `${i}:${l.source.documentId}:${l.source.elementId}:${l.source.partId}:${l.source.configuration}` : `row-${i}`;
   });
   return { lines, headers: ["Item", "Quantity", "Part number", "Name", "Description"], shape: "simulator", indented: opts.indented };
+}
+
+/** Tabs of the simulated Flight Case, as `flightCaseBom` names them. */
+const FLIGHT_CASE_ELEMENT = /^c{22}[0-9a-f]{2}$/;
+
+/** A row-major 4×4 translation, in metres. */
+const at = (x: number, y: number, z: number) => [1, 0, 0, x, 0, 1, 0, y, 0, 0, 1, z, 0, 0, 0, 1];
+
+/**
+ * Where everything sits in the simulated case, for one configuration — the
+ * shape of Onshape's assembly definition: root instances, two subassemblies,
+ * and an occurrence (with a transform from the root) for every part, however
+ * deep. Sizes follow the BOM's: longer cases have more hinges and latches.
+ */
+function flightCaseDefinition(c: AssemblyCoords): AssemblyDefinition {
+  const k = flightCaseOf(c.configuration);
+  const L = k.L / 1000, D = k.D / 1000, H = k.H / 1000;
+  const m = (mm: number) => `${mm / 1000}+meter`;
+  const dims = `Depth=${m(k.D)};Height=${m(k.H)};Length=${m(k.L)}`;
+  const el = (n: number) => n.toString(16).padStart(24, "c");
+  const hinges = k.L < 600 ? 2 : k.L < 1000 ? 4 : 6;
+  const inst = (id: string, name: string, element: number, partId: string, cfg: string, type = "Part") => ({
+    id, name, type, suppressed: false, documentId: c.documentId, elementId: el(element), partId: type === "Part" ? partId : "",
+    configuration: cfg, fullConfiguration: cfg,
+  });
+  const instances = [
+    inst("Ibase", "Base", 1, "JLD", dims), inst("Ilid", "Lid", 1, "JHD", dims), inst("Iseal", "Seal", 1, "R0HD", dims),
+  ];
+  const occurrences: AssemblyDefinition["rootAssembly"]["occurrences"] = [
+    { path: ["Ibase"], transform: at(0, 0, 0) },
+    { path: ["Iseal"], transform: at(0, 0, H * 0.6) },
+    { path: ["Ilid"], transform: at(0, 0, H * 0.6 + 0.004) },
+  ];
+  for (let i = 0; i < hinges; i++) {
+    const id = `Ihinge${i}`;
+    instances.push(inst(id, `Hinge Pin <${i + 1}>`, 2, "RABD", "L=0.5+meter"));
+    occurrences.push({ path: [id], transform: at(-L / 2 + (L * (i + 0.5)) / hinges - 0.025, D / 2 + 0.006, H * 0.6 - 0.005) });
+  }
+  for (let i = 0; i < hinges + 1; i++) {
+    const id = `Ilatch${i}`;
+    instances.push(inst(id, `Latch Assembly <${i + 1}>`, 3, "", "default", "Assembly"));
+    const x = -L / 2 + (L * (i + 0.5)) / (hinges + 1), y = -D / 2 - 0.012, z = H * 0.6 - 0.03;
+    occurrences.push({ path: [id], transform: at(x, y, z) });
+    occurrences.push({ path: [id, "Lbutton"], transform: at(x, y - 0.012, z + 0.03) });
+    occurrences.push({ path: [id, "Lbpin"], transform: at(x, y, z + 0.035) });
+    occurrences.push({ path: [id, "Llatch"], transform: at(x, y, z) });
+    occurrences.push({ path: [id, "Llpin"], transform: at(x, y, z + 0.005) });
+  }
+  const sides = [[-L / 2 - 0.016, 0], [L / 2 + 0.016, 0], [0, -D / 2 - 0.02]];
+  sides.forEach(([x, y], i) => {
+    const id = `Ihandle${i}`;
+    instances.push(inst(id, `Handle Assembly <${i + 1}>`, 5, "", "default", "Assembly"));
+    occurrences.push({ path: [id], transform: at(x, y, H * 0.35) });
+    occurrences.push({ path: [id, "Hhandle"], transform: at(x, y, H * 0.35) });
+    occurrences.push({ path: [id, "Hpin0"], transform: at(x, y, H * 0.35) });
+    occurrences.push({ path: [id, "Hpin1"], transform: at(x, y, H * 0.35 + 0.02) });
+  });
+  if (k.foam) {
+    const cut = k.cutouts ? (k.slotsMode ? `;Slots=${k.slots};Slot_width=${m(k.slotWidth)}` : `;Compartments=${k.compartments}`) : "";
+    instances.push(inst("Ifoam", "Foam Base", 7, "JHD", `Add_cutouts=${k.cutouts};${dims}${cut}`));
+    instances.push(inst("Ifoamlid", "Foam Lid", 8, "JoD", `Depth=${m(k.D)};Length=${m(k.L)}`));
+    occurrences.push({ path: ["Ifoam"], transform: at(0, 0, H * 0.6 - 0.001) });
+    occurrences.push({ path: ["Ifoamlid"], transform: at(0, 0, H + 0.006) });
+  }
+  return {
+    rootAssembly: { instances, occurrences },
+    subAssemblies: [
+      { documentId: c.documentId, elementId: el(3), configuration: "default", fullConfiguration: "default", instances: [
+        inst("Lbutton", "Button", 4, "ReBD", "L=0.0+meter;Single=true"), inst("Lbpin", "Button Pin", 4, "RKCD", "L=0.0+meter;Single=true"),
+        inst("Llatch", "Latch", 4, "ReBH", "L=0.0+meter;Single=true"), inst("Llpin", "Latch Pin", 4, "RJCD", "L=0.0+meter;Single=true"),
+      ] },
+      { documentId: c.documentId, elementId: el(5), configuration: "default", fullConfiguration: "default", instances: [
+        inst("Hhandle", "Handle", 6, "JLD", "H=0.35000000000000003+meter"),
+        inst("Hpin0", "Handle Pin <1>", 6, "REBD", "H=0.35000000000000003+meter"), inst("Hpin1", "Handle Pin <2>", 6, "REBD", "H=0.35000000000000003+meter"),
+      ] },
+    ],
+  };
+}
+
+/** One simulated Flight Case part as a box, sized from its own configuration. */
+function flightCasePartGlb(c: PartCoords): Buffer {
+  const v = new Map(String(c.configuration ?? "").split(";").filter(Boolean).map((kv) => {
+    const i = kv.indexOf("=");
+    return [kv.slice(0, i), parseFloat(kv.slice(i + 1))] as [string, number];
+  }));
+  const L = v.get("Length") || 0.5, D = v.get("Depth") || 0.35, H = v.get("Height") || 0.225;
+  const grey: [number, number, number, number] = [0.42, 0.45, 0.5, 1];
+  const metal: [number, number, number, number] = [0.78, 0.8, 0.82, 1];
+  const foam: [number, number, number, number] = [0.22, 0.24, 0.27, 1];
+  // The tab number flightCaseBom padded with "c" (1–8, so one hex digit).
+  const n = parseInt(c.elementId.slice(-1), 16);
+  if (n === 1 && c.partId === "JLD") return boxGlb([L, D, H * 0.6], grey);
+  if (n === 1 && c.partId === "JHD") return boxGlb([L, D, H * 0.4], [0.85, 0.65, 0.15, 1]);
+  if (n === 1) return boxGlb([L * 0.98, D * 0.98, 0.004], foam);
+  if (n === 2) return boxGlb([0.05, 0.008, 0.008], metal);
+  if (n === 4) return boxGlb(c.partId === "ReBH" ? [0.04, 0.008, 0.05] : [0.012, 0.012, 0.012], metal);
+  if (n === 6) return boxGlb(c.partId === "JLD" ? [0.02, 0.12, 0.03] : [0.008, 0.008, 0.008], [0.15, 0.15, 0.16, 1]);
+  if (n === 7) return boxGlb([(v.get("Length") || 0.5) * 0.96, (v.get("Depth") || 0.35) * 0.92, 0.002], foam);
+  if (n === 8) return boxGlb([L * 0.96, D * 0.92, 0.01], foam);
+  return boxGlb([0.02, 0.02, 0.02]);
 }

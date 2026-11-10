@@ -626,7 +626,16 @@ Onshape assembly and see the result, without opening Onshape.
   another assembly are kept. Meant for starting a demo again; it cannot be
   undone.
 
-This is phases 1–3 of docs/CONFIGURATOR-DESIGN.md. The 3D model follows.
+- **3D.** Once a configuration is in PLM its 3D model is built — usually
+  seconds after the BOM — and *3D* beside *Picture* turns it in the viewer.
+  It is built from the configuration's own parts in their own sizes, and the
+  configured assembly's part page shows the same model.
+- **Names.** *Name it* beside the CFG number gives a configuration a name of
+  your choosing ("Touring case, 1000 mm"); it shows in the gallery, and the
+  configuration's PLM assembly takes it. Clear it to go back to the model's
+  name.
+
+The whole design is in docs/CONFIGURATOR-DESIGN.md.
 
 ## The Onshape panels
 

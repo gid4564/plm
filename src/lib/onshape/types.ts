@@ -134,6 +134,24 @@ export type ConfigurationDefinition = {
   }[];
 };
 
+export type AssemblyInstance = {
+  id: string; name: string; type: string; suppressed?: boolean;
+  documentId: string; elementId: string; partId?: string;
+  configuration?: string; fullConfiguration?: string;
+  documentVersion?: string; documentMicroversion?: string;
+};
+
+export type AssemblyDefinition = {
+  rootAssembly: {
+    instances: AssemblyInstance[];
+    occurrences: { path: string[]; transform: number[]; hidden?: boolean }[];
+  };
+  subAssemblies: {
+    documentId: string; elementId: string; configuration?: string; fullConfiguration?: string;
+    instances: AssemblyInstance[];
+  }[];
+};
+
 export type AssemblyCoords = {
   documentId: string;
   elementId: string;
@@ -657,7 +675,16 @@ export interface OnshapeClient {
    * any other translation. Callers do not need to know which; they differ only
    * in how long they take.
    */
-  exportGltf(coords: PartCoords, opts?: { isAssembly?: boolean }): Promise<FileExport>;
+  exportGltf(coords: PartCoords, opts?: { isAssembly?: boolean; coarse?: boolean }): Promise<FileExport>;
+
+  /**
+   * An assembly's instances and where each occurrence sits, for one
+   * configuration (`GET /assemblies/…?configuration=`): rootAssembly.instances
+   * and .occurrences (path of instance ids, row-major 4×4 transform relative
+   * to the root, in metres), and subAssemblies[].instances. The configurator
+   * composes its 3D model from this and the part exports — see gltf-compose.
+   */
+  getAssemblyDefinition(coords: AssemblyCoords): Promise<AssemblyDefinition>;
 
   /* ----------------------------------- Tasks ------------------------------ */
 

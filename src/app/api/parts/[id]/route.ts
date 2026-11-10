@@ -105,7 +105,9 @@ export const GET = handler(async (_req: Request, ctx: Ctx) => {
      * gltf export, forever, on a part where "no picture" is not a failure at
      * all but the honest answer.
      */
-    part.writeBackBlocked ? [] : geometryForPart(s.enterpriseId, id),
+    // …except a configured assembly: blocked only because the configurator
+    // never writes to Onshape, it has the model the configurator built.
+    part.writeBackBlocked && !part.configuredFrom?.configuredItemId ? [] : geometryForPart(s.enterpriseId, id),
     isFavorited(s.userId, "part", id),
     starHistory(s.enterpriseId, id),
   ]);
