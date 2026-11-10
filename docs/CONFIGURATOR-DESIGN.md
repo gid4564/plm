@@ -5,7 +5,8 @@ sees the result, and gets a bill of materials for exactly that configuration.
 Each configuration is generated in Onshape once, kept in PLM, and served from
 PLM afterwards; every configuration generated adds its parts to PLM's BOM.
 
-Status: design, nothing built. Grounded in a probe of a real configured
+Status: **phase 1 built** (configure, key, generate and cache the picture —
+`src/lib/configurator*.ts`, `/configurator`); phases 2–4 not started. Grounded in a probe of a real configured
 assembly (*Flight Case → Case Assembly*, gjp.onshape.com, 9 Nov 2026) using
 `scripts/probe-configuration.mjs`. Where this document says "measured", that is
 where the number comes from.
@@ -165,8 +166,9 @@ For every configured part (and the configured item itself):
    since `acc451b`: a number already in Onshape wins).
 2. **It has none** → PLM issues the next number and writes it to *that
    configuration* of the part in Onshape (§9 — to verify).
-3. The configured item gets a number from a scheme of its own (e.g. `CFG-00001`),
-   so a quote or an order can name a configuration by one identifier.
+3. The configured item gets a number from a scheme of its own — a new
+   `CONFIGURATION` numbering type, `CFG-00001` by default (decided, §11) — so a
+   quote or an order can name a configuration by one identifier.
 
 The number generator already returns the existing number for a part PLM tracks
 (`knownNumberFor`); it must match on configuration for configured parts, which it
@@ -221,9 +223,10 @@ inconsistently across entry points, which made duplicates. A configurator needs
 the opposite — the 700 mm Base and the 1000 mm Base are different parts with
 different numbers.
 
-Proposal: keep the enterprise default, and add **documents whose configurations
-are distinct** — set automatically for a configurable model's document (and the
-documents its BOM reaches). `configurationNormalizer` honours it, so a panel
+Decided (§11): keep the enterprise default, and add **documents whose
+configurations are distinct** — set automatically: on registering a model for
+its own document, and on generating for every document its BOM reaches, before
+any part from them is keyed. `configurationNormalizer` honours it, so a panel
 sync, a webhook and the configurator all key those parts the same way. Elsewhere
 nothing changes.
 
@@ -306,18 +309,16 @@ a "Configurator" process so the real spend is visible after launch.
 4. **3D and polish** — glTF per configuration in the viewer, summaries, search
    by chosen values, admin overrides, usage reporting.
 
-Phases 1–2 are read-only towards Onshape and towards PLM's part data, and can be
-shown to customers before any decision about numbering is made.
+Phases 1–2 are read-only towards Onshape and towards PLM's part data, so they
+can be demonstrated before anything is numbered or written back.
 
 ---
 
-## 11. Decisions needed
+## 11. Decisions (9 Nov 2026)
 
-1. **Configured item numbering** — its own scheme (`CFG-…`) or the assembly
-   scheme?
-2. **Who may generate** — any signed-in user, or a role? (Generation spends API
-   budget.)
-3. **Shared internally only, or also for customers** — an external configurator
-   needs sign-in and access rules PLM does not have today.
-4. **Distinct-configuration documents** — automatic for a model's document and
-   everything its BOM reaches (proposed), or chosen by hand?
+| Question | Decision | Consequence in this design |
+|---|---|---|
+| Configured item numbering | **Its own scheme** | A fifth numbering type, `CONFIGURATION` (default `CFG-00001`), beside Part, Assembly, Drawing and Release — set on the Numbering page like the others (§4.5). |
+| Who may generate | **Anyone signed in** — this is a demo | No role check on Generate. The concurrency limit (§4.3) and the API usage page (§7) are the guard on spend. |
+| Internal or customer-facing | **Internal** | PLM's existing sign-in is enough; no public pages, no customer accounts. |
+| Distinct-configuration documents | **Automatic** | Registering a model marks its document; generating marks every document its BOM reaches, before any of those parts are keyed (§6). |

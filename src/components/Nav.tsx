@@ -37,6 +37,7 @@ const NAV: NavItem[] = [
   { kind: "link", href: "/bom", label: "BOM" },
   { kind: "link", href: "/releases", label: "Releases" },
   { kind: "link", href: "/tasks", label: "Tasks" },
+  { kind: "link", href: "/configurator", label: "Configurator" },
   {
     kind: "menu",
     label: "Configuration",

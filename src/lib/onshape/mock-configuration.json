@@ -1,0 +1,707 @@
+{
+  "configurationParameters": [
+    {
+      "type": 105,
+      "typeName": "BTMConfigurationParameterEnum",
+      "message": {
+        "enumName": "List_c8myjaVNuXnNs2_conf",
+        "options": [
+          {
+            "type": 592,
+            "typeName": "BTMEnumOption",
+            "message": {
+              "option": "_1000_x_500_x_500",
+              "optionName": "300 x 275 x 200",
+              "hasUserCode": false,
+              "nodeId": "Mmg1sgLP8FNBCFVft"
+            }
+          },
+          {
+            "type": 592,
+            "typeName": "BTMEnumOption",
+            "message": {
+              "option": "_4",
+              "optionName": "400 x 320 x 200",
+              "hasUserCode": false,
+              "nodeId": "Mn/Gv5+i/32cDyI00"
+            }
+          },
+          {
+            "type": 592,
+            "typeName": "BTMEnumOption",
+            "message": {
+              "option": "_40",
+              "optionName": "500 x 350 x 225",
+              "hasUserCode": false,
+              "nodeId": "MneaaQN5q+ik3Xg09"
+            }
+          },
+          {
+            "type": 592,
+            "typeName": "BTMEnumOption",
+            "message": {
+              "option": "_41",
+              "optionName": "700 x 400 x 300",
+              "hasUserCode": false,
+              "nodeId": "M5i4iuF5lqtYiafCm"
+            }
+          },
+          {
+            "type": 592,
+            "typeName": "BTMEnumOption",
+            "message": {
+              "option": "_42",
+              "optionName": "850 x 450 x 300",
+              "hasUserCode": false,
+              "nodeId": "MwqQij0ae/dHeljhT"
+            }
+          },
+          {
+            "type": 592,
+            "typeName": "BTMEnumOption",
+            "message": {
+              "option": "_43",
+              "optionName": "1000 x 500 x 320",
+              "hasUserCode": false,
+              "nodeId": "M2ODG86IcNHDewpdU"
+            }
+          },
+          {
+            "type": 592,
+            "typeName": "BTMEnumOption",
+            "message": {
+              "option": "_44",
+              "optionName": "1350 x 550 x 350",
+              "hasUserCode": false,
+              "nodeId": "Mr5TxIm7evmSsfVje"
+            }
+          },
+          {
+            "type": 592,
+            "typeName": "BTMEnumOption",
+            "message": {
+              "option": "_45",
+              "optionName": "Custom",
+              "hasUserCode": false,
+              "nodeId": "MqtwGFWeLTeFGDfDh"
+            }
+          }
+        ],
+        "namespace": "",
+        "defaultValue": "_1000_x_500_x_500",
+        "enumOptionVisibilityConditions": {
+          "type": 0
+        },
+        "parameterId": "List_c8myjaVNuXnNs2",
+        "parameterName": "Size",
+        "isCosmetic": false,
+        "visibilityCondition": {
+          "type": 177,
+          "typeName": "BTParameterVisibilityCondition",
+          "message": {}
+        },
+        "hasUserCode": false,
+        "nodeId": "Mzp3vntniTQ6KmvwH"
+      }
+    },
+    {
+      "type": 1826,
+      "typeName": "BTMConfigurationParameterQuantity",
+      "message": {
+        "quantityType": "LENGTH",
+        "rangeAndDefault": {
+          "type": 181,
+          "typeName": "BTQuantityRange",
+          "message": {
+            "units": "millimeter",
+            "minValue": 300,
+            "maxValue": 1350,
+            "defaultValue": 500,
+            "location": {
+              "type": 226,
+              "typeName": "BTLocationInfo",
+              "message": {
+                "document": "",
+                "version": "",
+                "topLevel": "",
+                "parseNodeId": "",
+                "character": 0,
+                "line": 0,
+                "column": 0,
+                "endCharacter": 0,
+                "endLine": 0,
+                "endColumn": 0,
+                "languageVersion": 0,
+                "moduleIds": {
+                  "type": 1897,
+                  "typeName": "BTDocumentVersionElementIds",
+                  "message": {
+                    "documentId": "",
+                    "versionId": "",
+                    "elementId": ""
+                  }
+                },
+                "elementMicroversion": "",
+                "nodeId": "gvWs4xUeN0TZ/54Z"
+              }
+            }
+          }
+        },
+        "parameterId": "L",
+        "parameterName": "Length",
+        "isCosmetic": false,
+        "visibilityCondition": {
+          "type": 178,
+          "typeName": "BTParameterVisibilityLogical",
+          "message": {
+            "operation": "AND",
+            "children": [
+              {
+                "type": 178,
+                "typeName": "BTParameterVisibilityLogical",
+                "message": {
+                  "operation": "OR",
+                  "children": [
+                    {
+                      "type": 180,
+                      "typeName": "BTParameterVisibilityOnEqual",
+                      "message": {
+                        "parameterId": "List_c8myjaVNuXnNs2",
+                        "value": "_45",
+                        "inArray": false
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        },
+        "hasUserCode": false,
+        "nodeId": "MkKsAxu5CD45ToIaK"
+      }
+    },
+    {
+      "type": 1826,
+      "typeName": "BTMConfigurationParameterQuantity",
+      "message": {
+        "quantityType": "LENGTH",
+        "rangeAndDefault": {
+          "type": 181,
+          "typeName": "BTQuantityRange",
+          "message": {
+            "units": "millimeter",
+            "minValue": 275,
+            "maxValue": 550,
+            "defaultValue": 350,
+            "location": {
+              "type": 226,
+              "typeName": "BTLocationInfo",
+              "message": {
+                "document": "",
+                "version": "",
+                "topLevel": "",
+                "parseNodeId": "",
+                "character": 0,
+                "line": 0,
+                "column": 0,
+                "endCharacter": 0,
+                "endLine": 0,
+                "endColumn": 0,
+                "languageVersion": 0,
+                "moduleIds": {
+                  "type": 1897,
+                  "typeName": "BTDocumentVersionElementIds",
+                  "message": {
+                    "documentId": "",
+                    "versionId": "",
+                    "elementId": ""
+                  }
+                },
+                "elementMicroversion": "",
+                "nodeId": "bMXaUzYxi+5aimET"
+              }
+            }
+          }
+        },
+        "parameterId": "D",
+        "parameterName": "Depth",
+        "isCosmetic": false,
+        "visibilityCondition": {
+          "type": 178,
+          "typeName": "BTParameterVisibilityLogical",
+          "message": {
+            "operation": "AND",
+            "children": [
+              {
+                "type": 178,
+                "typeName": "BTParameterVisibilityLogical",
+                "message": {
+                  "operation": "OR",
+                  "children": [
+                    {
+                      "type": 180,
+                      "typeName": "BTParameterVisibilityOnEqual",
+                      "message": {
+                        "parameterId": "List_c8myjaVNuXnNs2",
+                        "value": "_45",
+                        "inArray": false
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        },
+        "hasUserCode": false,
+        "nodeId": "MsHCj1yQY/so1++4z"
+      }
+    },
+    {
+      "type": 1826,
+      "typeName": "BTMConfigurationParameterQuantity",
+      "message": {
+        "quantityType": "LENGTH",
+        "rangeAndDefault": {
+          "type": 181,
+          "typeName": "BTQuantityRange",
+          "message": {
+            "units": "millimeter",
+            "minValue": 200,
+            "maxValue": 350,
+            "defaultValue": 225,
+            "location": {
+              "type": 226,
+              "typeName": "BTLocationInfo",
+              "message": {
+                "document": "",
+                "version": "",
+                "topLevel": "",
+                "parseNodeId": "",
+                "character": 0,
+                "line": 0,
+                "column": 0,
+                "endCharacter": 0,
+                "endLine": 0,
+                "endColumn": 0,
+                "languageVersion": 0,
+                "moduleIds": {
+                  "type": 1897,
+                  "typeName": "BTDocumentVersionElementIds",
+                  "message": {
+                    "documentId": "",
+                    "versionId": "",
+                    "elementId": ""
+                  }
+                },
+                "elementMicroversion": "",
+                "nodeId": "PTQU/IJnuUJBUAFi"
+              }
+            }
+          }
+        },
+        "parameterId": "H",
+        "parameterName": "Height",
+        "isCosmetic": false,
+        "visibilityCondition": {
+          "type": 178,
+          "typeName": "BTParameterVisibilityLogical",
+          "message": {
+            "operation": "AND",
+            "children": [
+              {
+                "type": 178,
+                "typeName": "BTParameterVisibilityLogical",
+                "message": {
+                  "operation": "OR",
+                  "children": [
+                    {
+                      "type": 180,
+                      "typeName": "BTParameterVisibilityOnEqual",
+                      "message": {
+                        "parameterId": "List_c8myjaVNuXnNs2",
+                        "value": "_45",
+                        "inArray": false
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        },
+        "hasUserCode": false,
+        "nodeId": "MuqfmwwWl75wjkszb"
+      }
+    },
+    {
+      "type": 2550,
+      "typeName": "BTMConfigurationParameterBoolean",
+      "message": {
+        "defaultValue": true,
+        "parameterId": "Add_foam_inserts",
+        "parameterName": "Add foam inserts",
+        "isCosmetic": false,
+        "visibilityCondition": {
+          "type": 177,
+          "typeName": "BTParameterVisibilityCondition",
+          "message": {}
+        },
+        "hasUserCode": false,
+        "nodeId": "M9Vac36AY628NbjpH"
+      }
+    },
+    {
+      "type": 2550,
+      "typeName": "BTMConfigurationParameterBoolean",
+      "message": {
+        "defaultValue": false,
+        "parameterId": "Add_cutouts",
+        "parameterName": "Add cutouts",
+        "isCosmetic": false,
+        "visibilityCondition": {
+          "type": 178,
+          "typeName": "BTParameterVisibilityLogical",
+          "message": {
+            "operation": "AND",
+            "children": [
+              {
+                "type": 180,
+                "typeName": "BTParameterVisibilityOnEqual",
+                "message": {
+                  "parameterId": "Add_foam_inserts",
+                  "value": "true",
+                  "inArray": false
+                }
+              }
+            ]
+          }
+        },
+        "hasUserCode": false,
+        "nodeId": "Mi8SPLSebONcSHX4I"
+      }
+    },
+    {
+      "type": 105,
+      "typeName": "BTMConfigurationParameterEnum",
+      "message": {
+        "enumName": "List_FWe78IjCGMnxHB_conf",
+        "options": [
+          {
+            "type": 592,
+            "typeName": "BTMEnumOption",
+            "message": {
+              "option": "Compartments",
+              "optionName": "Compartments",
+              "hasUserCode": false,
+              "nodeId": "MAfAo1oaKdHkDy3ei"
+            }
+          },
+          {
+            "type": 592,
+            "typeName": "BTMEnumOption",
+            "message": {
+              "option": "Slots",
+              "optionName": "Slots",
+              "hasUserCode": false,
+              "nodeId": "MkVEmRh2QlmBhXK9k"
+            }
+          }
+        ],
+        "namespace": "",
+        "defaultValue": "Compartments",
+        "enumOptionVisibilityConditions": {
+          "type": 0
+        },
+        "parameterId": "List_FWe78IjCGMnxHB",
+        "parameterName": "Cutout type",
+        "isCosmetic": false,
+        "visibilityCondition": {
+          "type": 178,
+          "typeName": "BTParameterVisibilityLogical",
+          "message": {
+            "operation": "AND",
+            "children": [
+              {
+                "type": 180,
+                "typeName": "BTParameterVisibilityOnEqual",
+                "message": {
+                  "parameterId": "Add_cutouts",
+                  "value": "true",
+                  "inArray": false
+                }
+              }
+            ]
+          }
+        },
+        "hasUserCode": false,
+        "nodeId": "MTnyL/gDj7g/OrjNA"
+      }
+    },
+    {
+      "type": 105,
+      "typeName": "BTMConfigurationParameterEnum",
+      "message": {
+        "enumName": "List_wGy5RIVWYd6JzS_conf",
+        "options": [
+          {
+            "type": 592,
+            "typeName": "BTMEnumOption",
+            "message": {
+              "option": "Default",
+              "optionName": "1",
+              "hasUserCode": false,
+              "nodeId": "M4M/q2LR8KBCjjk5h"
+            }
+          },
+          {
+            "type": 592,
+            "typeName": "BTMEnumOption",
+            "message": {
+              "option": "_2",
+              "optionName": "2",
+              "hasUserCode": false,
+              "nodeId": "MiNijLNH6Hid6riA0"
+            }
+          },
+          {
+            "type": 592,
+            "typeName": "BTMEnumOption",
+            "message": {
+              "option": "_3",
+              "optionName": "3",
+              "hasUserCode": false,
+              "nodeId": "M0+b8ERdcu6rDcp7C"
+            }
+          },
+          {
+            "type": 592,
+            "typeName": "BTMEnumOption",
+            "message": {
+              "option": "_4",
+              "optionName": "4",
+              "hasUserCode": false,
+              "nodeId": "M2dWAIK1RVnT3suAC"
+            }
+          }
+        ],
+        "namespace": "",
+        "defaultValue": "Default",
+        "enumOptionVisibilityConditions": {
+          "type": 0
+        },
+        "parameterId": "List_wGy5RIVWYd6JzS",
+        "parameterName": "Compartments",
+        "isCosmetic": false,
+        "visibilityCondition": {
+          "type": 178,
+          "typeName": "BTParameterVisibilityLogical",
+          "message": {
+            "operation": "AND",
+            "children": [
+              {
+                "type": 180,
+                "typeName": "BTParameterVisibilityOnEqual",
+                "message": {
+                  "parameterId": "Add_cutouts",
+                  "value": "true",
+                  "inArray": false
+                }
+              },
+              {
+                "type": 178,
+                "typeName": "BTParameterVisibilityLogical",
+                "message": {
+                  "operation": "OR",
+                  "children": [
+                    {
+                      "type": 180,
+                      "typeName": "BTParameterVisibilityOnEqual",
+                      "message": {
+                        "parameterId": "List_FWe78IjCGMnxHB",
+                        "value": "Compartments",
+                        "inArray": false
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        },
+        "hasUserCode": false,
+        "nodeId": "MATcShw4Q4gUEGebO"
+      }
+    },
+    {
+      "type": 1826,
+      "typeName": "BTMConfigurationParameterQuantity",
+      "message": {
+        "quantityType": "INTEGER",
+        "rangeAndDefault": {
+          "type": 181,
+          "typeName": "BTQuantityRange",
+          "message": {
+            "units": "",
+            "minValue": 2,
+            "maxValue": 20,
+            "defaultValue": 10,
+            "location": {
+              "type": 226,
+              "typeName": "BTLocationInfo",
+              "message": {
+                "document": "",
+                "version": "",
+                "topLevel": "",
+                "parseNodeId": "",
+                "character": 0,
+                "line": 0,
+                "column": 0,
+                "endCharacter": 0,
+                "endLine": 0,
+                "endColumn": 0,
+                "languageVersion": 0,
+                "moduleIds": {
+                  "type": 1897,
+                  "typeName": "BTDocumentVersionElementIds",
+                  "message": {
+                    "documentId": "",
+                    "versionId": "",
+                    "elementId": ""
+                  }
+                },
+                "elementMicroversion": "",
+                "nodeId": "mdprOm05bTDIsouE"
+              }
+            }
+          }
+        },
+        "parameterId": "Slots",
+        "parameterName": "Slots",
+        "isCosmetic": false,
+        "visibilityCondition": {
+          "type": 178,
+          "typeName": "BTParameterVisibilityLogical",
+          "message": {
+            "operation": "AND",
+            "children": [
+              {
+                "type": 180,
+                "typeName": "BTParameterVisibilityOnEqual",
+                "message": {
+                  "parameterId": "Add_cutouts",
+                  "value": "true",
+                  "inArray": false
+                }
+              },
+              {
+                "type": 178,
+                "typeName": "BTParameterVisibilityLogical",
+                "message": {
+                  "operation": "OR",
+                  "children": [
+                    {
+                      "type": 180,
+                      "typeName": "BTParameterVisibilityOnEqual",
+                      "message": {
+                        "parameterId": "List_FWe78IjCGMnxHB",
+                        "value": "Slots",
+                        "inArray": false
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        },
+        "hasUserCode": false,
+        "nodeId": "MZqmeGS+MExogHgOt"
+      }
+    },
+    {
+      "type": 1826,
+      "typeName": "BTMConfigurationParameterQuantity",
+      "message": {
+        "quantityType": "LENGTH",
+        "rangeAndDefault": {
+          "type": 181,
+          "typeName": "BTQuantityRange",
+          "message": {
+            "units": "millimeter",
+            "minValue": 10,
+            "maxValue": 100,
+            "defaultValue": 20,
+            "location": {
+              "type": 226,
+              "typeName": "BTLocationInfo",
+              "message": {
+                "document": "",
+                "version": "",
+                "topLevel": "",
+                "parseNodeId": "",
+                "character": 0,
+                "line": 0,
+                "column": 0,
+                "endCharacter": 0,
+                "endLine": 0,
+                "endColumn": 0,
+                "languageVersion": 0,
+                "moduleIds": {
+                  "type": 1897,
+                  "typeName": "BTDocumentVersionElementIds",
+                  "message": {
+                    "documentId": "",
+                    "versionId": "",
+                    "elementId": ""
+                  }
+                },
+                "elementMicroversion": "",
+                "nodeId": "voavMKX/u52Kjzbm"
+              }
+            }
+          }
+        },
+        "parameterId": "Slot_width",
+        "parameterName": "Slot width",
+        "isCosmetic": false,
+        "visibilityCondition": {
+          "type": 178,
+          "typeName": "BTParameterVisibilityLogical",
+          "message": {
+            "operation": "AND",
+            "children": [
+              {
+                "type": 178,
+                "typeName": "BTParameterVisibilityLogical",
+                "message": {
+                  "operation": "OR",
+                  "children": [
+                    {
+                      "type": 180,
+                      "typeName": "BTParameterVisibilityOnEqual",
+                      "message": {
+                        "parameterId": "List_FWe78IjCGMnxHB",
+                        "value": "Slots",
+                        "inArray": false
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        },
+        "hasUserCode": false,
+        "nodeId": "MfAgv23zsDAHXrCzf"
+      }
+    }
+  ],
+  "currentConfiguration": [],
+  "serializationVersion": "1.2.23",
+  "sourceMicroversion": "ea38f5902a4236d42c39c148",
+  "rejectMicroversionSkew": false,
+  "microversionSkew": false,
+  "libraryVersion": 3112
+}

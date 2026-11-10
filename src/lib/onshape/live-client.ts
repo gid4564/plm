@@ -5,7 +5,7 @@ import type {
 import type {
   PartExport, ReleasePackage, ReleasePackageItem, ReleaseWorkflow, WorkflowAction,
   CreateReleasePackageInput, DrawingCoords, FileExport,
-  ImportResult, NewDocument, UploadFile,
+  ImportResult, NewDocument, UploadFile, DocumentVersion,
 } from "./types";
 import { recordApiCall } from "@/lib/api-log";
 import { parseBom, type BomTable } from "./bom";
@@ -699,6 +699,63 @@ export class LiveOnshapeClient implements OnshapeClient {
     }
 
     return table;
+  }
+
+  /* ======================================================================== */
+  /* Configurator                                                              */
+  /* ======================================================================== */
+
+  async getConfigurationPayload(c: AssemblyCoords): Promise<Record<string, unknown>> {
+    const wv = c.workspaceId ? `w/${c.workspaceId}` : `v/${c.versionId}`;
+    return this.req<Record<string, unknown>>(`/elements/d/${c.documentId}/${wv}/e/${c.elementId}/configuration`);
+  }
+
+  async encodeConfiguration(
+    documentId: string,
+    elementId: string,
+    parameters: { parameterId: string; parameterValue: string }[]
+  ): Promise<{ configuration: string }> {
+    const res = await this.req<Record<string, any>>(
+      `/elements/d/${documentId}/e/${elementId}/configurationencodings`,
+      { method: "POST", body: JSON.stringify({ parameters }) }
+    );
+    // `encodedId` is the plain string ("Add_cutouts=true;D=350+millimeter;…");
+    // `queryParam` is the same thing URL-encoded behind "configuration=".
+    const configuration = String(
+      res?.encodedId ?? decodeURIComponent(String(res?.queryParam ?? "").replace(/^configuration=/, ""))
+    );
+    if (!configuration) {
+      throw new Error(`Onshape returned no configuration encoding. Keys: ${Object.keys(res ?? {}).join(", ")}`);
+    }
+    return { configuration };
+  }
+
+  async renderConfiguration(
+    c: AssemblyCoords,
+    size: { width: number; height: number }
+  ): Promise<Thumbnail> {
+    const wv = c.workspaceId ? `w/${c.workspaceId}` : `v/${c.versionId}`;
+    const q =
+      `outputWidth=${size.width}&outputHeight=${size.height}&pixelSize=0` +
+      `&viewMatrix=0.612,0.612,0,0,-0.354,0.354,0.866,0,0.707,-0.707,0.5,0` +
+      (c.configuration ? `&configuration=${encodeURIComponent(c.configuration)}` : "");
+    const res = await this.req<Record<string, any>>(
+      `${process.env.ONSHAPE_ASSEMBLY_SHADEDVIEWS_PATH || "/assemblies"}` +
+      `/d/${c.documentId}/${wv}/e/${c.elementId}/shadedviews?${q}`
+    );
+    const b64 = Array.isArray(res?.images) ? res.images[0] : res?.images;
+    if (!b64 || typeof b64 !== "string") {
+      throw new Error("Onshape rendered no picture for this configuration.");
+    }
+    return { contentType: "image/png", data: Buffer.from(b64, "base64") };
+  }
+
+  async listVersions(documentId: string): Promise<DocumentVersion[]> {
+    const rows = await this.req<any[]>(`/documents/d/${documentId}/versions`);
+    return (Array.isArray(rows) ? rows : [])
+      .map((v) => ({ id: String(v.id ?? ""), name: String(v.name ?? ""), createdAt: String(v.createdAt ?? "") }))
+      .filter((v) => v.id)
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   }
 
   async getConfigurationDefinition(c: AssemblyCoords): Promise<ConfigurationDefinition> {

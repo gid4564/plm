@@ -12,13 +12,14 @@ import type { ExportFormat } from "./export-formats";
 import type {
   PartExport, ReleasePackage, ReleasePackageItem, ReleaseWorkflow, WorkflowAction,
   CreateReleasePackageInput, DrawingCoords, FileExport,
-  ImportResult, NewDocument, UploadFile,
+  ImportResult, NewDocument, UploadFile, DocumentVersion,
 } from "./types";
 import type { MassProperties } from "./mass-properties";
 import { mapStandardProperties, resolveEnumLabel, toDisplayString, type RawProperty } from "./standard-properties";
 import { classify } from "./element-type";
 import { resolveTaskCommentContext } from "./object-types";
 import { isStepFile, scanStep } from "@/lib/step-scan";
+import MOCK_CONFIGURATION from "./mock-configuration.json";
 
 /** A random lowercase-hex id of `bytes` bytes, for simulator-made objects. */
 const randomHex = (bytes: number) => randomBytes(bytes).toString("hex");
@@ -302,6 +303,119 @@ export class MockOnshapeClient implements OnshapeClient {
    * quantities — against the same interface the live client implements, not to
    * simulate assembly structure.
    */
+  /* ------------------------------ Configurator ---------------------------- */
+
+  /*
+   * Every simulated assembly is configurable as the real Flight Case is: the
+   * payload is that model's own configuration, read from a live tenant
+   * (scripts/probe-configuration.mjs), so the form, the visibility rules and
+   * the key are exercised against exactly what Onshape sends.
+   */
+  async getConfigurationPayload(): Promise<Record<string, unknown>> {
+    return JSON.parse(JSON.stringify(MOCK_CONFIGURATION));
+  }
+
+  /** As Onshape does it: sorted by id, a number's unit joined with "+". */
+  async encodeConfiguration(
+    _documentId: string,
+    _elementId: string,
+    parameters: { parameterId: string; parameterValue: string }[]
+  ): Promise<{ configuration: string }> {
+    return {
+      configuration: [...parameters]
+        .sort((a, b) => a.parameterId.localeCompare(b.parameterId))
+        .map((p) => `${p.parameterId}=${String(p.parameterValue).trim().replace(/\s+/g, "+")}`)
+        .join(";"),
+    };
+  }
+
+  /**
+   * A drawing of the configured case, not a stand-in tile.
+   *
+   * Sized from the chosen Size (or the Custom length/depth/height), with the
+   * foam and its compartments or slots drawn in — so a demo shows two
+   * configurations as visibly different, which is the point of the feature.
+   * Slots that cannot fit the case fail the way an Onshape regeneration
+   * would, which is how the failure path is exercised without a tenant.
+   */
+  async renderConfiguration(
+    c: AssemblyCoords,
+    size: { width: number; height: number }
+  ): Promise<Thumbnail> {
+    if (!process.env.MOCK_FAST) await new Promise((r) => setTimeout(r, 1200));
+    const v = new Map(
+      String(c.configuration ?? "").split(";").filter(Boolean).map((kv) => {
+        const i = kv.indexOf("=");
+        return [kv.slice(0, i), kv.slice(i + 1).replace(/\+/g, " ")] as [string, string];
+      })
+    );
+    const num = (k: string, d: number) => parseFloat(v.get(k) ?? "") || d;
+
+    const params: any[] = (MOCK_CONFIGURATION as any).configurationParameters.map((p: any) => p.message ?? p);
+    const sizeParam = params.find((p) => p.parameterName === "Size");
+    const sizeOpt = (sizeParam?.options ?? []).map((o: any) => o.message ?? o)
+      .find((o: any) => o.option === (v.get(sizeParam?.parameterId) ?? sizeParam?.defaultValue));
+    const custom = !sizeOpt || /custom/i.test(sizeOpt.optionName);
+    const [L, D, H] = custom
+      ? [num("L", 500), num("D", 350), num("H", 225)]
+      : String(sizeOpt.optionName).split("x").map((x: string) => parseFloat(x));
+
+    const foam = v.get("Add_foam_inserts") !== "false";
+    const cutouts = foam && v.get("Add_cutouts") === "true";
+    const typeParam = params.find((p) => p.parameterName === "Cutout type");
+    const slotsMode = v.get(typeParam?.parameterId) === "Slots";
+    const slots = Math.round(num("Slots", 10));
+    const slotWidth = num("Slot_width", 20);
+    if (cutouts && slotsMode && slots * slotWidth > L * 0.9) {
+      throw new Error(
+        `Mock Onshape: regeneration failed — ${slots} slots of ${slotWidth} mm do not fit a ${L} mm case.`
+      );
+    }
+    const compParam = params.find((p) => p.parameterName === "Compartments");
+    const compartments = Number((compParam?.options ?? []).map((o: any) => o.message ?? o)
+      .find((o: any) => o.option === v.get(compParam?.parameterId))?.optionName ?? 1);
+
+    // An oblique projection: length across, depth receding up and to the right.
+    const { width: W, height: Hh } = size;
+    const k = Math.min((W * 0.7) / (L + D * 0.5), (Hh * 0.75) / (H + D * 0.35));
+    const l = L * k, d = D * k * 0.5, h = H * k;
+    const x0 = (W - l - d) / 2, y0 = (Hh + h - d * 0.7) / 2 + d * 0.35;
+    const pt = (x: number, y: number) => `${x.toFixed(1)},${y.toFixed(1)}`;
+    // A point on the open top face: u along the length, w into the depth.
+    const at = (u: number, w: number) => pt(x0 + u * l + w * d, y0 - h - w * d * 0.7);
+    const quad = (u0: number, u1: number, w0: number, w1: number, fill: string) =>
+      `<polygon points="${[at(u0, w0), at(u1, w0), at(u1, w1), at(u0, w1)].join(" ")}" fill="${fill}"/>`;
+    let inner = "";
+    if (foam) {
+      inner += quad(0.04, 0.96, 0.08, 0.92, "#5b6470");
+      if (cutouts) {
+        const n = slotsMode ? slots : compartments;
+        for (let i = 0; i < n; i++) {
+          inner += quad(0.04 + (0.92 * (i + 0.12)) / n, 0.04 + (0.92 * (i + (slotsMode ? 0.42 : 0.88))) / n,
+            0.18, 0.82, "#2f353d");
+        }
+      }
+    }
+    // The lid stands open along the back edge, so the foam can be seen.
+    const back = (u: number, up: number) => pt(x0 + u * l + d, y0 - h - d * 0.7 - up);
+    const svg =
+      `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${Hh}">` +
+      `<rect width="${W}" height="${Hh}" fill="#ffffff"/>` +
+      `<polygon points="${back(0, 0)} ${back(1, 0)} ${back(1.03, h * 0.95)} ${back(0.03, h * 0.95)}" fill="#e3b21c" stroke="#8a6a0a"/>` +
+      `<polygon points="${pt(x0, y0)} ${pt(x0 + l, y0)} ${pt(x0 + l, y0 - h)} ${pt(x0, y0 - h)}" fill="#7d8792" stroke="#3d444c"/>` +
+      `<polygon points="${pt(x0 + l, y0)} ${pt(x0 + l + d, y0 - d * 0.7)} ${pt(x0 + l + d, y0 - h - d * 0.7)} ${pt(x0 + l, y0 - h)}" fill="#5f6873" stroke="#3d444c"/>` +
+      `<polygon points="${[at(0, 0), at(1, 0), at(1, 1), at(0, 1)].join(" ")}" fill="#9aa3ad" stroke="#3d444c"/>` +
+      inner +
+      `<text x="${W / 2}" y="${Hh - 14}" text-anchor="middle" font-family="system-ui,sans-serif" font-size="${Math.round(W / 40)}" fill="#5c6773">` +
+      `${L} × ${D} × ${H} mm${foam ? " · foam" : ""}${cutouts ? (slotsMode ? ` · ${slots} slots` : ` · ${compartments} compartment(s)`) : ""} (simulated)</text>` +
+      `</svg>`;
+    return { contentType: "image/svg+xml", data: Buffer.from(svg, "utf8") };
+  }
+
+  async listVersions(): Promise<DocumentVersion[]> {
+    return [{ id: "a0000000000000000000000a", name: "V1 (simulator)", createdAt: "2026-11-09T00:00:00.000Z" }];
+  }
+
   async getConfigurationDefinition(): Promise<ConfigurationDefinition> {
     return { parameters: [] };
   }

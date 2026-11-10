@@ -579,6 +579,31 @@ approvers, and PLM performs that transition as the service account.
 
 ---
 
+## The Configurator
+
+**Configurator** in the top bar lets anyone signed in configure a configured
+Onshape assembly and see the result, without opening Onshape.
+
+- **Choosing options.** The form shows exactly the inputs Onshape's own
+  configuration panel would: choose *Custom* and the dimensions appear; switch an
+  option off and everything that depends on it disappears. Numbers are checked
+  against the ranges set in Onshape.
+- **Generate.** A configuration seen before appears straight away, from PLM. A
+  new one is rendered in Onshape — usually seconds; the first of the day can take
+  a minute — and kept. Choices that only differ in an input nobody could see (a
+  custom length while a fixed size is chosen) are the same configuration.
+- **CFG numbers.** Each configuration gets a number from the *Configuration*
+  scheme on the Numbering page the first time it is generated, and keeps it.
+- **A combination Onshape cannot build** shows Onshape's reason and is
+  remembered; *Try again* asks once more.
+- **Adding a model** (admins): paste the assembly's link, choose the version to
+  read it at, and name it. Reading a version rather than the workspace keeps
+  generated configurations correct when someone edits the model. A model can be
+  switched off without losing its configurations.
+
+This is phase 1 of docs/CONFIGURATOR-DESIGN.md: the picture. The BOM, PLM parts
+for each configuration and the 3D model follow.
+
 ## The Onshape panels
 
 Two right-panel extensions, in the document beside the model.

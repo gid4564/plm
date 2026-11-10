@@ -1,0 +1,245 @@
+"use client";
+
+import Link from "next/link";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { Alert, Spinner, relTime } from "@/components/ui";
+import { resolve, summarize, validate, type ConfigInput, type Values } from "@/lib/configurator-rules";
+
+type Model = {
+  id: string; name: string; enabled: boolean; documentName: string; elementName: string;
+  versionName: string; onVersion: boolean; inputs: ConfigInput[];
+};
+
+type Item = {
+  id: string; number: string | null; summary: string; values: Values;
+  state: "queued" | "generating" | "ready" | "failed"; step: string; error: string | null;
+  hasPicture: boolean; requestCount: number; generatedAt: string | null; elapsedMs: number | null;
+  lastRequestedAt: string;
+};
+
+const POLL_MS = 2000;
+const unitLabel = (u?: string) => (u === "millimeter" ? "mm" : u === "inch" ? "in" : u === "meter" ? "m" : u ?? "");
+
+/**
+ * Configure one model.
+ *
+ * The form shows exactly the inputs Onshape's own configuration panel would,
+ * using the same rules module the server keys with (lib/configurator-rules.ts)
+ * — so what is on screen is what gets generated.
+ */
+export function ConfigureClient({ id }: { id: string; isAdmin: boolean }) {
+  const [model, setModel] = useState<Model | null>(null);
+  const [items, setItems] = useState<Item[]>([]);
+  const [given, setGiven] = useState<Values>({});
+  const [current, setCurrent] = useState<Item | null>(null);
+  const [cached, setCached] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [serverFields, setServerFields] = useState<Record<string, string>>({});
+  const [busy, setBusy] = useState(false);
+
+  const load = useCallback(async () => {
+    const r = await fetch(`/api/configurator/models/${id}`);
+    const j = await r.json();
+    if (!r.ok) { setError(j.error || "Could not load this model"); return; }
+    setModel(j.model);
+    setItems(j.items);
+  }, [id]);
+  useEffect(() => { void load(); }, [load]);
+
+  const inputs = model?.inputs ?? [];
+  const { values, visible } = useMemo(() => resolve(inputs, given), [inputs, given]);
+  const errors = useMemo(() => validate(inputs, values, visible), [inputs, values, visible]);
+  const summary = useMemo(() => summarize(inputs, values, visible), [inputs, values, visible]);
+
+  // Follow a generation until it settles, then refresh the gallery.
+  useEffect(() => {
+    if (!current || (current.state !== "queued" && current.state !== "generating")) return;
+    const t = setInterval(async () => {
+      const r = await fetch(`/api/configurator/items/${current.id}`);
+      if (!r.ok) return;
+      const { item } = await r.json();
+      setCurrent(item);
+      if (item.state === "ready" || item.state === "failed") void load();
+    }, POLL_MS);
+    return () => clearInterval(t);
+  }, [current, load]);
+
+  async function generate(retry = false) {
+    setBusy(true); setError(null); setServerFields({});
+    try {
+      const r = await fetch(`/api/configurator/models/${id}/generate`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ values, retry }),
+      });
+      const j = await r.json();
+      if (r.status === 422) { setError(j.error); setServerFields(j.fields ?? {}); return; }
+      if (!r.ok) throw new Error(j.error || "Could not generate");
+      setCurrent(j.item);
+      setCached(Boolean(j.cached));
+      void load();
+    } catch (e: any) {
+      setError(String(e?.message ?? e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function show(item: Item) {
+    setGiven(item.values ?? {});
+    setCurrent(item);
+    setCached(true);
+  }
+
+  if (!model) {
+    return error ? <Alert kind="error">{error}</Alert>
+      : <div className="card" style={{ padding: 40, textAlign: "center" }}><Spinner size={20} /></div>;
+  }
+
+  const set = (inputId: string, v: string) => setGiven((g) => ({ ...g, ...values, [inputId]: v }));
+  const fieldError = (inputId: string) => serverFields[inputId] ?? errors[inputId];
+  const showing = current;
+
+  return (
+    <div style={{ display: "grid", gap: 16 }}>
+      <div>
+        <Link href="/configurator" style={{ fontSize: 12.5, color: "var(--accent)" }}>← Configurator</Link>
+        <h1 style={{ margin: "4px 0 3px", fontSize: 20 }}>{model.name}</h1>
+        <p style={{ margin: 0, fontSize: 12.5, color: "var(--text-faint)" }}>
+          {model.documentName} · {model.elementName} ·{" "}
+          {model.onVersion ? `version ${model.versionName}` : "workspace"}
+        </p>
+      </div>
+
+      {!model.enabled && <Alert kind="warn">This model is switched off for configuring.</Alert>}
+      {error && <Alert kind="error" onDismiss={() => setError(null)}>{error}</Alert>}
+
+      <div style={{ display: "grid", gap: 16, gridTemplateColumns: "minmax(260px, 340px) minmax(0, 1fr)" }}>
+        {/* ----------------------------- Options ----------------------------- */}
+        <div className="card" style={{ display: "grid", gap: 12, alignContent: "start" }}>
+          <h2 style={{ margin: 0, fontSize: 15 }}>Options</h2>
+          {inputs.filter((i) => visible.has(i.id)).map((i) => (
+            <div key={i.id} style={{ display: "grid", gap: 4 }}>
+              {i.kind === "boolean" ? (
+                <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13.5 }}>
+                  <input type="checkbox" checked={values[i.id] === "true"}
+                    onChange={(e) => set(i.id, String(e.target.checked))} />
+                  {i.name}
+                </label>
+              ) : (
+                <>
+                  <label className="label" htmlFor={`in-${i.id}`}>{i.name}</label>
+                  {i.kind === "list" ? (
+                    <select id={`in-${i.id}`} value={values[i.id]} onChange={(e) => set(i.id, e.target.value)}>
+                      {i.options.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+                    </select>
+                  ) : i.kind === "quantity" ? (
+                    <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                      <input
+                        id={`in-${i.id}`} className="input" type="number" style={{ flex: 1 }}
+                        value={values[i.id]} min={i.min} max={i.max} step={i.integer ? 1 : "any"}
+                        onChange={(e) => set(i.id, e.target.value)}
+                      />
+                      <span style={{ fontSize: 12, color: "var(--text-faint)", minWidth: 24 }}>{unitLabel(i.units)}</span>
+                    </div>
+                  ) : (
+                    <input id={`in-${i.id}`} className="input" value={values[i.id]} onChange={(e) => set(i.id, e.target.value)} />
+                  )}
+                  {i.kind === "quantity" && (
+                    <span style={{ fontSize: 11, color: "var(--text-faint)" }}>
+                      {i.min}–{i.max} {unitLabel(i.units)}
+                    </span>
+                  )}
+                </>
+              )}
+              {fieldError(i.id) && <span style={{ fontSize: 12, color: "var(--danger)" }}>{fieldError(i.id)}</span>}
+            </div>
+          ))}
+          <div style={{ borderTop: "1px solid var(--border)", paddingTop: 10, fontSize: 12.5, color: "var(--text-muted)" }}>
+            {summary || "Defaults"}
+          </div>
+          <button
+            className="btn btn-primary" onClick={() => generate()}
+            disabled={busy || !model.enabled || Object.keys(errors).length > 0}
+          >
+            {busy ? <Spinner /> : "Generate"}
+          </button>
+        </div>
+
+        {/* ------------------------------ Result ----------------------------- */}
+        <div className="card" style={{ display: "grid", gap: 10, alignContent: "start", minHeight: 360 }}>
+          {!showing ? (
+            <div style={{ color: "var(--text-faint)", fontSize: 13, padding: 20 }}>
+              Choose options and press Generate. A configuration seen before appears straight away; a new
+              one is generated in Onshape, usually in seconds — the first of the day can take a minute.
+            </div>
+          ) : (
+            <>
+              <div style={{ display: "flex", gap: 10, alignItems: "baseline", flexWrap: "wrap" }}>
+                <span className="mono" style={{ fontWeight: 700, fontSize: 16 }}>{showing.number ?? "—"}</span>
+                <span style={{ fontSize: 13, color: "var(--text-muted)" }}>{showing.summary}</span>
+              </div>
+              {showing.state === "ready" && showing.hasPicture ? (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img
+                  src={`/api/configurator/items/${showing.id}/picture`} alt={showing.summary}
+                  style={{ width: "100%", maxWidth: 800, aspectRatio: "4 / 3", objectFit: "contain", background: "#fff", borderRadius: 8, border: "1px solid var(--border)" }}
+                />
+              ) : showing.state === "failed" ? (
+                <Alert kind="error">
+                  <strong>Onshape could not generate this configuration.</strong> {showing.error}
+                  <div style={{ marginTop: 6 }}>
+                    <button className="btn btn-sm" onClick={() => generate(true)} disabled={busy}>Try again</button>
+                  </div>
+                </Alert>
+              ) : (
+                <div style={{ display: "grid", placeItems: "center", aspectRatio: "4 / 3", maxWidth: 800, border: "1px dashed var(--border)", borderRadius: 8, color: "var(--text-muted)", fontSize: 13, gap: 8 }}>
+                  <div style={{ display: "grid", gap: 8, justifyItems: "center" }}>
+                    <Spinner size={20} />
+                    {showing.state === "queued" ? "Waiting for a free slot…" : showing.step || "Generating in Onshape…"}
+                  </div>
+                </div>
+              )}
+              <div style={{ fontSize: 12, color: "var(--text-faint)" }}>
+                {showing.state === "ready" && (cached
+                  ? `From PLM — generated ${relTime(showing.generatedAt)}, asked for ${showing.requestCount} time${showing.requestCount === 1 ? "" : "s"}.`
+                  : `Generated in ${((showing.elapsedMs ?? 0) / 1000).toFixed(1)} s.`)}
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+
+      {/* --------------------------- Configurations -------------------------- */}
+      {items.length > 0 && (
+        <div className="card" style={{ display: "grid", gap: 10 }}>
+          <h2 style={{ margin: 0, fontSize: 15 }}>Configurations generated</h2>
+          <div style={{ display: "grid", gap: 10, gridTemplateColumns: "repeat(auto-fill, minmax(170px, 1fr))" }}>
+            {items.map((it) => (
+              <button
+                key={it.id} onClick={() => show(it)}
+                style={{
+                  display: "grid", gap: 4, textAlign: "left", padding: 8, cursor: "pointer",
+                  background: current?.id === it.id ? "var(--accent-soft)" : "var(--surface)",
+                  border: `1px solid ${current?.id === it.id ? "var(--accent)" : "var(--border)"}`, borderRadius: 8,
+                  color: "inherit", font: "inherit",
+                }}
+              >
+                {it.hasPicture ? (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img src={`/api/configurator/items/${it.id}/picture`} alt="" loading="lazy"
+                    style={{ width: "100%", aspectRatio: "4 / 3", objectFit: "contain", background: "#fff", borderRadius: 6 }} />
+                ) : (
+                  <div style={{ aspectRatio: "4 / 3", display: "grid", placeItems: "center", background: "var(--surface-2)", borderRadius: 6, fontSize: 12, color: "var(--text-faint)" }}>
+                    {it.state === "failed" ? "failed" : <Spinner />}
+                  </div>
+                )}
+                <span className="mono" style={{ fontSize: 12.5, fontWeight: 650 }}>{it.number ?? "—"}</span>
+                <span style={{ fontSize: 11.5, color: "var(--text-muted)", lineHeight: 1.35 }}>{it.summary}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}

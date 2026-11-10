@@ -3,13 +3,14 @@
 import { useCallback, useEffect, useState } from "react";
 import { Alert, Spinner } from "@/components/ui";
 
-type NumberingType = "PART" | "ASSEMBLY" | "DRAWING" | "RELEASE";
+type NumberingType = "PART" | "ASSEMBLY" | "DRAWING" | "RELEASE" | "CONFIGURATION";
 // A plain local copy, not imported from lib/numbering — that module pulls in
 // the Mongoose models, which a "use client" file must never bundle.
-const NUMBERING_TYPES: NumberingType[] = ["PART", "ASSEMBLY", "DRAWING", "RELEASE"];
+const NUMBERING_TYPES: NumberingType[] = ["PART", "ASSEMBLY", "DRAWING", "RELEASE", "CONFIGURATION"];
 
 const LABELS: Record<NumberingType, string> = {
   PART: "Part", ASSEMBLY: "Assembly", DRAWING: "Drawing", RELEASE: "Release",
+  CONFIGURATION: "Configuration",
 };
 
 /** What each scheme numbers, and where those numbers surface. */
@@ -26,6 +27,9 @@ const PURPOSE: Record<NumberingType, string> = {
   RELEASE:
     "Releases. Travels to Onshape as the release package's changeOrderId, which is how a " +
     "package is traced back to PLM from the Onshape side.",
+  CONFIGURATION:
+    "Configured items from the Configurator — one exact configuration of a configurable model. " +
+    "Issued the first time a configuration is generated; asking for it again returns the same number.",
 };
 
 type Sequence = {

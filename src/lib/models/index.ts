@@ -1330,7 +1330,7 @@ const OAuthTokenSchema = new Schema({
 const NumberingSequenceSchema = new Schema(
   {
     enterpriseId: { type: Schema.Types.ObjectId, ref: "Enterprise", required: true, index: true },
-    type: { type: String, enum: ["PART", "ASSEMBLY", "DRAWING", "RELEASE"], required: true },
+    type: { type: String, enum: ["PART", "ASSEMBLY", "DRAWING", "RELEASE", "CONFIGURATION"], required: true },
     prefix: { type: String, default: "" },
     suffix: { type: String, default: "" },
     /** Digits the counter is padded to — 5 → 00042. */
@@ -1366,7 +1366,7 @@ NumberingSequenceSchema.index({ enterpriseId: 1, type: 1 }, { unique: true });
 const CategoryNumberingSequenceSchema = new Schema(
   {
     enterpriseId: { type: Schema.Types.ObjectId, ref: "Enterprise", required: true, index: true },
-    type: { type: String, enum: ["PART", "ASSEMBLY", "DRAWING", "RELEASE"], required: true },
+    type: { type: String, enum: ["PART", "ASSEMBLY", "DRAWING", "RELEASE", "CONFIGURATION"], required: true },
     /** Onshape's id for the category. Opaque to PLM — matched, never interpreted. */
     onshapeCategoryId: { type: String, required: true },
     /** Onshape's own label, kept only for display. PLM does not rename this. */
@@ -1393,7 +1393,7 @@ CategoryNumberingSequenceSchema.index(
 const NumberIssuedLogSchema = new Schema(
   {
     enterpriseId: { type: Schema.Types.ObjectId, ref: "Enterprise", required: true, index: true },
-    type: { type: String, enum: ["PART", "ASSEMBLY", "DRAWING", "RELEASE"], required: true },
+    type: { type: String, enum: ["PART", "ASSEMBLY", "DRAWING", "RELEASE", "CONFIGURATION"], required: true },
     number: { type: String, required: true },
     /** "plm": issued from PLM's own UI. "onshape": Onshape's generator extension asked. */
     source: { type: String, enum: ["plm", "onshape"], default: "plm" },
@@ -1845,7 +1845,86 @@ export type DrawingDoc = InferSchemaType<typeof DrawingSchema> & { _id: mongoose
 export type ReleaseDoc = InferSchemaType<typeof ReleaseSchema> & { _id: mongoose.Types.ObjectId };
 export type AttributeDefinitionDoc = InferSchemaType<typeof AttributeDefinitionSchema> & { _id: mongoose.Types.ObjectId };
 
+/* -------------------------------------------------------------------------- */
+/* Configurator — see docs/CONFIGURATOR-DESIGN.md.                             */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * A configured Onshape assembly people can configure from PLM.
+ *
+ * Registered against a *version*, never a workspace: a cached configuration
+ * read from a workspace goes quietly wrong the moment someone edits the model.
+ * Moving to a newer version bumps `revision`, and configured items remember
+ * which revision made them.
+ *
+ * `definition` is Onshape's configuration payload as read at registration —
+ * kept verbatim, because the form, the visibility rules and the cache key are
+ * all derived from it and a re-read could differ.
+ */
+const ConfigurableModelSchema = new Schema(
+  {
+    enterpriseId: { type: Schema.Types.ObjectId, ref: "Enterprise", required: true, index: true },
+    name: { type: String, required: true },
+    productId: { type: Schema.Types.ObjectId, ref: "Product", default: null },
+    documentId: { type: String, required: true },
+    elementId: { type: String, required: true },
+    /** The version read from; `workspaceId` only when no version was chosen (dev/mock). */
+    versionId: { type: String, default: null },
+    workspaceId: { type: String, default: null },
+    versionName: { type: String, default: "" },
+    documentName: { type: String, default: "" },
+    elementName: { type: String, default: "" },
+    revision: { type: Number, default: 1 },
+    definition: { type: Schema.Types.Mixed, required: true },
+    enabled: { type: Boolean, default: true },
+    createdByEmail: { type: String, default: "" },
+  },
+  { timestamps: true }
+);
+
+/**
+ * One configuration of a model, as generated — the cache entry.
+ *
+ * `key` is Onshape's own configuration string for the values with every
+ * hidden input reset to its default (see lib/configurator-rules.ts), so two
+ * requests that differ only in an input nobody could see are one item.
+ * Unique per model revision: the same values against a later version may be
+ * different geometry.
+ *
+ * The picture is stored here, inline: a rendering is ~200 KB, well inside a
+ * document, and it is the one thing every view of the item shows.
+ */
+const ConfiguredItemSchema = new Schema(
+  {
+    enterpriseId: { type: Schema.Types.ObjectId, ref: "Enterprise", required: true, index: true },
+    modelId: { type: Schema.Types.ObjectId, ref: "ConfigurableModel", required: true, index: true },
+    modelRevision: { type: Number, required: true },
+    key: { type: String, required: true },
+    /** The CFG number, issued when the item is first generated successfully. */
+    number: { type: String, default: null },
+    values: { type: Schema.Types.Mixed, default: {} },
+    summary: { type: String, default: "" },
+    state: { type: String, enum: ["queued", "generating", "ready", "failed"], default: "queued" },
+    step: { type: String, default: "" },
+    error: { type: String, default: null },
+    picture: { type: Buffer, default: null },
+    pictureType: { type: String, default: "image/png" },
+    requestedByEmail: { type: String, default: "" },
+    requestCount: { type: Number, default: 1 },
+    lastRequestedAt: { type: Date, default: () => new Date() },
+    startedAt: { type: Date, default: null },
+    generatedAt: { type: Date, default: null },
+    elapsedMs: { type: Number, default: null },
+  },
+  { timestamps: true }
+);
+ConfiguredItemSchema.index({ enterpriseId: 1, modelId: 1, modelRevision: 1, key: 1 }, { unique: true });
+ConfiguredItemSchema.index({ modelId: 1, lastRequestedAt: -1 });
+
 export const Enterprise = models.Enterprise || model("Enterprise", EnterpriseSchema);
+export const ConfigurableModel =
+  models.ConfigurableModel || model("ConfigurableModel", ConfigurableModelSchema);
+export const ConfiguredItem = models.ConfiguredItem || model("ConfiguredItem", ConfiguredItemSchema);
 export const User = models.User || model("User", UserSchema);
 export const AttributeDefinition =
   models.AttributeDefinition || model("AttributeDefinition", AttributeDefinitionSchema);

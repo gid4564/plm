@@ -500,8 +500,41 @@ export type ImportResult = {
   elapsedMs: number;
 };
 
+export type DocumentVersion = { id: string; name: string; createdAt: string };
+
 export interface OnshapeClient {
   readonly mode: "mock" | "live";
+
+  /* ------------------------------ Configurator ---------------------------- */
+
+  /**
+   * The element's configuration inputs, exactly as Onshape sends them.
+   *
+   * Raw on purpose: the configurator stores it and derives the form, the
+   * visibility rules and the key from it (lib/configurator-rules.ts). The
+   * narrower getConfigurationDefinition below serves the BOM import.
+   */
+  getConfigurationPayload(coords: AssemblyCoords): Promise<Record<string, unknown>>;
+
+  /** Onshape's own configuration string for a set of input values. */
+  encodeConfiguration(
+    documentId: string,
+    elementId: string,
+    parameters: { parameterId: string; parameterValue: string }[]
+  ): Promise<{ configuration: string }>;
+
+  /**
+   * A shaded picture of an assembly in one configuration. Throws with
+   * Onshape's reason rather than returning nothing — an invalid combination
+   * fails here, and the reason is what a person needs to see.
+   */
+  renderConfiguration(
+    coords: AssemblyCoords,
+    size: { width: number; height: number }
+  ): Promise<Thumbnail>;
+
+  /** A document's versions, newest first. */
+  listVersions(documentId: string): Promise<DocumentVersion[]>;
 
   /* ------------------------------ Creating CAD ---------------------------- */
 

@@ -14,14 +14,17 @@ import { CategoryNumberingSequence, NumberingSequence, Part } from "@/lib/models
  * in Onshape's changeOrderId, so reissuing one would make two releases
  * indistinguishable in the audit trail.
  */
-export type NumberingType = "PART" | "ASSEMBLY" | "DRAWING" | "RELEASE";
-export const NUMBERING_TYPES: NumberingType[] = ["PART", "ASSEMBLY", "DRAWING", "RELEASE"];
+export type NumberingType = "PART" | "ASSEMBLY" | "DRAWING" | "RELEASE" | "CONFIGURATION";
+export const NUMBERING_TYPES: NumberingType[] = ["PART", "ASSEMBLY", "DRAWING", "RELEASE", "CONFIGURATION"];
 
 const DEFAULT_PREFIX: Record<NumberingType, string> = {
   PART: "PN-",
   ASSEMBLY: "AS-",
   DRAWING: "DWG-",
   RELEASE: "REL-",
+  // A configured item from the configurator — one exact configuration of a
+  // model, named by one identifier a quote or an order can use.
+  CONFIGURATION: "CFG-",
 };
 
 /**
