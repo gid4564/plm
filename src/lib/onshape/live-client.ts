@@ -960,12 +960,13 @@ export class LiveOnshapeClient implements OnshapeClient {
 
   async getAssemblyDefinition(c: AssemblyCoords): Promise<AssemblyDefinition> {
     const wv = c.workspaceId ? `w/${c.workspaceId}` : `v/${c.versionId}`;
-    const q = new URLSearchParams({ includeMateFeatures: "false", includeNonSolids: "false", includeMateConnectors: "false" });
+    const q = new URLSearchParams({ includeMateFeatures: "false", includeNonSolids: "true", includeMateConnectors: "false" });
     if (c.configuration && c.configuration !== "default") q.set("configuration", c.configuration);
     const j = await this.req<Record<string, any>>(`/assemblies/d/${c.documentId}/${wv}/e/${c.elementId}?${q}`);
     return {
       rootAssembly: { instances: j?.rootAssembly?.instances ?? [], occurrences: j?.rootAssembly?.occurrences ?? [] },
       subAssemblies: j?.subAssemblies ?? [],
+      parts: j?.parts ?? [],
     };
   }
 

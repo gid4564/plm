@@ -36,6 +36,16 @@ import { composeGlb, type Placement } from "@/lib/gltf-compose";
 const EXPORT_CONCURRENCY = 3;
 
 /**
+ * How 3D models are built. A model built by an older build is rebuilt the
+ * next time its configuration is opened: 2 draws composite parts, which 1
+ * left out (frames, weldments — the WorkStation's frame, legs and pegboard).
+ */
+const MODEL_BUILD = 2;
+
+/** Bodies that are not drawn: construction geometry, not product. */
+const UNDRAWN_BODIES = new Set(["wire", "point"]);
+
+/**
  * Why a configurator-made part is never written to Onshape. Set as the part's
  * writeBackBlocked, which every write-back path already honours — including
  * deletion, so a reset touches nothing in Onshape either.
@@ -387,7 +397,8 @@ export async function requestConfiguration(
   const plmMissing = item.state === "ready" && item.bom && !item.partId && (!item.plmError || opts.retry);
   // In PLM but without its 3D model: generated before phase 4, or building
   // it failed. Only that step runs.
-  const modelMissing = item.state === "ready" && item.partId && (!item.modelAt || !item.partModelsAt) && (!item.modelError || opts.retry);
+  const modelMissing = item.state === "ready" && item.partId &&
+    (!item.modelAt || !item.partModelsAt || (item.modelBuild ?? 1) < MODEL_BUILD) && (!item.modelError || opts.retry);
   const bomOnly = bomMissing || plmMissing || modelMissing;
 
   if (fresh || lost || again || bomOnly) {
@@ -519,8 +530,8 @@ async function generate(enterpriseId: string, itemId: string, model: any, client
     // configured assembly's geometry, so it needs that assembly first.
     // The parts' own models come from the same exports, so an item whose
     // assembly model predates them (or whose parts lost theirs) runs it again.
-    const done: any = await ConfiguredItem.findById(itemId).select("partId modelAt partModelsAt key").lean();
-    if (done?.partId && (!done.modelAt || !done.partModelsAt)) {
+    const done: any = await ConfiguredItem.findById(itemId).select("partId modelAt partModelsAt modelBuild key").lean();
+    if (done?.partId && (!done.modelAt || !done.partModelsAt || (done.modelBuild ?? 1) < MODEL_BUILD)) {
       await ConfiguredItem.updateOne({ _id: itemId }, { $set: { state: "generating", step: "Building the 3D model" } });
       const t0 = Date.now();
       let parts: PartExports | null = null;
@@ -538,7 +549,7 @@ async function generate(enterpriseId: string, itemId: string, model: any, client
       await ConfiguredItem.updateOne(
         { _id: itemId },
         { $set: r.ok
-          ? { modelAt: new Date(), partModelsAt: new Date(), modelError: null, modelMs: Date.now() - t0 }
+          ? { modelAt: new Date(), partModelsAt: new Date(), modelBuild: MODEL_BUILD, modelError: null, modelMs: Date.now() - t0 }
           : { modelError: r.reason } }
       );
       if (!r.ok) console.warn(`[PLM] configurator: the 3D model of ${itemId} failed: ${r.reason}`);
@@ -590,12 +601,14 @@ export async function buildModel(
     return null;
   };
 
+  const bodyType = new Map((def.parts ?? []).map((p) => [`${p.documentId}|${p.elementId}|${p.partId}`, String(p.bodyType ?? "").toLowerCase()]));
   const unique = new Map<string, AssemblyInstance>();
   const placements: Placement[] = [];
   for (const o of def.rootAssembly.occurrences) {
     if (o.hidden) continue;
     const inst = resolvePath(o.path);
     if (!inst || String(inst.type).toLowerCase() !== "part" || !inst.partId) continue;
+    if (UNDRAWN_BODIES.has(bodyType.get(`${inst.documentId}|${inst.elementId}|${inst.partId}`) ?? "")) continue;
     const k = `${inst.documentId}|${inst.elementId}|${inst.partId}|${cfgOf(inst)}`;
     if (!unique.has(k)) unique.set(k, inst);
     placements.push({ key: k, name: inst.name, transform: o.transform });

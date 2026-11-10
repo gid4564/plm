@@ -1906,6 +1906,9 @@ function flightCaseDefinition(c: AssemblyCoords): AssemblyDefinition {
         inst("Hpin0", "Handle Pin <1>", 6, "REBD", "H=0.35000000000000003+meter"), inst("Hpin1", "Handle Pin <2>", 6, "REBD", "H=0.35000000000000003+meter"),
       ] },
     ],
+    // The handle is a composite part on the simulated case, as frames are on
+    // the live WorkStation — so a composite has to be drawn like any part.
+    parts: [{ documentId: c.documentId, elementId: el(6), partId: "JLD", bodyType: "composite" }],
   };
 }
 

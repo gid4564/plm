@@ -382,6 +382,16 @@ async function main() {
   check("the 400 mm case has its own model", (await getItem(eid, p1.item!.id))?.hasModel === true);
 
   await ConfigurableModel.updateOne({ _id: modelId }, { $set: { enabled: true } });
+  // A model built before composite parts were drawn is rebuilt when next opened.
+  const exportsThen = client.exports;
+  await ConfiguredItem.updateOne({ _id: first.item!.id }, { $set: { modelBuild: 1 } });
+  await requestConfiguration(eid, actor, modelId, choice, { client, wait: true });
+  check("a model from an older build is rebuilt when next opened",
+    (await ConfiguredItem.findById(first.item!.id).lean() as any)?.modelBuild === 2 && client.exports > exportsThen);
+  check("composite parts are drawn like any other (the simulated handle is one)",
+    model3d.json.nodes.filter((n: any) => /^Handle Assembly/.test(n.name ?? "")).length === 0 &&
+    model3d.json.nodes.some((n: any) => n.name === "Handle"));
+
   client.failExport = "RABD";
   const pinless = { [by("Size").id]: by("Size").options[4].value };
   const pl = await requestConfiguration(eid, actor, modelId, pinless, { client, wait: true });

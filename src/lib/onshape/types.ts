@@ -150,6 +150,8 @@ export type AssemblyDefinition = {
     documentId: string; elementId: string; configuration?: string; fullConfiguration?: string;
     instances: AssemblyInstance[];
   }[];
+  /** Each distinct part's kind of body: "solid", "sheet", "wire", "composite", … */
+  parts: { documentId: string; elementId: string; partId: string; bodyType?: string; fullConfiguration?: string; configuration?: string }[];
 };
 
 export type AssemblyCoords = {
@@ -681,7 +683,10 @@ export interface OnshapeClient {
    * An assembly's instances and where each occurrence sits, for one
    * configuration (`GET /assemblies/…?configuration=`): rootAssembly.instances
    * and .occurrences (path of instance ids, row-major 4×4 transform relative
-   * to the root, in metres), and subAssemblies[].instances. The configurator
+   * to the root, in metres), subAssemblies[].instances, and parts[] with each
+   * part's body type. Non-solids are included: Onshape counts a composite part
+   * (a frame, a weldment) as one, and leaving them out dropped the Workbench
+   * Frame, Leg Structure and Pegboard from a live model (10 Nov 2026). The configurator
    * composes its 3D model from this and the part exports — see gltf-compose.
    */
   getAssemblyDefinition(coords: AssemblyCoords): Promise<AssemblyDefinition>;

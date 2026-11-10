@@ -392,6 +392,14 @@ waited for. A part that will not export is left out and logged rather than
 losing the model. Configurations made before phase 4 get their model the next
 time they are opened.
 
+**Composite parts.** The definition is read with `includeNonSolids=true`:
+Onshape counts a composite part (a frame or weldment) as a non-solid, and
+with `false` it is missing from the definition altogether — the live
+WorkStation model lost its Workbench Frame, Leg Structure and Pegboard that
+way (10 Nov 2026). Only wire and point bodies are left undrawn. Models built
+before this (`modelBuild` < 2) are rebuilt when their configuration is next
+opened.
+
 **Each part's own model.** The part exports the assembly model is built from
 are kept as each PLM part's geometry too (when it has none) — no further
 Onshape call. Configurator parts are `writeBackBlocked`, which elsewhere means

@@ -1958,6 +1958,8 @@ const ConfiguredItemSchema = new Schema(
     modelMs: { type: Number, default: null },
     /** When the parts' own 3D models were kept, from the same exports. */
     partModelsAt: { type: Date, default: null },
+    /** Which build of the 3D model this is (configurator MODEL_BUILD); older ones are rebuilt. */
+    modelBuild: { type: Number, default: null },
     /** What someone called this configuration ("Touring case, 10 slots"); empty for none. */
     name: { type: String, default: "" },
     requestedByEmail: { type: String, default: "" },
