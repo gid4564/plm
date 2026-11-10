@@ -5,8 +5,12 @@ sees the result, and gets a bill of materials for exactly that configuration.
 Each configuration is generated in Onshape once, kept in PLM, and served from
 PLM afterwards; every configuration generated adds its parts to PLM's BOM.
 
-Status: **phase 1 built** (configure, key, generate and cache the picture —
-`src/lib/configurator*.ts`, `/configurator`); phases 2–4 not started. Grounded in a probe of a real configured
+Status: **phases 1–2 built** (configure, key, generate and cache the picture;
+read and keep each configuration's BOM as a snapshot — `src/lib/configurator*.ts`,
+`/configurator`); phases 3–4 not started. Building phase 2 found that PLM's BOM
+parser read the indent from the row, while the live `bomTable.items` shape
+carries it on `itemSource` — every indented BOM had come back flat; fixed in
+`lib/onshape/bom.ts` for the BOM import too. Grounded in a probe of a real configured
 assembly (*Flight Case → Case Assembly*, gjp.onshape.com, 9 Nov 2026) using
 `scripts/probe-configuration.mjs`. Where this document says "measured", that is
 where the number comes from.

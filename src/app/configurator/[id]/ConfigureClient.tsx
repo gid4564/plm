@@ -10,14 +10,44 @@ type Model = {
   versionName: string; onVersion: boolean; inputs: ConfigInput[];
 };
 
+type BomRow = {
+  level: number; quantity: number; partNumber: string; name: string; description: string;
+  kind: "part" | "assembly" | "other"; configuration: string | null;
+};
+
 type Item = {
   id: string; number: string | null; summary: string; values: Values;
   state: "queued" | "generating" | "ready" | "failed"; step: string; error: string | null;
-  hasPicture: boolean; requestCount: number; generatedAt: string | null; elapsedMs: number | null;
+  hasPicture: boolean; bom: BomRow[] | null; bomError: string | null; requestCount: number; generatedAt: string | null; elapsedMs: number | null;
   lastRequestedAt: string;
 };
 
 const POLL_MS = 2000;
+/** Outline numbers for an indented BOM: 1, 2, 2.1, 2.2, 3 — as Onshape's Item column. */
+function outline(rows: BomRow[]): string[] {
+  const counters: number[] = [];
+  return rows.map((r) => {
+    counters.length = r.level + 1;
+    counters[r.level] = (counters[r.level] ?? 0) + 1;
+    for (let i = 0; i < r.level; i++) counters[i] ??= 1;
+    return counters.join(".");
+  });
+}
+
+function downloadCsv(item: Item) {
+  const rows = item.bom ?? [];
+  const nums = outline(rows);
+  const q = (v: unknown) => `"${String(v ?? "").replace(/"/g, '""')}"`;
+  const csv = [["Item", "Quantity", "Part number", "Name", "Description", "Configuration"].map(q).join(",")]
+    .concat(rows.map((r, i) => [nums[i], r.quantity, r.partNumber, r.name, r.description, r.configuration ?? ""].map(q).join(",")))
+    .join("\r\n");
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
+  a.download = `${item.number ?? "configuration"}-bom.csv`;
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
 const unitLabel = (u?: string) => (u === "millimeter" ? "mm" : u === "inch" ? "in" : u === "meter" ? "m" : u ?? "");
 
 /**
@@ -178,7 +208,7 @@ export function ConfigureClient({ id }: { id: string; isAdmin: boolean }) {
                 <span className="mono" style={{ fontWeight: 700, fontSize: 16 }}>{showing.number ?? "—"}</span>
                 <span style={{ fontSize: 13, color: "var(--text-muted)" }}>{showing.summary}</span>
               </div>
-              {showing.state === "ready" && showing.hasPicture ? (
+              {showing.hasPicture && showing.state !== "failed" ? (
                 // eslint-disable-next-line @next/next/no-img-element
                 <img
                   src={`/api/configurator/items/${showing.id}/picture`} alt={showing.summary}
@@ -200,10 +230,13 @@ export function ConfigureClient({ id }: { id: string; isAdmin: boolean }) {
                 </div>
               )}
               <div style={{ fontSize: 12, color: "var(--text-faint)" }}>
-                {showing.state === "ready" && (cached
+                {showing.state === "ready" && showing.hasPicture && (cached
                   ? `From PLM — generated ${relTime(showing.generatedAt)}, asked for ${showing.requestCount} time${showing.requestCount === 1 ? "" : "s"}.`
                   : `Generated in ${((showing.elapsedMs ?? 0) / 1000).toFixed(1)} s.`)}
               </div>
+              {showing.state !== "failed" && (showing.hasPicture || showing.bom) && (
+                <BomPanel item={showing} busy={busy} onRetry={() => generate(true)} onRead={() => generate()} />
+              )}
             </>
           )}
         </div>
@@ -238,6 +271,70 @@ export function ConfigureClient({ id }: { id: string; isAdmin: boolean }) {
               </button>
             ))}
           </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** The configuration's bill of materials, as Onshape reported it for exactly these choices. */
+function BomPanel({ item, busy, onRetry, onRead }: { item: Item; busy: boolean; onRetry: () => void; onRead: () => void }) {
+  const reading = item.state === "queued" || item.state === "generating";
+  const rows = item.bom ?? [];
+  const nums = outline(rows);
+  const parts = rows.filter((r) => r.kind === "part").length;
+  const unnumbered = rows.filter((r) => r.kind !== "other" && !r.partNumber).length;
+  return (
+    <div style={{ display: "grid", gap: 8, borderTop: "1px solid var(--border)", paddingTop: 10 }}>
+      <div style={{ display: "flex", gap: 10, alignItems: "baseline", flexWrap: "wrap" }}>
+        <h3 style={{ margin: 0, fontSize: 14 }}>Bill of materials</h3>
+        {item.bom && (
+          <span style={{ fontSize: 12, color: "var(--text-faint)" }}>
+            {rows.length} lines · {parts} parts{unnumbered ? ` · ${unnumbered} without a number in Onshape` : ""}
+          </span>
+        )}
+        {item.bom && (
+          <button className="btn btn-sm" style={{ marginLeft: "auto" }} onClick={() => downloadCsv(item)}>Download CSV</button>
+        )}
+      </div>
+      {item.bom ? (
+        <div style={{ overflowX: "auto" }}>
+          <table className="table" style={{ width: "100%", fontSize: 12.5 }}>
+            <thead>
+              <tr><th style={{ width: 50 }}>Item</th><th style={{ width: 50, textAlign: "right" }}>Qty</th><th>Part number</th><th>Name</th></tr>
+            </thead>
+            <tbody>
+              {rows.map((r, i) => (
+                <tr key={i} title={r.configuration && r.configuration !== "default" ? r.configuration : undefined}
+                  style={{ color: r.kind === "other" ? "var(--text-faint)" : undefined }}>
+                  <td className="mono">{nums[i]}</td>
+                  <td style={{ textAlign: "right" }}>{r.quantity}</td>
+                  <td className="mono">{r.partNumber || <span style={{ color: "var(--text-faint)" }}>—</span>}</td>
+                  <td style={{ paddingLeft: 8 + r.level * 18, fontWeight: r.kind === "assembly" ? 650 : undefined,
+                    fontStyle: r.kind === "other" ? "italic" : undefined }}>
+                    {r.name || "(unnamed)"}
+                    {r.kind === "other" && " · not a part"}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : reading ? (
+        <div style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 12.5, color: "var(--text-muted)" }}>
+          <Spinner /> {item.step || "Reading the BOM…"}
+        </div>
+      ) : item.bomError ? (
+        <Alert kind="warn">
+          Onshape did not return this configuration's BOM: {item.bomError}
+          <div style={{ marginTop: 6 }}>
+            <button className="btn btn-sm" onClick={onRetry} disabled={busy}>Try again</button>
+          </div>
+        </Alert>
+      ) : (
+        <div style={{ fontSize: 12.5, color: "var(--text-muted)" }}>
+          Generated before BOMs were kept.{" "}
+          <button className="btn btn-sm" onClick={onRead} disabled={busy}>Read the BOM</button>
         </div>
       )}
     </div>

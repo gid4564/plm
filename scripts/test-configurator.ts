@@ -12,6 +12,11 @@
  * refused per input; a configuration is generated once, numbered once, and
  * served from PLM afterwards; simultaneous requests share one generation; and
  * a combination Onshape rejects is remembered, not retried, unless asked.
+ *
+ * Phase 2: each configuration's BOM is read once and kept — indented, with
+ * the counts and sized parts of that configuration; an item made before its
+ * BOM existed gets one without being rendered again; and a BOM that cannot be
+ * read leaves a good picture alone, says why, and is retried only on request.
  */
 process.env.MONGODB_URI ??= "mongodb://127.0.0.1:27017";
 process.env.MONGODB_DB ??= "plm_test";
@@ -39,9 +44,16 @@ const actor = { userId: "aaaaaaaaaaaaaaaaaaaaaaaa", email: "eng@test" };
 /** A client that counts what it is asked to render. */
 class CountingClient extends MockOnshapeClient {
   renders = 0;
+  boms = 0;
+  failBom = false;
   async renderConfiguration(...args: Parameters<MockOnshapeClient["renderConfiguration"]>) {
     this.renders++;
     return super.renderConfiguration(...args);
+  }
+  async getAssemblyBom(...args: Parameters<MockOnshapeClient["getAssemblyBom"]>) {
+    this.boms++;
+    if (this.failBom) throw new Error("Onshape BOM: 503 Service Unavailable");
+    return super.getAssemblyBom(...args);
   }
 }
 
@@ -147,6 +159,25 @@ async function main() {
   check("keeping its number", (await getItem(eid, first.item!.id))?.number === item?.number);
 
   /* -------------------------------------------------------------------- */
+  console.log("\nIts BOM");
+  const bom = item?.bom ?? [];
+  const line = (name: string) => bom.find((l) => l.name === name);
+  check("read once, with the item", client.boms === 1 && bom.length > 0, `${client.boms} / ${bom.length}`);
+  check("indented: the latch's parts sit under the Latch Assembly",
+    line("Latch Assembly")?.level === 0 && line("Latch Assembly")?.kind === "assembly" &&
+    ["Button", "Button Pin", "Latch", "Latch Pin"].every((n) => line(n)?.level === 1),
+    bom.map((l) => `${l.level}:${l.name}`).join(", "));
+  check("a non-geometric line is kept, as neither part nor assembly",
+    line("N/A")?.kind === "other" && line("N/A")?.quantity === 1000 && !line("N/A")?.documentId);
+  check("a 700 mm case has 4 hinge pins and 5 latches",
+    line("Hinge Pin")?.quantity === 4 && line("Latch Assembly")?.quantity === 5);
+  check("sized parts carry the case's size in their own configuration",
+    /Length=0\.7\+meter/.test(line("Base")?.configuration ?? ""), line("Base")?.configuration ?? "");
+  check("and the foam its slots", /Slots=10/.test(line("Foam Base")?.configuration ?? ""), line("Foam Base")?.configuration ?? "");
+  check("Onshape's number is kept where there is one", line("Latch")?.partNumber === "PRT012181");
+  check("served from PLM, the BOM is not read again", client.boms === 1);
+
+  /* -------------------------------------------------------------------- */
   console.log("\nTwo people, one new configuration");
   const pair = { [by("Size").id]: by("Size").options[1].value };
   const [p1, p2] = await Promise.all([
@@ -156,6 +187,38 @@ async function main() {
   check("one item", p1.item?.id === p2.item?.id);
   check("one generation", client.renders === 2, String(client.renders));
   check("ready", (await getItem(eid, p1.item!.id))?.state === "ready");
+  const small = (await getItem(eid, p1.item!.id))?.bom ?? [];
+  const at = (b: typeof small, n: string) => b.find((l) => l.name === n);
+  check("a 400 mm case has 2 hinge pins", at(small, "Hinge Pin")?.quantity === 2);
+  check("the latch is one and the same part in both",
+    at(small, "Latch")?.elementId === line("Latch")?.elementId && at(small, "Latch")?.configuration === line("Latch")?.configuration);
+  check("the base is not", at(small, "Base")?.configuration !== line("Base")?.configuration);
+
+  /* -------------------------------------------------------------------- */
+  console.log("\nA configuration made before its BOM");
+  await ConfiguredItem.updateOne({ _id: first.item!.id }, { $set: { bom: null, bomFetchedAt: null } });
+  const rendersThen = client.renders;
+  const backfill = await requestConfiguration(eid, actor, modelId, choice, { client, wait: true });
+  item = await getItem(eid, first.item!.id);
+  check("gets its BOM when next asked for", (item?.bom?.length ?? 0) > 0 && item?.state === "ready");
+  check("without being rendered again", client.renders === rendersThen, String(client.renders));
+  check("and keeps its number", item?.number === first.item?.number);
+  check("not reported as served from PLM while it was being read", backfill.cached === false);
+
+  console.log("\nA BOM that cannot be read");
+  client.failBom = true;
+  const odd = { [by("Size").id]: by("Size").options[2].value };
+  const oddFirst = await requestConfiguration(eid, actor, modelId, odd, { client, wait: true });
+  item = await getItem(eid, oddFirst.item!.id);
+  check("the picture stands and the item is ready", item?.state === "ready" && item?.hasPicture === true && /^CFG-/.test(item?.number ?? ""));
+  check("with the reason the BOM is missing", !item?.bom && /503/.test(item?.bomError ?? ""), item?.bomError ?? "");
+  client.failBom = false;
+  const bomsThen = client.boms;
+  await requestConfiguration(eid, actor, modelId, odd, { client, wait: true });
+  check("asking again does not hammer Onshape", client.boms === bomsThen);
+  await requestConfiguration(eid, actor, modelId, odd, { client, wait: true, retry: true });
+  item = await getItem(eid, oddFirst.item!.id);
+  check("a retry reads it", client.boms === bomsThen + 1 && (item?.bom?.length ?? 0) > 0 && !item?.bomError);
 
   /* -------------------------------------------------------------------- */
   console.log("\nA combination Onshape rejects");
@@ -187,7 +250,7 @@ async function main() {
   check("a disabled model cannot be configured", /not available/.test(refused), refused);
 
   const recent = await listItems(eid, modelId);
-  check("the model lists its configurations, newest request first", recent.length === 3 && recent[0].id === bad.item?.id,
+  check("the model lists its configurations, newest request first", recent.length === 4 && recent[0].id === bad.item?.id,
     recent.map((x) => x.state).join(","));
 
   console.log(`\n${passed} passed, ${failed} failed`);

@@ -1909,6 +1909,15 @@ const ConfiguredItemSchema = new Schema(
     error: { type: String, default: null },
     picture: { type: Buffer, default: null },
     pictureType: { type: String, default: "image/png" },
+    /**
+     * The configuration's BOM as Onshape reported it (phase 2): indented,
+     * multi-level, one entry per position — level, quantity, number, name,
+     * and where the row's part is defined. A snapshot, not PLM parts; phase 3
+     * turns it into those.
+     */
+    bom: { type: Schema.Types.Mixed, default: null },
+    bomError: { type: String, default: null },
+    bomFetchedAt: { type: Date, default: null },
     requestedByEmail: { type: String, default: "" },
     requestCount: { type: Number, default: 1 },
     lastRequestedAt: { type: Date, default: () => new Date() },

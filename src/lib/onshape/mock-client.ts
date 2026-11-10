@@ -343,37 +343,12 @@ export class MockOnshapeClient implements OnshapeClient {
     size: { width: number; height: number }
   ): Promise<Thumbnail> {
     if (!process.env.MOCK_FAST) await new Promise((r) => setTimeout(r, 1200));
-    const v = new Map(
-      String(c.configuration ?? "").split(";").filter(Boolean).map((kv) => {
-        const i = kv.indexOf("=");
-        return [kv.slice(0, i), kv.slice(i + 1).replace(/\+/g, " ")] as [string, string];
-      })
-    );
-    const num = (k: string, d: number) => parseFloat(v.get(k) ?? "") || d;
-
-    const params: any[] = (MOCK_CONFIGURATION as any).configurationParameters.map((p: any) => p.message ?? p);
-    const sizeParam = params.find((p) => p.parameterName === "Size");
-    const sizeOpt = (sizeParam?.options ?? []).map((o: any) => o.message ?? o)
-      .find((o: any) => o.option === (v.get(sizeParam?.parameterId) ?? sizeParam?.defaultValue));
-    const custom = !sizeOpt || /custom/i.test(sizeOpt.optionName);
-    const [L, D, H] = custom
-      ? [num("L", 500), num("D", 350), num("H", 225)]
-      : String(sizeOpt.optionName).split("x").map((x: string) => parseFloat(x));
-
-    const foam = v.get("Add_foam_inserts") !== "false";
-    const cutouts = foam && v.get("Add_cutouts") === "true";
-    const typeParam = params.find((p) => p.parameterName === "Cutout type");
-    const slotsMode = v.get(typeParam?.parameterId) === "Slots";
-    const slots = Math.round(num("Slots", 10));
-    const slotWidth = num("Slot_width", 20);
+    const { L, D, H, foam, cutouts, slotsMode, slots, slotWidth, compartments } = flightCaseOf(c.configuration);
     if (cutouts && slotsMode && slots * slotWidth > L * 0.9) {
       throw new Error(
         `Mock Onshape: regeneration failed — ${slots} slots of ${slotWidth} mm do not fit a ${L} mm case.`
       );
     }
-    const compParam = params.find((p) => p.parameterName === "Compartments");
-    const compartments = Number((compParam?.options ?? []).map((o: any) => o.message ?? o)
-      .find((o: any) => o.option === v.get(compParam?.parameterId))?.optionName ?? 1);
 
     // An oblique projection: length across, depth receding up and to the right.
     const { width: W, height: Hh } = size;
@@ -425,6 +400,11 @@ export class MockOnshapeClient implements OnshapeClient {
     opts: { multiLevel?: boolean; indented?: boolean } = {}
   ): Promise<BomTable> {
     const indented = opts.indented !== false;
+    // The configured Flight Case (mock-configuration.json) has no stored parts:
+    // its BOM is computed from the configuration, as Onshape's is.
+    if (/(^|;)Add_foam_inserts=/.test(String(c.configuration ?? ""))) {
+      return flightCaseBom(c, { indented, multiLevel: opts.multiLevel !== false });
+    }
     await connectDb();
 
     const all: any[] = await MockOnshapePart.find({
@@ -1749,4 +1729,91 @@ function buildMockPdf(lines: string[]): Buffer {
     `startxref\n${xrefStart}\n%%EOF\n`;
 
   return Buffer.from(header + body + xref + trailer, "latin1");
+}
+
+/* ------------------------- The simulated Flight Case ------------------------ */
+
+/** The case a Flight Case configuration string describes, sizes in mm. */
+function flightCaseOf(configuration: string | null | undefined) {
+  const v = new Map(
+    String(configuration ?? "").split(";").filter(Boolean).map((kv) => {
+      const i = kv.indexOf("=");
+      return [kv.slice(0, i), kv.slice(i + 1).replace(/\+/g, " ")] as [string, string];
+    })
+  );
+  const num = (k: string, d: number) => parseFloat(v.get(k) ?? "") || d;
+  const params: any[] = (MOCK_CONFIGURATION as any).configurationParameters.map((p: any) => p.message ?? p);
+  const opts = (p: any) => (p?.options ?? []).map((o: any) => o.message ?? o);
+  const sizeParam = params.find((p) => p.parameterName === "Size");
+  const sizeOpt = opts(sizeParam).find((o: any) => o.option === (v.get(sizeParam?.parameterId) ?? sizeParam?.defaultValue));
+  const custom = !sizeOpt || /custom/i.test(sizeOpt.optionName);
+  const [L, D, H] = custom
+    ? [num("L", 500), num("D", 350), num("H", 225)]
+    : String(sizeOpt.optionName).split("x").map((x: string) => parseFloat(x));
+  const foam = v.get("Add_foam_inserts") !== "false";
+  const cutouts = foam && v.get("Add_cutouts") === "true";
+  const typeParam = params.find((p) => p.parameterName === "Cutout type");
+  const slotsMode = v.get(typeParam?.parameterId) === "Slots";
+  const compParam = params.find((p) => p.parameterName === "Compartments");
+  const compartments = Number(opts(compParam).find((o: any) => o.option === v.get(compParam?.parameterId))?.optionName ?? 1);
+  return {
+    L, D, H, foam, cutouts, slotsMode, compartments,
+    slots: Math.round(num("Slots", 10)), slotWidth: num("Slot_width", 20),
+    isDefaultSize: !custom && sizeOpt.option === sizeParam?.defaultValue,
+  };
+}
+
+/**
+ * The Flight Case's BOM for one configuration, shaped like the live one
+ * (probe, 9 Nov 2026): sized parts carry the case's dimensions in their own
+ * configuration, longer cases have more hinge pins and latches, foam parts
+ * only when foam is chosen, and a non-geometric line under the latch. Sized
+ * parts have a part number only in the default size, as on the tenant.
+ */
+function flightCaseBom(c: AssemblyCoords, opts: { indented: boolean; multiLevel: boolean }): BomTable {
+  const k = flightCaseOf(c.configuration);
+  const m = (mm: number) => `${mm / 1000}+meter`;
+  const dims = `Depth=${m(k.D)};Height=${m(k.H)};Length=${m(k.L)}`;
+  const hinges = k.L < 600 ? 2 : k.L < 1000 ? 4 : 6;
+  const el = (n: number) => n.toString(16).padStart(24, "c");
+  const wv = { workspaceId: c.workspaceId ?? null, versionId: c.workspaceId ? null : c.versionId ?? null };
+  const row = (
+    level: number, quantity: number, name: string, partNumber: string,
+    src: { element: number; partId: string; configuration: string } | null, isAssembly = false,
+  ): BomLine => ({
+    key: "", quantity, partNumber, name, description: "", material: "", revision: "", state: "IN_PROGRESS",
+    vendor: "", project: "", indentLevel: level, isAssembly,
+    source: src ? { documentId: c.documentId, elementId: el(src.element), partId: src.partId, configuration: src.configuration, ...wv } : null,
+    sourceWvmType: src ? (wv.workspaceId ? "w" : "v") : null,
+    unresolvable: src ? null : "Non-geometric item — not a part in a document.",
+  });
+  const sized = (pn: string) => (k.isDefaultSize ? pn : "");
+  let lines: BomLine[] = [
+    row(0, 1, "Base", sized("PRT012175"), { element: 1, partId: "JLD", configuration: dims }),
+    row(0, 1, "Lid", sized("PRT012176"), { element: 1, partId: "JHD", configuration: dims }),
+    row(0, hinges, "Hinge Pin", "PRT012177", { element: 2, partId: "RABD", configuration: `L=${m(k.L)}` }),
+    row(0, 1, "Seal", sized("PRT012178"), { element: 1, partId: "R0HD", configuration: dims }),
+    row(0, hinges + 1, "Latch Assembly", "", { element: 3, partId: "", configuration: "default" }, true),
+    row(1, 1, "Button", "PRT012179", { element: 4, partId: "ReBD", configuration: "L=0.0+meter;Single=true" }),
+    row(1, 1, "Button Pin", "PRT012180", { element: 4, partId: "RKCD", configuration: "L=0.0+meter;Single=true" }),
+    row(1, 1, "Latch", "PRT012181", { element: 4, partId: "ReBH", configuration: "L=0.0+meter;Single=true" }),
+    row(1, 1, "Latch Pin", "PRT012182", { element: 4, partId: "RJCD", configuration: "L=0.0+meter;Single=true" }),
+    row(1, 1000, "N/A", "N/A", null),
+    row(0, 3, "Handle Assembly", "PRD-00013-PLM", { element: 5, partId: "", configuration: "default" }, true),
+    row(1, 1, "Handle", "PRT012183", { element: 6, partId: "JLD", configuration: `H=${m(k.D)}` }),
+    row(1, 2, "Handle Pin", "PRT012184", { element: 6, partId: "REBD", configuration: `H=${m(k.D)}` }),
+  ];
+  if (k.foam) {
+    const cut = k.cutouts ? (k.slotsMode ? `;Slots=${k.slots};Slot_width=${m(k.slotWidth)}` : `;Compartments=${k.compartments}`) : "";
+    lines.push(
+      row(0, 1, "Foam Base", sized("PRT012185"), { element: 7, partId: "JHD", configuration: `Add_cutouts=${k.cutouts};${dims}${cut}` }),
+      row(0, 1, "Foam Lid", sized("PRT012186"), { element: 8, partId: "JoD", configuration: `Depth=${m(k.D)};Length=${m(k.L)}` }),
+    );
+  }
+  if (!opts.multiLevel) lines = lines.filter((l) => l.indentLevel === 0);
+  if (!opts.indented) lines = lines.map((l) => ({ ...l, indentLevel: 0 }));
+  lines.forEach((l, i) => {
+    l.key = l.source ? `${i}:${l.source.documentId}:${l.source.elementId}:${l.source.partId}:${l.source.configuration}` : `row-${i}`;
+  });
+  return { lines, headers: ["Item", "Quantity", "Part number", "Name", "Description"], shape: "simulator", indented: opts.indented };
 }

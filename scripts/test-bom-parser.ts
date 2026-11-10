@@ -212,5 +212,28 @@ console.log("Importability");
     importable[0]?.name);
 }
 
+/* --- A live tenant, Nov 2026: indent on itemSource, named values --------- */
+console.log("Indent carried on itemSource (bomTable.items, live Nov 2026)");
+{
+  const asm = { ...src(""), partId: "", elementType: "ASSEMBLY" };
+  const t = parseBom({
+    bomTable: {
+      headers: [{ id: "q", name: "Quantity", propertyName: "quantity" }, { id: "n", name: "Name", propertyName: "name" }],
+      items: [
+        { item: "1", quantity: 1, name: "Base", itemSource: { ...src("JLD"), indentLevel: 0 } },
+        { item: "5", quantity: 3, name: "Latch Assembly", itemSource: { ...asm, indentLevel: 0 } },
+        { item: "5.1", quantity: 1, name: "Latch", itemSource: { ...src("ReBH"), indentLevel: 1 } },
+        { item: "5.5", quantity: 1000, name: "N/A", itemSource: { nonGeometricItemId: "5ceea2ae8f808215f1b1a8b5", indentLevel: 1 } },
+        { item: "6.1", quantity: 2, name: "Handle Pin", itemSource: { ...src("REBD") } },
+      ],
+    },
+  }, { indented: true });
+  const lv = t.lines.map((l) => l.indentLevel);
+  check("a child is one deep, not flattened to the top", lv[2] === 1, lv);
+  check("with no indent anywhere, the Item outline is used", lv[4] === 1, lv);
+  check("a non-geometric line is not taken for a subassembly",
+    t.lines[3].isAssembly === false && !t.lines[3].source && /Non-geometric/.test(t.lines[3].unresolvable ?? ""));
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

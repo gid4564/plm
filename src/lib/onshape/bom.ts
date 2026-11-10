@@ -153,6 +153,13 @@ function resolveSource(row: Record<string, any>): {
     return { source: null, wvm: null, isAssembly: false, reason: "Onshape did not report where this row comes from." };
   }
 
+  // A non-geometric item (a BOM line someone added by hand — "Packing foam",
+  // "N/A × 1000") is neither a part nor an assembly; there is nothing in a
+  // document to point at.
+  if (src.nonGeometricItemId) {
+    return { source: null, wvm: null, isAssembly: false, reason: "Non-geometric item — not a part in a document." };
+  }
+
   const elementType = String(src.elementType ?? src.type ?? "").toUpperCase();
   const documentId = String(src.documentId ?? "");
   const elementId = String(src.elementId ?? "");
@@ -209,6 +216,23 @@ function resolveSource(row: Record<string, any>): {
     isAssembly,
     reason: null,
   };
+}
+
+/**
+ * How deep a row sits in an indented BOM.
+ *
+ * Older payloads put `indentLevel` on the row; the `bomTable.items` shape a
+ * live tenant returns today (Nov 2026) puts it on `itemSource` instead, and
+ * reading only the row turned every indented BOM flat — subassembly children
+ * came back as top-level lines. The outline number in the Item column
+ * ("5.1" is one deep) is the last resort.
+ */
+function indentOf(row: any): number {
+  const raw = row.indentLevel ?? row.itemIndentLevel ?? row.itemSource?.indentLevel;
+  if (raw != null && Number.isFinite(Number(raw))) return Math.max(0, Number(raw));
+  const outline = typeof row.item === "string" ? row.item : null;
+  if (outline && /^\d+(\.\d+)*$/.test(outline)) return outline.split(".").length - 1;
+  return 0;
 }
 
 /**
@@ -276,7 +300,7 @@ export function parseBom(
       state: toDisplayString(readField(row, "state", headers)),
       vendor: toDisplayString(readField(row, "vendor", headers)),
       project: toDisplayString(readField(row, "project", headers)),
-      indentLevel: Number(row.indentLevel ?? row.itemIndentLevel ?? 0) || 0,
+      indentLevel: indentOf(row),
       isAssembly,
       source,
       sourceWvmType: wvm,

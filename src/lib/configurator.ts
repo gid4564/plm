@@ -6,6 +6,7 @@ import { nextNumber } from "@/lib/numbering";
 import { parseDefinition, resolve, summarize, toEncoding, validate, type Values } from "@/lib/configurator-rules";
 import type { OnshapeClient } from "@/lib/onshape/types";
 import { toBuffer } from "@/lib/binary";
+import type { BomLine } from "@/lib/onshape/bom";
 
 /**
  * The configurator, phase 1: configure a model and see it.
@@ -13,9 +14,34 @@ import { toBuffer } from "@/lib/binary";
  * A model is a configured Onshape assembly read at a version. A request is
  * resolved against the model's own rules, keyed by Onshape's configuration
  * string, and either served from PLM or generated once in the background and
- * kept. See docs/CONFIGURATOR-DESIGN.md — phase 1 renders the picture; the
- * BOM, PLM parts and the 3D model come in later phases.
+ * kept. See docs/CONFIGURATOR-DESIGN.md — phase 1 renders the picture, phase 2
+ * reads the configuration's BOM and keeps it as a snapshot; PLM parts and the
+ * 3D model come in later phases.
  */
+
+/** One position in a configuration's BOM, as kept on the item. */
+export type ConfiguredBomLine = {
+  level: number;
+  quantity: number;
+  partNumber: string;
+  name: string;
+  description: string;
+  kind: "part" | "assembly" | "other";
+  documentId: string | null;
+  elementId: string | null;
+  partId: string | null;
+  configuration: string | null;
+};
+
+export function toBomSnapshot(lines: BomLine[]): ConfiguredBomLine[] {
+  return lines.map((l) => ({
+    level: l.indentLevel, quantity: l.quantity, partNumber: l.partNumber, name: l.name,
+    description: l.description,
+    kind: !l.source ? "other" : l.isAssembly ? "assembly" : "part",
+    documentId: l.source?.documentId ?? null, elementId: l.source?.elementId ?? null,
+    partId: l.source?.partId ?? null, configuration: l.source?.configuration ?? null,
+  }));
+}
 
 /** Rendered size. A configuration's picture is the main thing on its page. */
 const PICTURE = { width: 800, height: 600 };
@@ -175,6 +201,7 @@ function shapeItem(i: any) {
     id: String(i._id), modelId: String(i.modelId), number: i.number, key: i.key,
     values: i.values ?? {}, summary: i.summary, state: i.state, step: i.step, error: i.error,
     hasPicture: Boolean(i.hasPicture),
+    bom: (i.bom ?? null) as ConfiguredBomLine[] | null, bomError: i.bomError ?? null, bomFetchedAt: i.bomFetchedAt ?? null,
     requestCount: i.requestCount ?? 1, requestedByEmail: i.requestedByEmail,
     lastRequestedAt: i.lastRequestedAt, generatedAt: i.generatedAt, elapsedMs: i.elapsedMs,
   };
@@ -266,19 +293,26 @@ export async function requestConfiguration(
   const lost = (item.state === "queued" || item.state === "generating") && since &&
     Date.now() - new Date(since).getTime() > STALE_MS && !running.has(String(item._id));
   const again = opts.retry && item.state === "failed";
+  // Ready but without its BOM: generated before phase 2, or the BOM read
+  // failed after the picture worked. The picture is kept; only the BOM is
+  // asked for. A failed BOM read is retried only on request, like a failure.
+  const bomOnly = item.state === "ready" && !item.bom && (!item.bomError || opts.retry);
 
-  if (fresh || lost || again) {
+  if (fresh || lost || again || bomOnly) {
     if (!fresh) {
       await ConfiguredItem.updateOne(
         { _id: item._id },
-        { $set: { state: "queued", step: "Waiting to generate", error: null, startedAt: null } }
+        { $set: {
+          state: "queued", step: bomOnly ? "Waiting to read the BOM" : "Waiting to generate",
+          error: null, bomError: null, startedAt: null,
+        } }
       );
     }
     const job = enqueue(String(item._id), () => generate(enterpriseId, String(item._id), model, client));
     if (opts.wait) await job;
   }
 
-  return { item: await getItem(enterpriseId, String(item._id)), cached: !fresh && item.state === "ready" };
+  return { item: await getItem(enterpriseId, String(item._id)), cached: !fresh && item.state === "ready" && !bomOnly };
 }
 
 /* ------------------------------ Generation ------------------------------- */
@@ -310,39 +344,63 @@ function pump() {
 
 async function generate(enterpriseId: string, itemId: string, model: any, client: OnshapeClient) {
   const started = Date.now();
+  const coords = (configuration: string) => ({
+    documentId: model.documentId, elementId: model.elementId,
+    versionId: model.versionId, workspaceId: model.workspaceId, configuration,
+  });
   await withApiProcess("Configurator", async () => {
-    try {
-      await ConfiguredItem.updateOne(
-        { _id: itemId },
-        { $set: { state: "generating", step: "Rendering in Onshape", startedAt: new Date() } }
-      );
-      const item: any = await ConfiguredItem.findById(itemId).select("key number").lean();
-      const picture = await client.renderConfiguration(
-        {
-          documentId: model.documentId, elementId: model.elementId,
-          versionId: model.versionId, workspaceId: model.workspaceId, configuration: item.key,
-        },
-        PICTURE
-      );
+    const item: any = await ConfiguredItem.findById(itemId).select("key number bom").lean();
+    const hasPicture = Boolean(await ConfiguredItem.exists({ _id: itemId, picture: { $ne: null } }));
 
-      // Numbered once, on the first success — a configuration that never
-      // generated is not something anyone can quote.
-      const number = item.number ?? (await nextNumber(enterpriseId, "CONFIGURATION")).number;
+    // Picture first: it is what the person is waiting for (§4.3).
+    if (!hasPicture) {
+      try {
+        await ConfiguredItem.updateOne(
+          { _id: itemId },
+          { $set: { state: "generating", step: "Rendering in Onshape", startedAt: new Date() } }
+        );
+        const picture = await client.renderConfiguration(coords(item.key), PICTURE);
+        // Numbered once, on the first success — a configuration that never
+        // generated is not something anyone can quote.
+        const number = item.number ?? (await nextNumber(enterpriseId, "CONFIGURATION")).number;
+        await ConfiguredItem.updateOne(
+          { _id: itemId },
+          { $set: {
+            number, picture: picture.data, pictureType: picture.contentType,
+            generatedAt: new Date(), elapsedMs: Date.now() - started,
+          } }
+        );
+      } catch (err: any) {
+        const message = String(err?.message ?? err);
+        console.warn(`[PLM] configurator: generating ${itemId} failed: ${message}`);
+        await ConfiguredItem.updateOne(
+          { _id: itemId },
+          { $set: { state: "failed", step: "", error: message, elapsedMs: Date.now() - started } }
+        );
+        return;
+      }
+    }
+
+    // Then the BOM. Its failure does not undo a good picture: the item is
+    // ready, says why its BOM is missing, and can be asked again.
+    if (!item.bom) {
       await ConfiguredItem.updateOne(
         { _id: itemId },
-        { $set: {
-          state: "ready", step: "", error: null, number,
-          picture: picture.data, pictureType: picture.contentType,
-          generatedAt: new Date(), elapsedMs: Date.now() - started,
-        } }
+        { $set: { state: "generating", step: "Reading the BOM", ...(hasPicture ? { startedAt: new Date() } : {}) } }
       );
-    } catch (err: any) {
-      const message = String(err?.message ?? err);
-      console.warn(`[PLM] configurator: generating ${itemId} failed: ${message}`);
-      await ConfiguredItem.updateOne(
-        { _id: itemId },
-        { $set: { state: "failed", step: "", error: message, elapsedMs: Date.now() - started } }
-      );
+      let set: Record<string, unknown>;
+      try {
+        const table = await client.getAssemblyBom(coords(item.key), { multiLevel: true });
+        set = { bom: toBomSnapshot(table.lines), bomError: null, bomFetchedAt: new Date() };
+      } catch (err: any) {
+        const message = String(err?.message ?? err);
+        console.warn(`[PLM] configurator: reading the BOM of ${itemId} failed: ${message}`);
+        set = { bomError: message };
+      }
+      if (!hasPicture) set.elapsedMs = Date.now() - started;
+      await ConfiguredItem.updateOne({ _id: itemId }, { $set: { ...set, state: "ready", step: "", error: null } });
+    } else {
+      await ConfiguredItem.updateOne({ _id: itemId }, { $set: { state: "ready", step: "", error: null } });
     }
   }, { subject: model.name, newRun: true });
 }

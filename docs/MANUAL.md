@@ -601,8 +601,19 @@ Onshape assembly and see the result, without opening Onshape.
   generated configurations correct when someone edits the model. A model can be
   switched off without losing its configurations.
 
-This is phase 1 of docs/CONFIGURATOR-DESIGN.md: the picture. The BOM, PLM parts
-for each configuration and the 3D model follow.
+- **Bill of materials.** Under the picture, the configuration's BOM exactly as
+  Onshape reports it for those choices: indented, with subassemblies and their
+  parts, the quantities of this configuration (a longer case has more hinge
+  pins), and Onshape's part number where there is one — sized parts often have
+  none yet. Hover a line to see the part's own configuration. *Download CSV*
+  saves it. The BOM is read once with the picture and kept; configurations
+  generated before BOMs were kept get theirs the next time they are asked for,
+  without being rendered again. If Onshape does not return a BOM, the picture
+  stays and *Try again* asks for the BOM only.
+
+This is phases 1–2 of docs/CONFIGURATOR-DESIGN.md: the picture and a read-only
+BOM. Nothing is created in PLM's parts yet — turning these BOMs into PLM parts
+with numbers, and the 3D model, follow.
 
 ## The Onshape panels
 
