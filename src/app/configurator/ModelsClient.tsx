@@ -227,7 +227,7 @@ export function ModelsClient({ isAdmin }: { isAdmin: boolean }) {
       ) : (
         <div style={{ display: "grid", gap: 12, gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))" }}>
           {models.map((m) => (
-            <div key={m.id} className="card" style={{ display: "grid", gap: 6, opacity: m.enabled ? 1 : 0.6 }}>
+            <div key={m.id} className="card" style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr)", gap: 6, opacity: m.enabled ? 1 : 0.6 }}>
               <Link href={`/configurator/${m.id}`} style={{ fontWeight: 650, fontSize: 15, color: "var(--accent)" }}>
                 {m.name}
               </Link>
@@ -254,7 +254,7 @@ export function ModelsClient({ isAdmin }: { isAdmin: boolean }) {
                   Following where the model&apos;s own parts are filed. Choose one to fix it, and move what was already made.
                 </div>
               )}
-              <div style={{ display: "flex", gap: 8 }}>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                 <Link href={`/configurator/${m.id}`} className="btn btn-sm btn-primary">Configure</Link>
                 {isAdmin && (
                   <>
