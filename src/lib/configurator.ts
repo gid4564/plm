@@ -319,6 +319,7 @@ function shapeItem(i: any) {
     id: String(i._id), modelId: String(i.modelId), number: i.number, key: i.key,
     values: i.values ?? {}, summary: i.summary, state: i.state, step: i.step, error: i.error,
     hasPicture: Boolean(i.hasPicture),
+    pictureVersion: i.pictureVersion ?? 0, rendered: Boolean(i.renderedAt),
     bom: (i.bom ?? null) as ConfiguredBomLine[] | null, bomError: i.bomError ?? null, bomFetchedAt: i.bomFetchedAt ?? null,
     partId: i.partId ? String(i.partId) : null, plmError: i.plmError ?? null,
     addedParts: (i.addedPartIds ?? []).length,
@@ -330,7 +331,7 @@ function shapeItem(i: any) {
 
 export async function getItem(enterpriseId: string, itemId: string) {
   await connectDb();
-  const i: any = await ConfiguredItem.findOne({ _id: itemId, enterpriseId }).select("-picture").lean();
+  const i: any = await ConfiguredItem.findOne({ _id: itemId, enterpriseId }).select("-picture -onshapePicture").lean();
   if (!i) return null;
   const hasPicture = Boolean(await ConfiguredItem.exists({ _id: itemId, picture: { $ne: null } }));
   return shapeItem({ ...i, hasPicture });
@@ -347,7 +348,7 @@ export async function itemPicture(enterpriseId: string, itemId: string) {
 export async function listItems(enterpriseId: string, modelId: string, limit = 24) {
   await connectDb();
   const rows: any[] = await ConfiguredItem.find({ enterpriseId, modelId })
-    .sort({ lastRequestedAt: -1 }).limit(limit).select("-picture").lean();
+    .sort({ lastRequestedAt: -1 }).limit(limit).select("-picture -onshapePicture").lean();
   const withPic = new Set(
     (await ConfiguredItem.find({ _id: { $in: rows.map((r) => r._id) }, picture: { $ne: null } }).select("_id").lean())
       .map((r: any) => String(r._id))
@@ -403,7 +404,7 @@ export async function requestConfiguration(
       $set: { lastRequestedAt: new Date() },
     },
     { upsert: true, new: true, setDefaultsOnInsert: true }
-  ).select("-picture").lean();
+  ).select("-picture -onshapePicture").lean();
   const item: any = await upsert().catch((err: any) => {
     if (err?.code === 11000) return upsert();
     throw err;
@@ -694,6 +695,57 @@ async function storePartModels(enterpriseId: string, client: OnshapeClient, mode
     if (r.ok) stored++;
   }
   return stored;
+}
+
+/* -------------------------------- Pictures ------------------------------- */
+
+/** Largest picture accepted from a render: a 2400 px JPEG is well under this. */
+const MAX_PICTURE_BYTES = 12 * 1024 * 1024;
+
+/**
+ * Make a studio render the configuration's picture — the gallery's, and the
+ * configured assembly's thumbnail in PLM. Onshape's picture is kept the first
+ * time, so `restorePicture` can put it back.
+ */
+export async function setItemPicture(enterpriseId: string, itemId: string, data: Buffer, contentType: string) {
+  await connectDb();
+  if (!/^image\/(png|jpeg|webp)$/.test(contentType)) throw new ConfigurationError("A picture must be a PNG, JPEG or WebP image.");
+  if (!data.length || data.length > MAX_PICTURE_BYTES) throw new ConfigurationError("That picture is empty or too large.");
+  const item: any = await ConfiguredItem.findOne({ _id: itemId, enterpriseId }).select("picture pictureType renderedAt partId").lean();
+  if (!item) throw new ConfigurationError("Configuration not found.");
+  await ConfiguredItem.updateOne({ _id: itemId }, {
+    $set: {
+      picture: data, pictureType: contentType, renderedAt: new Date(),
+      ...(item.renderedAt ? {} : { onshapePicture: item.picture ?? null, onshapePictureType: item.pictureType ?? null }),
+    },
+    $inc: { pictureVersion: 1 },
+  });
+  if (item.partId) await setThumbnail(enterpriseId, item.partId, data, contentType);
+  return getItem(enterpriseId, itemId);
+}
+
+/** Put Onshape's own picture back after a render replaced it. */
+export async function restorePicture(enterpriseId: string, itemId: string) {
+  await connectDb();
+  const item: any = await ConfiguredItem.findOne({ _id: itemId, enterpriseId }).select("onshapePicture onshapePictureType renderedAt partId").lean();
+  if (!item) throw new ConfigurationError("Configuration not found.");
+  const original = toBuffer(item.onshapePicture);
+  if (!item.renderedAt || !original?.length) return getItem(enterpriseId, itemId);
+  const type = item.onshapePictureType || "image/png";
+  await ConfiguredItem.updateOne({ _id: itemId }, {
+    $set: { picture: original, pictureType: type, renderedAt: null, onshapePicture: null, onshapePictureType: null },
+    $inc: { pictureVersion: 1 },
+  });
+  if (item.partId) await setThumbnail(enterpriseId, item.partId, original, type);
+  return getItem(enterpriseId, itemId);
+}
+
+async function setThumbnail(enterpriseId: string, partId: unknown, data: Buffer, contentType: string) {
+  await PartThumbnail.updateOne(
+    { partId },
+    { $set: { enterpriseId, contentType, data, fetchedAt: new Date(), failedAt: null, failureReason: null } },
+    { upsert: true }
+  );
 }
 
 /* --------------------------------- Names --------------------------------- */

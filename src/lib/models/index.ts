@@ -1935,6 +1935,16 @@ const ConfiguredItemSchema = new Schema(
     picture: { type: Buffer, default: null },
     pictureType: { type: String, default: "image/png" },
     /**
+     * Onshape's own picture, kept when someone replaces it with a studio
+     * render from the 3D view, so it can be put back. Null while the picture
+     * is still Onshape's.
+     */
+    onshapePicture: { type: Buffer, default: null },
+    onshapePictureType: { type: String, default: null },
+    renderedAt: { type: Date, default: null },
+    /** Bumped whenever the picture changes, so its immutable URL changes too. */
+    pictureVersion: { type: Number, default: 0 },
+    /**
      * The configuration's BOM as Onshape reported it (phase 2): indented,
      * multi-level, one entry per position — level, quantity, number, name,
      * and where the row's part is defined. A snapshot, not PLM parts; phase 3

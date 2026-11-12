@@ -22,7 +22,8 @@ type Item = {
   state: "queued" | "generating" | "ready" | "failed"; step: string; error: string | null;
   hasPicture: boolean; bom: BomRow[] | null; bomError: string | null;
   partId: string | null; plmError: string | null; addedParts: number;
-  name: string; hasModel: boolean; modelError: string | null; modelMs: number | null; requestCount: number; generatedAt: string | null; elapsedMs: number | null;
+  name: string; hasModel: boolean; modelError: string | null; modelMs: number | null;
+  pictureVersion: number; rendered: boolean; requestCount: number; generatedAt: string | null; elapsedMs: number | null;
   lastRequestedAt: string;
 };
 
@@ -57,6 +58,10 @@ function downloadCsv(item: Item) {
   a.click();
   URL.revokeObjectURL(a.href);
 }
+
+/** The picture's URL, versioned: it is cached for good, and a render replaces it. */
+const pictureUrl = (it: { id: string; pictureVersion?: number }) =>
+  `/api/configurator/items/${it.id}/picture?v=${it.pictureVersion ?? 0}`;
 
 const unitLabel = (u?: string) => (u === "millimeter" ? "mm" : u === "inch" ? "in" : u === "meter" ? "m" : u ?? "");
 
@@ -145,6 +150,25 @@ export function ConfigureClient({ id }: { id: string; isAdmin: boolean }) {
     setCurrent(item);
     setCached(true);
     setNaming(null);
+  }
+
+  /** A studio render from the 3D view becomes the configuration's picture. */
+  async function savePicture(item: Item, image: Blob) {
+    const r = await fetch(`/api/configurator/items/${item.id}/picture`, {
+      method: "PUT", headers: { "Content-Type": image.type || "image/jpeg" }, body: image,
+    });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || "Could not save the picture");
+    setCurrent(j.item);
+    void load();
+  }
+
+  async function restorePicture(item: Item) {
+    const r = await fetch(`/api/configurator/items/${item.id}/picture`, { method: "DELETE" });
+    const j = await r.json();
+    if (!r.ok) { setError(j.error || "Could not restore the picture"); return; }
+    setCurrent(j.item);
+    void load();
   }
 
   async function saveName(item: Item, name: string) {
@@ -273,6 +297,12 @@ export function ConfigureClient({ id }: { id: string; isAdmin: boolean }) {
               <div style={{ fontSize: 13, color: "var(--text-muted)", marginTop: -4 }}>{showing.summary}</div>
               {showing.hasPicture && showing.state !== "failed" && (
                 <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
+                  {showing.rendered && view === "picture" && (
+                    <button className="btn btn-sm" style={{ order: 9 }} onClick={() => restorePicture(showing)}
+                      title="Put Onshape's own picture back">
+                      Restore Onshape picture
+                    </button>
+                  )}
                   {(["picture", "3d"] as const).map((v) => (
                     <button
                       key={v} className={`btn btn-sm${view === v ? " btn-primary" : ""}`}
@@ -301,14 +331,16 @@ export function ConfigureClient({ id }: { id: string; isAdmin: boolean }) {
                     key={showing.id}
                     src={`/api/parts/${showing.partId}/geometry?revision=`}
                     label={`${showing.number}${showing.name ? ` ${showing.name}` : ""}`}
-                    poster={`/api/configurator/items/${showing.id}/picture`}
+                    poster={pictureUrl(showing)}
                     height={460}
+                    renderName={`${showing.number}${showing.name ? ` ${showing.name}` : ""}`}
+                    onSaveRender={{ label: "Use as picture", save: (image) => savePicture(showing, image) }}
                   />
                 </div>
               ) : showing.hasPicture && showing.state !== "failed" ? (
                 // eslint-disable-next-line @next/next/no-img-element
                 <img
-                  src={`/api/configurator/items/${showing.id}/picture`} alt={showing.summary}
+                  src={pictureUrl(showing)} alt={showing.summary}
                   style={{ width: "100%", maxWidth: 800, aspectRatio: "4 / 3", objectFit: "contain", background: "#fff", borderRadius: 8, border: "1px solid var(--border)" }}
                 />
               ) : showing.state === "failed" ? (
@@ -356,7 +388,7 @@ export function ConfigureClient({ id }: { id: string; isAdmin: boolean }) {
               >
                 {it.hasPicture ? (
                   // eslint-disable-next-line @next/next/no-img-element
-                  <img src={`/api/configurator/items/${it.id}/picture`} alt="" loading="lazy"
+                  <img src={pictureUrl(it)} alt="" loading="lazy"
                     style={{ width: "100%", aspectRatio: "4 / 3", objectFit: "contain", background: "#fff", borderRadius: 6 }} />
                 ) : (
                   <div style={{ aspectRatio: "4 / 3", display: "grid", placeItems: "center", background: "var(--surface-2)", borderRadius: 6, fontSize: 12, color: "var(--text-faint)" }}>

@@ -642,6 +642,13 @@ Onshape assembly and see the result, without opening Onshape.
   most of the document's parts are in). An admin can choose the product under
   *Files into* on the Configurator page; choosing one also moves everything the
   configurator already made for that model.
+- **Render.** In any 3D view (here or on a part page), *Render* makes a
+  studio image of the view on screen: soft lighting, a shadow on the floor, no
+  outlines, 2400 pixels wide, on a studio, white or transparent background.
+  *Download* saves it; in the configurator, *Use as picture* makes it the
+  configuration's picture and its PLM assembly's thumbnail, and *Restore
+  Onshape picture* puts the original back. Turn the model first for another
+  angle. It renders on your own computer — nothing is sent to Onshape.
 - **Names.** *Name it* beside the CFG number gives a configuration a name of
   your choosing ("Touring case, 1000 mm"); it shows in the gallery, and the
   configuration's PLM assembly takes it. Clear it to go back to the model's

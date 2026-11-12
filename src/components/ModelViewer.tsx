@@ -31,7 +31,15 @@ type SceneApi = {
   setEdges: (on: boolean) => void;
   setOrtho: (on: boolean) => void;
   setWireframe: (on: boolean) => void;
+  /** A studio still of the current view — see renderStill below. */
+  renderStill: (opts: StillOptions) => Promise<Blob>;
 };
+
+export type StillBackground = "studio" | "white" | "transparent";
+type StillOptions = { width: number; background: StillBackground };
+
+/** Longest side of a still. Under every GPU's drawing-buffer limit (4096). */
+const STILL_WIDTH = 2400;
 
 /** A point worth marking on the model — currently only its center of mass. */
 export type ModelHotspot = {
@@ -79,12 +87,21 @@ export function ModelViewer({
    * spend one.
    */
   hotspot,
+  /**
+   * Offered beside Download on a render — the configurator keeps one as the
+   * configuration's picture. Omitted, a render can only be downloaded.
+   */
+  onSaveRender,
+  /** File name for a downloaded render, without extension. */
+  renderName,
 }: {
   src: string;
   label: string;
   height?: number;
   poster?: string;
   hotspot?: ModelHotspot;
+  onSaveRender?: { label: string; save: (image: Blob) => Promise<void> };
+  renderName?: string;
 }) {
   const [status, setStatus] = React.useState<Status>("idle");
   const [error, setError] = React.useState<string | null>(null);
@@ -92,6 +109,8 @@ export function ModelViewer({
   const [ortho, setOrthoState] = React.useState(false);
   const [wire, setWireState] = React.useState(false);
   const [edgesAvailable, setEdgesAvailable] = React.useState(true);
+  // A render: null when closed; the image once made.
+  const [still, setStill] = React.useState<{ background: StillBackground; url: string | null; blob: Blob | null; busy: boolean; error: string | null; saved: string | null } | null>(null);
 
   const mountRef = React.useRef<HTMLDivElement>(null);
   const apiRef = React.useRef<SceneApi | null>(null);
@@ -298,7 +317,113 @@ export function ModelViewer({
           invalidate();
         };
 
+        /* ------------------------------ stills ------------------------------
+         *
+         * A studio render of whatever view is on screen, on this same renderer
+         * (a second WebGL context could not share the environment map): for
+         * one frame, a key light that casts a soft shadow onto an invisible
+         * floor, more environment light and no outlines, at STILL_WIDTH; then
+         * everything is put back. The model is Y-up, as the configurator's is.
+         */
+        const floor = new THREE.Mesh(
+          new THREE.PlaneGeometry(radius * 40, radius * 40),
+          new THREE.ShadowMaterial({ opacity: 0.22 })
+        );
+        floor.rotation.x = -Math.PI / 2;
+        floor.position.set(center.x, box.min.y - radius * 0.002, center.z);
+        floor.receiveShadow = true;
+        floor.visible = false;
+        scene.add(floor);
+        const key = new THREE.DirectionalLight(0xffffff, 1.6);
+        key.position.set(center.x + radius * 1.6, center.y + radius * 3.2, center.z + radius * 2.2);
+        key.target.position.copy(center);
+        key.castShadow = true;
+        key.shadow.mapSize.set(2048, 2048);
+        key.shadow.radius = 6;
+        key.shadow.bias = -0.0004;
+        key.shadow.normalBias = radius * 0.004;
+        const sc = key.shadow.camera as THREE.OrthographicCamera;
+        sc.left = -radius * 2.2; sc.right = radius * 2.2; sc.top = radius * 2.2; sc.bottom = -radius * 2.2;
+        sc.near = radius * 0.1; sc.far = radius * 10;
+        key.visible = false;
+        scene.add(key, key.target);
+        for (const m of meshes) { m.castShadow = true; m.receiveShadow = true; }
+
+        const renderStill = async ({ width, background }: StillOptions): Promise<Blob> => {
+          const w0 = mount.clientWidth || 1, h0 = mount.clientHeight || 1;
+          const w = Math.round(width), h = Math.round(width * (h0 / w0));
+          const before = {
+            ratio: renderer.getPixelRatio(), env: scene.environmentIntensity, head: headlight.intensity,
+            fill: fill.intensity, edges: edgeLines.map((l) => l.visible), exposure: renderer.toneMappingExposure,
+          };
+          renderer.shadowMap.enabled = true;
+          renderer.shadowMap.type = THREE.PCFShadowMap;
+          for (const m of meshes) for (const mat of Array.isArray(m.material) ? m.material : [m.material]) mat.needsUpdate = true;
+          /*
+           * The key light sits high and to the camera's left, a little behind
+           * the model, so its shadow falls forward and to the right — where the
+           * camera can see it — rather than hiding behind the model.
+           */
+          const toCam = camera.position.clone().sub(center).setY(0);
+          if (toCam.lengthSq() < 1e-12) toCam.set(0, 0, 1);
+          toCam.normalize();
+          const camLeft = new THREE.Vector3(-toCam.z, 0, toCam.x);
+          key.position.copy(center)
+            .addScaledVector(new THREE.Vector3(0, 1, 0), radius * 3.4)
+            .addScaledVector(camLeft, radius * 1.5)
+            .addScaledVector(toCam, -radius * 0.6);
+          key.target.position.copy(center);
+          key.target.updateMatrixWorld();
+          floor.visible = true; key.visible = true;
+          scene.environmentIntensity = 0.42;
+          headlight.intensity = 0.45; fill.intensity = 0.18;
+          renderer.toneMappingExposure = 0.95;
+          for (const l of edgeLines) l.visible = false;
+          renderer.setPixelRatio(1);
+          renderer.setSize(w, h, false);
+          perspective.aspect = w / h;
+          perspective.updateProjectionMatrix();
+          if (camera === orthographic) {
+            const half = radius * 1.15;
+            orthographic.left = -half * (w / h); orthographic.right = half * (w / h);
+            orthographic.updateProjectionMatrix();
+          }
+          let url = "";
+          try {
+            renderer.setClearColor(0x000000, 0);
+            renderer.render(scene, camera);
+            // Read now, before the browser may clear the drawing buffer.
+            const out = document.createElement("canvas");
+            out.width = w; out.height = h;
+            const ctx = out.getContext("2d")!;
+            if (background === "studio") {
+              const g = ctx.createRadialGradient(w / 2, h * 0.42, h * 0.1, w / 2, h * 0.5, Math.max(w, h) * 0.75);
+              g.addColorStop(0, "#ffffff");
+              g.addColorStop(1, "#dfe3e8");
+              ctx.fillStyle = g;
+              ctx.fillRect(0, 0, w, h);
+            } else if (background === "white") {
+              ctx.fillStyle = "#ffffff";
+              ctx.fillRect(0, 0, w, h);
+            }
+            ctx.drawImage(renderer.domElement, 0, 0, w, h);
+            url = out.toDataURL(background === "transparent" ? "image/png" : "image/jpeg", 0.92);
+          } finally {
+            renderer.shadowMap.enabled = false;
+            for (const m of meshes) for (const mat of Array.isArray(m.material) ? m.material : [m.material]) mat.needsUpdate = true;
+            floor.visible = false; key.visible = false;
+            scene.environmentIntensity = before.env;
+            headlight.intensity = before.head; fill.intensity = before.fill;
+            renderer.toneMappingExposure = before.exposure;
+            edgeLines.forEach((l, i) => { l.visible = before.edges[i]; });
+            renderer.setPixelRatio(before.ratio);
+            resize();
+          }
+          return await (await fetch(url)).blob();
+        };
+
         apiRef.current = {
+          renderStill,
           setView,
           fit: () => setView("iso"),
           setEdges: (on) => {
@@ -382,6 +507,9 @@ export function ModelViewer({
           });
           for (const l of edgeLines) l.geometry.dispose();
           edgeMaterial.dispose();
+          floor.geometry.dispose();
+          (floor.material as THREE.Material).dispose();
+          key.shadow.map?.dispose();
           envTexture.dispose();
           pmrem.dispose();
           renderer.dispose();
@@ -456,6 +584,27 @@ export function ModelViewer({
         <a className="btn btn-sm" href={src} download>Download the model instead</a>
       </div>
     );
+  }
+
+  async function makeStill(background: StillBackground) {
+    const api = apiRef.current;
+    if (!api) return;
+    setStill((x) => ({ background, url: x?.url ?? null, blob: null, busy: true, error: null, saved: null }));
+    // Let the overlay paint before the frame that blocks the main thread.
+    await new Promise((r) => setTimeout(r, 30));
+    try {
+      const blob = await api.renderStill({ width: STILL_WIDTH, background });
+      setStill((x) => {
+        if (x?.url) URL.revokeObjectURL(x.url);
+        return { background, url: URL.createObjectURL(blob), blob, busy: false, error: null, saved: null };
+      });
+    } catch (e: any) {
+      setStill((x) => x && { ...x, busy: false, error: `The render failed: ${String(e?.message ?? e)}` });
+    }
+  }
+
+  function closeStill() {
+    setStill((x) => { if (x?.url) URL.revokeObjectURL(x.url); return null; });
   }
 
   const ready = status === "ready";
@@ -564,6 +713,73 @@ export function ModelViewer({
           >
             Ortho
           </button>
+          <button
+            className="btn btn-sm" style={chip(Boolean(still))}
+            onClick={() => void makeStill(still?.background ?? "studio")}
+            title="A studio-lit, high-resolution image of this view — soft shadow, clean background"
+          >
+            Render
+          </button>
+        </div>
+      )}
+
+      {still && (
+        <div
+          style={{
+            position: "absolute", inset: 0, background: "rgba(10,12,16,0.72)", display: "flex",
+            flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 8, padding: 12,
+          }}
+        >
+          <div style={{ flex: 1, minHeight: 0, width: "100%", display: "flex", alignItems: "center", justifyContent: "center" }}>
+            {still.url ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img
+                src={still.url} alt={`Render of ${label}`}
+                style={{
+                  maxWidth: "100%", maxHeight: "100%", borderRadius: 6, boxShadow: "0 2px 12px rgba(0,0,0,0.4)",
+                  // A checkerboard behind a transparent render, so the transparency shows.
+                  background: still.background === "transparent"
+                    ? "repeating-conic-gradient(#d5d8dd 0% 25%, #f3f4f6 0% 50%) 50% / 16px 16px" : undefined,
+                }}
+              />
+            ) : (
+              <span style={{ color: "#fff", fontSize: 12.5 }}>{still.error ?? "Rendering…"}</span>
+            )}
+          </div>
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", justifyContent: "center", alignItems: "center" }}>
+            {(["studio", "white", "transparent"] as const).map((b) => (
+              <button key={b} className="btn btn-sm" style={chip(still.background === b)} disabled={still.busy}
+                onClick={() => void makeStill(b)}>
+                {b === "studio" ? "Studio" : b === "white" ? "White" : "Transparent"}
+              </button>
+            ))}
+            <span style={{ width: 8 }} />
+            {still.url && (
+              <a className="btn btn-sm" style={chip()} href={still.url}
+                download={`${renderName || label}.${still.background === "transparent" ? "png" : "jpg"}`}>
+                Download
+              </a>
+            )}
+            {onSaveRender && still.blob && (
+              <button className="btn btn-sm btn-primary" disabled={still.busy || still.saved !== null}
+                onClick={async () => {
+                  setStill((x) => x && { ...x, busy: true, error: null });
+                  try {
+                    await onSaveRender.save(still.blob!);
+                    setStill((x) => x && { ...x, busy: false, saved: "Saved." });
+                  } catch (e: any) {
+                    setStill((x) => x && { ...x, busy: false, error: String(e?.message ?? e) });
+                  }
+                }}>
+                {still.saved ?? onSaveRender.label}
+              </button>
+            )}
+            <button className="btn btn-sm" style={chip()} onClick={closeStill}>Close</button>
+          </div>
+          {still.error && still.url && <span style={{ color: "#ffb4b4", fontSize: 12 }}>{still.error}</span>}
+          <span style={{ color: "rgba(255,255,255,0.7)", fontSize: 11.5 }}>
+            Rendered from the view you had — close, turn the model, and render again for another angle.
+          </span>
         </div>
       )}
     </div>

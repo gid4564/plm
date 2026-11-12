@@ -422,6 +422,18 @@ in (the assembly as synced, else the product most of the document's parts
 belong to), else Unassigned. Choosing a product for a model moves everything
 the configurator made for it.
 
+**Renders (12 Nov 2026).** Onshape's API has no Render Studio endpoint — only
+shaded views and thumbnails (checked against the published OpenAPI). So PLM
+renders the GLB it already keeps: `ModelViewer`'s *Render* draws one frame of
+the current view on the viewer's own renderer with a shadow-casting key light
+(placed from the camera so the shadow falls into view), an invisible shadow
+floor, more environment light and no outlines, at 2400 px, composited on a
+studio gradient, white or transparent. *Use as picture* stores it as the
+item's picture (Onshape's is kept in `onshapePicture` for *Restore*) and the
+assembly's thumbnail; `pictureVersion` versions the picture URL, which is
+cached immutably. Path tracing in the browser, or Blender on the server for
+automatic photoreal renders, are the next steps if wanted.
+
 **Names.** Any configuration can be named ("Touring case, 1000 mm"); its PLM
 assembly takes the name (PLM's own part — nothing goes to Onshape), and an
 empty name goes back to the model's.

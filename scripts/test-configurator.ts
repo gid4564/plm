@@ -47,7 +47,7 @@ import { boxGlb, composeGlb, parseGltf, toColumnMajor } from "../src/lib/gltf-co
 import type { AssemblyCoords } from "../src/lib/onshape/types";
 import { PartGeometry } from "../src/lib/models";
 import { readGeometryBytes } from "../src/lib/geometry";
-import { clearConfigurator, clearPreview, listModels, nameItem, previewModel, removeModel, setModelProduct } from "../src/lib/configurator";
+import { clearConfigurator, clearPreview, listModels, nameItem, previewModel, removeModel, restorePicture, setItemPicture, setModelProduct } from "../src/lib/configurator";
 import { resolveProduct } from "../src/lib/products";
 
 let passed = 0, failed = 0;
@@ -441,6 +441,24 @@ async function main() {
   check("but not the part PLM had before", String((await Part.findById(before._id).lean() as any)?.productId) === flightCaseProduct.productId);
   check("and new configurations follow the choice",
     (await listModels(eid)).some((m) => m.productName === "Cases 2027" && m.productChosen));
+
+  console.log("\nA studio render as the picture");
+  const onshapePic = (await itemPicture(eid, first.item!.id))!.data;
+  const jpeg = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff]), Buffer.alloc(2000, 7)]);
+  const v0 = (await getItem(eid, first.item!.id))!.pictureVersion;
+  const rendered = await setItemPicture(eid, first.item!.id, jpeg, "image/jpeg");
+  const now = await itemPicture(eid, first.item!.id);
+  check("replaces the picture", now?.contentType === "image/jpeg" && now.data.equals(jpeg) && rendered?.rendered === true);
+  check("with a new version, so its cached URL changes", (rendered?.pictureVersion ?? 0) === v0 + 1);
+  check("and becomes the PLM assembly's thumbnail",
+    Boolean(await PartThumbnail.exists({ partId: big?.partId, contentType: "image/jpeg" })));
+  await setItemPicture(eid, first.item!.id, Buffer.concat([jpeg, jpeg]), "image/jpeg");
+  const restored = await restorePicture(eid, first.item!.id);
+  check("Onshape's picture can be put back, even after two renders",
+    (await itemPicture(eid, first.item!.id))!.data.equals(onshapePic) && restored?.rendered === false);
+  refused = "";
+  await setItemPicture(eid, first.item!.id, Buffer.from("<svg/>"), "image/svg+xml").catch((e) => { refused = e.message; });
+  check("only images of the kinds a render makes are accepted", /PNG, JPEG or WebP/.test(refused), refused);
 
   console.log("\nNaming a configuration");
   const named = await nameItem(eid, first.item!.id, "  Touring   case ");
