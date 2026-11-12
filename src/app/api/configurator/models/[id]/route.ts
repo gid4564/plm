@@ -1,6 +1,6 @@
 import { requireSession } from "@/lib/auth/session";
 import { handler, ok, fail } from "@/lib/api";
-import { ConfigurationError, getModel, listItems, setModelEnabled, setModelProduct } from "@/lib/configurator";
+import { ConfigurationError, getModel, listItems, removeModel, setModelEnabled, setModelProduct } from "@/lib/configurator";
 
 type Ctx = { params: Promise<{ id: string }> };
 
@@ -32,4 +32,20 @@ export const PATCH = handler(async (req: Request, ctx: Ctx) => {
     throw err;
   }
   return ok({ enabled: body.enabled });
+});
+
+/**
+ * Remove a model: its configurations and what the configurator made for them
+ * (as Reset), then the model itself. Admin only.
+ */
+export const DELETE = handler(async (_req: Request, ctx: Ctx) => {
+  const s = await requireSession();
+  if (s.role !== "admin") return fail("Only an admin can remove a configurable model.", 403);
+  const { id } = await ctx.params;
+  try {
+    return ok({ result: await removeModel(s.enterpriseId, id, s.email) });
+  } catch (err: any) {
+    if (err instanceof ConfigurationError) return fail(err.message, 409);
+    throw err;
+  }
 });

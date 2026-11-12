@@ -349,6 +349,15 @@ For demos: start a model again from nothing. An admin's **Reset** removes
 - and, when no configuration of any model is left, sets the CFG counter back
   so the next one is CFG-00001 again.
 
+**Remove** a model is a reset followed by deleting the model; **Clear
+everything** removes every model. A part kept because something else uses it
+loses its `configuredFrom` mark, as the model it named is gone.
+
+Registering refuses a document with no version, and a version whose
+configuration has no inputs — the preview reads the link's workspace, and a
+version made before the configuration was added reads as unconfigured (seen
+live, 12 Nov 2026: a "Dumbbells" model registered with no inputs).
+
 Kept: a part PLM had before the configurator used it (it is reused, never
 marked); a released part; a part some other assembly uses — and what is inside
 that part. Nothing in Onshape changes, because nothing was written there. The

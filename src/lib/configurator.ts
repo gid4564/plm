@@ -141,8 +141,19 @@ export async function previewModel(enterpriseId: string, url: string, given?: On
   const inputs = parseDefinition(payload);
   if (inputs.length === 0) throw new ConfigurationError("That assembly has no configuration to choose from.");
 
+  // A model is read at a version, and a version made before the configuration
+  // was added has none: the workspace shows inputs the model would not get.
+  // Checked here for the newest version, which is what is offered first.
+  let newestVersionInputs: number | null = null;
+  if (at.wvType === "w" && versions[0]) {
+    newestVersionInputs = parseDefinition(await client.getConfigurationPayload({
+      documentId: at.documentId, elementId: at.elementId, versionId: versions[0].id, workspaceId: null,
+    }).catch(() => null)).length;
+  }
+
   return {
     ...at,
+    newestVersionInputs,
     documentName: doc.name || (client.mode === "mock" ? "Flight Case (simulated)" : ""),
     elementName: el?.name || (client.mode === "mock" ? "Case Assembly" : ""),
     versions,
@@ -154,9 +165,9 @@ export async function previewModel(enterpriseId: string, url: string, given?: On
  * Make a model configurable, read at the version given.
  *
  * A link already at a version uses it. A workspace link needs a version named;
- * without one, the newest is used — a workspace is accepted only when the
- * document has no versions at all, and the model says so, because its cached
- * configurations can then go stale.
+ * without one, the newest is used. Refused when the document has no version,
+ * or the version chosen has no configuration (it predates it) — a model read
+ * from a workspace would go stale, and one with no inputs configures nothing.
  */
 export async function registerModel(
   enterpriseId: string,
@@ -168,16 +179,31 @@ export async function registerModel(
   const client = given ?? (await clientForEnterprise(enterpriseId)).client;
   const p = await previewModel(enterpriseId, input.url, client);
 
-  let versionId: string | null = p.wvType === "v" ? p.wvId : input.versionId || p.versions[0]?.id || null;
+  const versionId: string | null = p.wvType === "v" ? p.wvId : input.versionId || p.versions[0]?.id || null;
   const version = p.versions.find((v) => v.id === versionId);
   if (input.versionId && !version && p.wvType !== "v") {
     throw new ConfigurationError("That version is not one of this document's.");
   }
-  const workspaceId = versionId ? null : p.wvType === "w" ? p.wvId : null;
+  // Only ever a version: a workspace changes under the cached configurations.
+  if (!versionId) {
+    throw new ConfigurationError(
+      "This document has no versions yet. Create a version in Onshape (with the configuration in it), then add the model again."
+    );
+  }
+  const workspaceId = null;
 
   const payload = await client.getConfigurationPayload({
     documentId: p.documentId, elementId: p.elementId, versionId, workspaceId,
   });
+  // Read at the version, not the workspace the preview saw: a version made
+  // before the configuration was added has no inputs, and a model of it
+  // could configure nothing.
+  if (parseDefinition(payload).length === 0) {
+    throw new ConfigurationError(
+      `At version ${version?.name ? `"${version.name}"` : versionId} this assembly has no configuration — it was ` +
+      `probably added after that version. Create a new version in Onshape, then add the model again.`
+    );
+  }
 
   const model: any = await ConfigurableModel.create({
     enterpriseId,
@@ -925,4 +951,51 @@ export async function resetModel(enterpriseId: string, modelId: string, actorEma
     configurations, partsRemoved, cfgCounterReset,
     partsKept: [...kept].map(([id, reason]) => ({ number: numberOf.get(id) ?? id, reason })),
   };
+}
+
+/* -------------------------------- Removing ------------------------------- */
+
+/**
+ * Remove a model from the configurator: a Reset (its configurations and the
+ * PLM parts made for them, under the same rules — parts PLM had before,
+ * released parts and parts used elsewhere stay), then the model itself. A part
+ * that stays is no longer marked as the configurator's, since the model it
+ * pointed at is gone.
+ */
+export async function removeModel(enterpriseId: string, modelId: string, actorEmail: string) {
+  const reset = await resetModel(enterpriseId, modelId, actorEmail);
+  await Part.updateMany({ enterpriseId, "configuredFrom.modelId": new Types.ObjectId(modelId) }, { $set: { configuredFrom: null } });
+  await ConfigurableModel.deleteOne({ _id: modelId, enterpriseId });
+  return reset;
+}
+
+/** What clearing the whole configurator would remove, for the confirmation. */
+export async function clearPreview(enterpriseId: string) {
+  await connectDb();
+  const models: any[] = await ConfigurableModel.find({ enterpriseId }).select("_id").lean();
+  const ids = models.map((m) => m._id);
+  const [configurations, parts] = await Promise.all([
+    ConfiguredItem.countDocuments({ enterpriseId, modelId: { $in: ids } }),
+    Part.countDocuments({ enterpriseId, "configuredFrom.modelId": { $in: ids } }),
+  ]);
+  return { models: models.length, configurations, parts };
+}
+
+/**
+ * Clear the configurator for a demo from scratch: every model removed, with
+ * its configurations and the parts made for them; CFG numbering starts again.
+ */
+export async function clearConfigurator(enterpriseId: string, actorEmail: string) {
+  await connectDb();
+  const models: any[] = await ConfigurableModel.find({ enterpriseId }).select("_id").lean();
+  const total = { models: 0, configurations: 0, partsRemoved: 0, partsKept: [] as ResetResult["partsKept"], cfgCounterReset: false };
+  for (const m of models) {
+    const r = await removeModel(enterpriseId, String(m._id), actorEmail);
+    total.models++;
+    total.configurations += r.configurations;
+    total.partsRemoved += r.partsRemoved;
+    total.partsKept.push(...r.partsKept);
+    total.cfgCounterReset = r.cfgCounterReset;
+  }
+  return total;
 }

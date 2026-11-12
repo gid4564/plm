@@ -14,6 +14,8 @@ type Model = {
 type Preview = {
   documentName: string; elementName: string; wvType: string;
   versions: { id: string; name: string; createdAt: string }[];
+  /** Inputs the newest version has — 0 when it predates the configuration. */
+  newestVersionInputs: number | null;
   inputs: { name: string; kind: string }[];
 };
 
@@ -89,6 +91,66 @@ export function ModelsClient({ isAdmin }: { isAdmin: boolean }) {
     await load();
   }
 
+  const plural = (n: number, w: string) => `${n} ${w}${n === 1 ? "" : "s"}`;
+
+  /** Remove one model and what the configurator made for it. */
+  async function remove(m: Model) {
+    setError(null); setNotice(null);
+    const pr = await fetch(`/api/configurator/models/${m.id}/reset`);
+    const pj = await pr.json();
+    if (!pr.ok) { setError(pj.error || "Could not check what removing it would delete"); return; }
+    const { configurations, parts } = pj.preview;
+    if (!window.confirm(
+      `Remove "${m.name}" from the configurator?\n\nThis deletes the model, its ${plural(configurations, "configuration")} ` +
+      `and the ${plural(parts, "PLM part")} and assemblies the configurator made for them. Parts PLM had before, released ` +
+      `parts and parts used elsewhere are kept. Nothing in Onshape is changed. This cannot be undone.`
+    )) return;
+    setBusy(`remove-${m.id}`);
+    try {
+      const r = await fetch(`/api/configurator/models/${m.id}`, { method: "DELETE" });
+      const j = await r.json();
+      if (!r.ok) throw new Error(j.error || "Could not remove the model");
+      setNotice(`Removed "${m.name}" with ${plural(j.result.configurations, "configuration")} and ${plural(j.result.partsRemoved, "part")}.`);
+      await load();
+    } catch (e: any) {
+      setError(String(e?.message ?? e));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  /** Clear the whole configurator, for a demo from scratch. */
+  async function clearAll() {
+    setError(null); setNotice(null);
+    const pr = await fetch("/api/configurator/clear");
+    const pj = await pr.json();
+    if (!pr.ok) { setError(pj.error || "Could not check what clearing would delete"); return; }
+    const { models: n, configurations, parts } = pj.preview;
+    if (!window.confirm(
+      `Clear the configurator?\n\nThis deletes ${n === 1 ? "the" : "all"} ${plural(n, "model")}, ${n === 1 ? "its" : "their"} ${plural(configurations, "configuration")} and the ` +
+      `${plural(parts, "PLM part")} and assemblies the configurator made, and starts CFG numbering again at CFG-00001. ` +
+      `Parts PLM had before, released parts and parts used elsewhere are kept. Nothing in Onshape is changed. ` +
+      `This cannot be undone.`
+    )) return;
+    setBusy("clear");
+    try {
+      const r = await fetch("/api/configurator/clear", { method: "POST" });
+      const j = await r.json();
+      if (!r.ok) throw new Error(j.error || "Could not clear the configurator");
+      const x = j.result;
+      setNotice(
+        `Cleared: ${plural(x.models, "model")}, ${plural(x.configurations, "configuration")} and ${plural(x.partsRemoved, "part")} removed` +
+        (x.partsKept.length ? `; kept ${x.partsKept.map((k: any) => `${k.number} (${k.reason})`).join(", ")}` : "") +
+        ". Ready to add models from scratch."
+      );
+      await load();
+    } catch (e: any) {
+      setError(String(e?.message ?? e));
+    } finally {
+      setBusy(null);
+    }
+  }
+
   async function toggle(m: Model) {
     const r = await fetch(`/api/configurator/models/${m.id}`, {
       method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ enabled: !m.enabled }),
@@ -137,12 +199,20 @@ export function ModelsClient({ isAdmin }: { isAdmin: boolean }) {
 
   return (
     <div style={{ display: "grid", gap: 16 }}>
+      <div style={{ display: "flex", gap: 12, alignItems: "flex-start", justifyContent: "space-between", flexWrap: "wrap" }}>
       <div>
         <h1 style={{ margin: "0 0 3px", fontSize: 20 }}>Configurator</h1>
         <p style={{ margin: 0, fontSize: 13, color: "var(--text-muted)" }}>
           Pick a model, choose its options, and see the result. Each configuration is generated in
           Onshape once and kept in PLM, with its own CFG number.
         </p>
+      </div>
+      {isAdmin && (models?.length ?? 0) > 0 && (
+        <button className="btn btn-sm btn-danger" onClick={clearAll} disabled={busy !== null}
+          title="Remove every model, its configurations and the parts the configurator made — to start a demo from scratch">
+          {busy === "clear" ? <Spinner /> : "Clear everything…"}
+        </button>
+      )}
       </div>
 
       {error && <Alert kind="error" onDismiss={() => setError(null)}>{error}</Alert>}
@@ -193,6 +263,10 @@ export function ModelsClient({ isAdmin }: { isAdmin: boolean }) {
                       title="Delete every configuration of this model and the PLM parts made for them">
                       {busy === `reset-${m.id}` ? <Spinner /> : "Reset"}
                     </button>
+                    <button className="btn btn-sm btn-danger" onClick={() => remove(m)} disabled={busy !== null}
+                      title="Remove this model, its configurations and the PLM parts made for them">
+                      {busy === `remove-${m.id}` ? <Spinner /> : "Remove"}
+                    </button>
                   </>
                 )}
               </div>
@@ -238,14 +312,27 @@ export function ModelsClient({ isAdmin }: { isAdmin: boolean }) {
                       ))}
                     </select>
                   ) : (
-                    <Alert kind="warn">
-                      This document has no versions, so the model will be read from the workspace and its
-                      configurations can go stale. Create a version in Onshape first if you can.
+                    <Alert kind="error">
+                      This document has no versions yet. Create a version in Onshape — after the configuration
+                      is set up — then read the link again.
+                    </Alert>
+                  )}
+                  {preview.versions.length > 0 && preview.newestVersionInputs === 0 && versionId === preview.versions[0]?.id && (
+                    <Alert kind="error">
+                      The newest version, {preview.versions[0].name || "unnamed"}, has no configuration — it was made
+                      before the configuration was added. Create a new version in Onshape, then read the link again.
                     </Alert>
                   )}
                 </>
               )}
-              <button className="btn btn-primary btn-sm" style={{ justifySelf: "start" }} onClick={add} disabled={busy !== null || !name.trim()}>
+              <button
+                className="btn btn-primary btn-sm" style={{ justifySelf: "start" }} onClick={add}
+                disabled={
+                  busy !== null || !name.trim() ||
+                  (preview.wvType !== "v" && preview.versions.length === 0) ||
+                  (preview.newestVersionInputs === 0 && versionId === preview.versions[0]?.id)
+                }
+              >
                 {busy === "add" ? <Spinner /> : "Add model"}
               </button>
             </div>

@@ -599,7 +599,10 @@ Onshape assembly and see the result, without opening Onshape.
 - **Adding a model** (admins): paste the assembly's link, choose the version to
   read it at, and name it. Reading a version rather than the workspace keeps
   generated configurations correct when someone edits the model. A model can be
-  switched off without losing its configurations.
+  switched off without losing its configurations. The document needs a
+  version **made after the configuration was set up**: a document with no
+  versions, or a version with no configuration in it, is refused with what to
+  do (create a version in Onshape, then read the link again).
 
 - **Bill of materials.** Under the picture, the configuration's BOM exactly as
   Onshape reports it for those choices: indented, with subassemblies and their
@@ -625,6 +628,9 @@ Onshape assembly and see the result, without opening Onshape.
   configurations. Parts PLM had before, released parts and parts used by
   another assembly are kept. Meant for starting a demo again; it cannot be
   undone.
+- **Remove** (admins) does the same and takes the model off the Configurator
+  page. **Clear everything…** at the top removes every model, so a demo can
+  start from scratch by adding models again.
 
 - **3D.** Once a configuration is in PLM its 3D model is built — usually
   seconds after the BOM — and *3D* beside *Picture* turns it in the viewer.

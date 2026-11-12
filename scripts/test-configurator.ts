@@ -44,9 +44,10 @@ import {
 } from "../src/lib/configurator";
 import FLIGHT_CASE from "../src/lib/onshape/mock-configuration.json";
 import { boxGlb, composeGlb, parseGltf, toColumnMajor } from "../src/lib/gltf-compose";
+import type { AssemblyCoords } from "../src/lib/onshape/types";
 import { PartGeometry } from "../src/lib/models";
 import { readGeometryBytes } from "../src/lib/geometry";
-import { listModels, nameItem, setModelProduct } from "../src/lib/configurator";
+import { clearConfigurator, clearPreview, listModels, nameItem, previewModel, removeModel, setModelProduct } from "../src/lib/configurator";
 import { resolveProduct } from "../src/lib/products";
 
 let passed = 0, failed = 0;
@@ -179,6 +180,26 @@ async function main() {
   await registerModel(eid, actor, { url: "https://cad.onshape.com/documents/nope" }, client).catch((e) => { refused = e.message; });
   check("a link that is not an assembly link is refused", /not an Onshape assembly link/.test(refused), refused);
   const url = "https://cad.onshape.com/documents/1c13dd44517cceffafef6ccd/w/a1534686b2a18cccbb2e4ffd/e/c77656776ef68e2ab240e460";
+
+  // The live mistake (12 Nov 2026): the workspace has the configuration, the
+  // newest version predates it — the model was registered with no inputs.
+  class OldVersionClient extends MockOnshapeClient {
+    async getConfigurationPayload(c?: AssemblyCoords): Promise<Record<string, unknown>> {
+      return c?.versionId ? { configurationParameters: [] } : super.getConfigurationPayload();
+    }
+  }
+  class NoVersionClient extends MockOnshapeClient {
+    async listVersions() { return []; }
+  }
+  refused = "";
+  await registerModel(eid, actor, { url }, new OldVersionClient(COMPANY)).catch((e) => { refused = e.message; });
+  check("a version made before the configuration is refused, saying why", /no configuration.*new version/i.test(refused), refused);
+  check("and the preview warns before anyone presses Add",
+    (await previewModel(eid, url, new OldVersionClient(COMPANY))).newestVersionInputs === 0);
+  refused = "";
+  await registerModel(eid, actor, { url }, new NoVersionClient(COMPANY)).catch((e) => { refused = e.message; });
+  check("a document with no version is refused, not read from the workspace", /no versions yet/i.test(refused), refused);
+  check("neither left a model behind", (await ConfigurableModel.countDocuments({ enterpriseId: eid })) === 0);
   const { id: modelId } = await registerModel(eid, actor, { url, name: "Flight Case" }, client);
   const model: any = await ConfigurableModel.findById(modelId).lean();
   check("registered at the newest version, not the workspace", model.versionId === "a0000000000000000000000a" && !model.workspaceId,
@@ -452,6 +473,29 @@ async function main() {
   await ConfigurableModel.updateOne({ _id: modelId }, { $set: { enabled: true } });
   const anew = await requestConfiguration(eid, actor, modelId, choice, { client, wait: true });
   check("the next configuration is CFG-00001 again", (await getItem(eid, anew.item!.id))?.number === "CFG-00001");
+
+  /* -------------------------------------------------------------------- */
+  console.log("\nRemoving a model, and clearing the configurator");
+  const second = await registerModel(eid, actor, { url, name: "Second" }, client);
+  await requestConfiguration(eid, actor, second.id, {}, { client, wait: true });
+  const doomed = await requestConfiguration(eid, actor, modelId, { [by("Size").id]: by("Size").options[1].value }, { client, wait: true });
+  void doomed;
+  const removed = await removeModel(eid, second.id, actor.email);
+  check("removing a model deletes it and its configurations",
+    !(await ConfigurableModel.exists({ _id: second.id })) && removed.configurations === 1 &&
+    (await ConfiguredItem.countDocuments({ modelId: second.id })) === 0);
+  check("and the parts it made, leaving the other model's", (await Part.countDocuments({ enterpriseId: eid, "configuredFrom.modelId": second.id })) === 0 &&
+    (await Part.countDocuments({ enterpriseId: eid, "configuredFrom.modelId": modelId })) > 0);
+  const cp = await clearPreview(eid);
+  check("clearing says what it will remove", cp.models === 1 && cp.configurations >= 1 && cp.parts > 0, JSON.stringify(cp));
+  const cleared = await clearConfigurator(eid, actor.email);
+  check("clearing removes every model", cleared.models === 1 && (await ConfigurableModel.countDocuments({ enterpriseId: eid })) === 0);
+  check("every configuration", (await ConfiguredItem.countDocuments({ enterpriseId: eid })) === 0);
+  check("and every part the configurator made, except ones used elsewhere — now unmarked",
+    (await Part.countDocuments({ enterpriseId: eid, configuredFrom: { $ne: null } })) === 0, JSON.stringify(cleared.partsKept));
+  check("the part PLM had before stays", Boolean(await Part.exists({ _id: before._id })));
+  check("and CFG numbering starts again", cleared.cfgCounterReset &&
+    (await NumberingSequence.findOne({ enterpriseId: eid, type: "CONFIGURATION" }).lean() as any)?.counter === 0);
 
   console.log(`\n${passed} passed, ${failed} failed`);
   process.exit(failed ? 1 : 0);
